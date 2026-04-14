@@ -8,6 +8,7 @@ import { websocketManager } from './services/websocketService';
 
 
 import watcherLogo from './assets/watcherlogo.png';
+import './styles/preview-modal.css';
 
 declare global {
   interface Window {

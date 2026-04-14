@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { getTemplates, addTemplate, updateTemplate, deleteTemplate, type EmailTemplate } from '../../services/templateService';
+import HtmlPreviewModal from '../shared/HtmlPreviewModal';
 
 /** Build srcDoc for HTML preview: full documents pass through; fragments get a safe wrapper. */
 function buildHtmlSrcDoc(html: string): string {
@@ -40,6 +41,7 @@ const TemplateManagerView: React.FC = () => {
   const [fType, setFType] = useState<'html' | 'plain'>('html');
   const [showEditorPreview, setShowEditorPreview] = useState(true);
   const [libraryPreview, setLibraryPreview] = useState<EmailTemplate | null>(null);
+  const [fullPreview, setFullPreview] = useState<{ srcDoc: string; title: string } | null>(null);
 
   const reload = async () => {
     setTemplates(await getTemplates());
@@ -145,10 +147,22 @@ const TemplateManagerView: React.FC = () => {
             <label className="form-label" style={{ margin: 0 }}>
               Body
             </label>
-            <button type="button" className="action-btn secondary" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => setShowEditorPreview(!showEditorPreview)}>
-              <i className={`fas fa-${showEditorPreview ? 'eye-slash' : 'eye'}`}></i>{' '}
-              {showEditorPreview ? 'Hide preview' : 'Show preview'}
-            </button>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button type="button" className="action-btn secondary" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => setShowEditorPreview(!showEditorPreview)}>
+                <i className={`fas fa-${showEditorPreview ? 'eye-slash' : 'eye'}`}></i>{' '}
+                {showEditorPreview ? 'Hide preview' : 'Show preview'}
+              </button>
+              {fType === 'html' && fBody.trim() && (
+                <button
+                  type="button"
+                  className="action-btn secondary"
+                  style={{ fontSize: 12, padding: '4px 10px' }}
+                  onClick={() => setFullPreview({ srcDoc: buildHtmlSrcDoc(fBody), title: fName || 'Template Preview' })}
+                >
+                  <i className="fas fa-expand"></i> Fullscreen
+                </button>
+              )}
+            </div>
           </div>
 
           <div
@@ -274,9 +288,21 @@ const TemplateManagerView: React.FC = () => {
                   ({libraryPreview.type})
                 </span>
               </span>
-              <button type="button" className="icon-btn small" onClick={() => setLibraryPreview(null)} aria-label="Close preview">
-                <i className="fas fa-times"></i>
-              </button>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {libraryPreview.type === 'html' && (
+                  <button
+                    type="button"
+                    className="icon-btn small"
+                    onClick={() => setFullPreview({ srcDoc: buildHtmlSrcDoc(libraryPreview.body), title: libraryPreview.name })}
+                    title="Fullscreen preview"
+                  >
+                    <i className="fas fa-expand"></i>
+                  </button>
+                )}
+                <button type="button" className="icon-btn small" onClick={() => setLibraryPreview(null)} aria-label="Close preview">
+                  <i className="fas fa-times"></i>
+                </button>
+              </div>
             </div>
             <div className="feature-muted" style={{ marginBottom: 10 }}>
               Subject: {applyPreviewPlaceholders(libraryPreview.subject)}
@@ -307,6 +333,14 @@ const TemplateManagerView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {fullPreview && (
+        <HtmlPreviewModal
+          srcDoc={fullPreview.srcDoc}
+          title={fullPreview.title}
+          onClose={() => setFullPreview(null)}
+        />
+      )}
     </div>
   );
 };

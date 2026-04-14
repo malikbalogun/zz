@@ -1,0 +1,294 @@
+/* ============================================
+   Panel Cards — .pcard block
+   ============================================ */
+
+/* Error state accent bar */
+.pcard-accent-red {
+  background: linear-gradient(90deg, #ef4444, #f87171);
+}
+
+/* Per-card error message shown beneath the header */
+.pcard-error {
+  font-size: 12px;
+  color: #dc2626;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.4;
+}
+.dark .pcard-error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+/* Error status pill */
+.pcard-status-pill.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.dark .pcard-status-pill.error {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+/* ============================================
+   Panel Card Footer — action buttons
+   ============================================ */
+
+.pcard-actions-group {
+  display: flex;
+  gap: 8px;
+}
+
+.pcard-delete-btn:hover {
+  background: #fee2e2 !important;
+  color: #dc2626 !important;
+  border-color: #fca5a5 !important;
+}
+.dark .pcard-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.15) !important;
+  color: #f87171 !important;
+}
+
+/* Disabled action buttons */
+.pcard-footer button:disabled,
+.pcard-footer .toggle-checkbox input:disabled + .toggle-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   Panel Empty State
+   ============================================ */
+
+.pcard-empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: #6b7280;
+  grid-column: 1 / -1;
+}
+.pcard-empty-state i.fa-cloud {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+  display: block;
+}
+.pcard-empty-state h3 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #374151;
+}
+.dark .pcard-empty-state h3 {
+  color: #d1d5db;
+}
+.pcard-empty-state p {
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+/* ============================================
+   Panel Error Banner (top-level view error)
+   ============================================ */
+
+.pcard-error-banner {
+  background: #fee2e2;
+  color: #991b1b;
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  border: 1px solid #fecaca;
+}
+.dark .pcard-error-banner {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+.pcard-error-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 4px;
+  font-size: 14px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.pcard-error-dismiss:hover {
+  opacity: 1;
+}
+
+/* ============================================
+   Panel Form — field-level validation
+   ============================================ */
+
+.form-group.has-error .form-input {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+}
+.dark .form-group.has-error .form-input {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+
+.form-field-error {
+  font-size: 12px;
+  color: #dc2626;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dark .form-field-error {
+  color: #f87171;
+}
+
+/* Form feedback (error / success) */
+.panel-form-feedback {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.4;
+}
+.panel-form-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+.dark .panel-form-error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+.panel-form-success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+}
+.dark .panel-form-success {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(16, 185, 129, 0.25);
+  color: #6ee7b7;
+}
+
+/* Test connection button — verified state */
+.form-btn.test.test-passed {
+  background: #059669;
+  color: white;
+}
+.form-btn.test.test-passed:hover {
+  background: #047857;
+}
+
+/* Disabled form buttons */
+.form-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ============================================
+   Panel Card — extended connection-state visuals
+   ============================================ */
+
+/* Busy overlay — reduces card opacity while an action is in-flight */
+.pcard-busy { opacity: 0.75; }
+
+/* Error-state left border accent */
+.pcard-has-error { border-left: 3px solid #ef4444; }
+
+/* Gray accent for disconnected state */
+.pcard-accent-gray { background: linear-gradient(90deg, #9ca3af, #d1d5db); }
+
+/* Gray icon for disconnected */
+.pcard-icon-gray { background: linear-gradient(135deg, #f3f4f6, #e5e7eb); color: #6b7280; }
+.dark .pcard-icon-gray { background: linear-gradient(135deg, #374151, #4b5563); color: #9ca3af; }
+
+/* Red icon for error */
+.pcard-icon-red { background: linear-gradient(135deg, #fee2e2, #fecaca); color: #991b1b; }
+.dark .pcard-icon-red { background: linear-gradient(135deg, #450a0a, #7f1d1d); color: #fca5a5; }
+
+/* Status pill variants */
+.pcard-pill-connected { background: #d1fae5; color: #065f46; }
+.dark .pcard-pill-connected { background: #064e3b; color: #6ee7b7; }
+
+.pcard-pill-live { background: #d1fae5; color: #065f46; }
+.dark .pcard-pill-live { background: #064e3b; color: #6ee7b7; }
+
+.pcard-pill-disconnected { background: #f3f4f6; color: #6b7280; }
+.dark .pcard-pill-disconnected { background: #374151; color: #9ca3af; }
+
+.pcard-pill-connecting,
+.pcard-pill-disconnecting { background: #dbeafe; color: #1d4ed8; }
+.dark .pcard-pill-connecting,
+.dark .pcard-pill-disconnecting { background: #1e3a8a; color: #93c5fd; }
+
+.pcard-pill-reconnecting { background: #fef3c7; color: #92400e; }
+.dark .pcard-pill-reconnecting { background: #78350f; color: #fde68a; }
+
+.pcard-pill-error { background: #fee2e2; color: #991b1b; }
+.dark .pcard-pill-error { background: #450a0a; color: #fca5a5; }
+
+/* Pulsing dot for live WebSocket state */
+.pcard-dot-pulse {
+  animation: pcardDotPulse 1.5s ease-in-out infinite;
+}
+@keyframes pcardDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.4); }
+}
+
+/* Per-card inline error */
+.pcard-error-inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #991b1b;
+  line-height: 1.4;
+}
+.dark .pcard-error-inline {
+  background: #450a0a;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+.pcard-error-inline i:first-child {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.pcard-error-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+/* WebSocket meta badges */
+.pcard-ws-badge { color: #10b981 !important; font-weight: 600; }
+.dark .pcard-ws-badge { color: #6ee7b7 !important; }
+.pcard-ws-connecting { color: #f59e0b !important; }
+.dark .pcard-ws-connecting { color: #fde68a !important; }
+.pcard-ws-error { color: #ef4444 !important; }
+.dark .pcard-ws-error { color: #fca5a5 !important; }
