@@ -1,0 +1,15 @@
+/* Search layout */
+.search-layout { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+.search-form-card { overflow-y: auto; overflow-x: hidden; max-height: calc(100vh - 160px); }
+.search-form-card input, .search-form-card select, .search-form-card textarea { max-width: 100%; box-sizing: border-box; }
+.search-queue-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #f3f4f6; font-size: 13px; color: #374151; }
+.dark .search-queue-item { border-bottom-color: #374151; color: #d1d5db; }
+.sq-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px; flex-shrink: 0; }
+.sq-queued { background: #f3f4f6; color: #9ca3af; }
+.sq-done { background: #d1fae5; color: #065f46; }
+.search-page { display: grid; grid-template-columns: minmax(300px, 420px) 1fr; gap: 24px; align-items: start; max-width: 1440px; margin: 0 auto; }
+@media (max-width: 1100px) { .search-page { grid-template-columns: 1fr; } }
+.search-results-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; min-height: 280px; }
+.dark .search-results-card { background: #1f2937; border-color: #374151; }
+.search-stat-banner { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; font-size: 14px; color: #374151; }
+.dark .search-stat-banner { background: #1f2937; border-color: #374151; color: #e5e7eb; }
