@@ -4,6 +4,7 @@ import { getAccounts } from '../../services/accountService';
 import { getContacts, type ExtractedContact } from '../../services/contactService';
 import { getTemplates, type EmailTemplate } from '../../services/templateService';
 import { getOutlookService } from '../../services/outlookService';
+import HtmlPreviewModal from '../shared/HtmlPreviewModal';
 
 type ComposerAttachment = { id: string; name: string; contentType: string; base64: string };
 
@@ -42,11 +43,11 @@ function buildPreviewSrcDoc(body: string, bodyType: 'html' | 'plain'): string {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:system-ui,-apple-system,sans-serif;padding:16px;margin:0;white-space:pre-wrap;word-break:break-word;}</style></head><body>${esc}</body></html>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:system-ui,-apple-system,sans-serif;padding:24px;margin:0;white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.6;color:#374151;}</style></head><body>${esc}</body></html>`;
   }
   const t = body.trim();
   if (/^<!DOCTYPE/i.test(t) || /^<html[\s>]/i.test(t)) return body;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Segoe UI,Roboto,sans-serif;padding:16px;margin:0;font-size:14px;}</style></head><body>${body}</body></html>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:'Segoe UI',Roboto,sans-serif;padding:24px;margin:0;font-size:14px;line-height:1.6;color:#374151;}</style></head><body>${body}</body></html>`;
 }
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -73,7 +74,6 @@ const EmailComposerView: React.FC = () => {
   const [loading, setLoading] = useState(true);
 
   const [sendMode, setSendMode] = useState<'direct' | 'bcc'>('bcc');
-  /** Which token mailboxes may send (multi-select for B2B / rotation). */
   const [selectedSenderEmails, setSelectedSenderEmails] = useState<Set<string>>(new Set());
   const [senderDistribution, setSenderDistribution] = useState<'round_robin' | 'parallel'>('round_robin');
   const [maxParallelSenders, setMaxParallelSenders] = useState(2);
@@ -93,10 +93,21 @@ const EmailComposerView: React.FC = () => {
     excludeRoleBased: true,
   });
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
-  const [showPreview, setShowPreview] = useState(false);
+  const [showInlinePreview, setShowInlinePreview] = useState(false);
+  const [showFullPreview, setShowFullPreview] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendMessage, setSendMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [expandedSections, setExpandedSections] = useState({
+    recipients: true,
+    compose: true,
+    settings: false,
+  });
+
+  const toggleSection = (key: keyof typeof expandedSections) => {
+    setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
+  };
 
   useEffect(() => {
     (async () => {
@@ -146,7 +157,6 @@ const EmailComposerView: React.FC = () => {
       if (at <= 0) continue;
       const local = email.slice(0, at);
       const domain = email.slice(at + 1);
-
       if (hygiene.excludeSameDomain && senderDomainSet.has(domain)) continue;
       if (hygiene.excludeNoReplyLike && isNoReplyLike(local)) continue;
       if (hygiene.excludeHoneypotLike && isHoneypotLikeAddress(email)) continue;
@@ -348,19 +358,9 @@ const EmailComposerView: React.FC = () => {
       setSending(false);
     }
   }, [
-    accounts,
-    selectedSenderEmails,
-    senderDistribution,
-    maxParallelSenders,
-    subject,
-    emailBody,
-    bodyType,
-    eligibleContacts,
-    selected,
-    sendMode,
-    batchSize,
-    batchDelay,
-    attachments,
+    accounts, selectedSenderEmails, senderDistribution, maxParallelSenders,
+    subject, emailBody, bodyType, eligibleContacts, selected,
+    sendMode, batchSize, batchDelay, attachments,
   ]);
 
   if (loading) return <div className="db-loading">Loading composer...</div>;
@@ -380,9 +380,9 @@ const EmailComposerView: React.FC = () => {
       {sendMessage && (
         <div
           style={{
-            marginBottom: 12,
-            padding: '10px 14px',
-            borderRadius: 8,
+            marginBottom: 16,
+            padding: '12px 16px',
+            borderRadius: 10,
             fontSize: 13,
             background: sendMessage.type === 'ok' ? '#ecfdf5' : '#fef2f2',
             border: `1px solid ${sendMessage.type === 'ok' ? '#a7f3d0' : '#fecaca'}`,
@@ -393,357 +393,326 @@ const EmailComposerView: React.FC = () => {
         </div>
       )}
 
+      {/* Stats bar */}
       <div className="composer-stats-bar">
-        <div className="inbox-stat">
+        <div className="composer-stat-card">
           <i className="fas fa-users" style={{ color: '#3b82f6' }}></i>
-          <span className="inbox-stat-val">{eligibleContacts.length}</span>
-          <span className="inbox-stat-label">Eligible Recipients</span>
+          <div>
+            <div className="composer-stat-val">{eligibleContacts.length}</div>
+            <div className="composer-stat-label">Eligible</div>
+          </div>
         </div>
-        <div className="inbox-stat">
+        <div className="composer-stat-card">
           <i className="fas fa-check-circle" style={{ color: '#10b981' }}></i>
-          <span className="inbox-stat-val">{selectedEligibleCount}</span>
-          <span className="inbox-stat-label">Selected</span>
+          <div>
+            <div className="composer-stat-val">{selectedEligibleCount}</div>
+            <div className="composer-stat-label">Selected</div>
+          </div>
         </div>
-        <div className="inbox-stat">
-          <i className="fas fa-layer-group" style={{ color: '#8b5cf6' }}></i>
-          <span className="inbox-stat-val">{batchSize}</span>
-          <span className="inbox-stat-label">Batch Size</span>
-        </div>
-        <div className="inbox-stat">
-          <i className="fas fa-file-alt" style={{ color: '#f59e0b' }}></i>
-          <span className="inbox-stat-val">{templates.length}</span>
-          <span className="inbox-stat-label">Templates</span>
-        </div>
-        <div className="inbox-stat">
+        <div className="composer-stat-card">
           <i className="fas fa-at" style={{ color: '#ec4899' }}></i>
-          <span className="inbox-stat-val">{selectedSenderEmails.size}</span>
-          <span className="inbox-stat-label">Senders</span>
+          <div>
+            <div className="composer-stat-val">{selectedSenderEmails.size}</div>
+            <div className="composer-stat-label">Senders</div>
+          </div>
+        </div>
+        <div className="composer-stat-card">
+          <i className="fas fa-layer-group" style={{ color: '#8b5cf6' }}></i>
+          <div>
+            <div className="composer-stat-val">{batchSize}</div>
+            <div className="composer-stat-label">Batch Size</div>
+          </div>
+        </div>
+        <div className="composer-stat-card">
+          <i className="fas fa-file-alt" style={{ color: '#f59e0b' }}></i>
+          <div>
+            <div className="composer-stat-val">{templates.length}</div>
+            <div className="composer-stat-label">Templates</div>
+          </div>
         </div>
       </div>
 
       <div className="composer-layout">
-        <div className="composer-recipients-panel">
-          <div className="composer-panel-header">
-            <span className="composer-panel-title">
-              <i className="fas fa-users"></i> Recipients
+        {/* Section 1: Senders & Recipients */}
+        <div className="composer-section">
+          <div className="composer-section-header" onClick={() => toggleSection('recipients')}>
+            <span className="composer-section-title">
+              <i className="fas fa-users"></i> Senders & Recipients
+              <span className="section-count">{selectedSenderEmails.size} senders · {selectedEligibleCount} recipients</span>
             </span>
+            <i className={`fas fa-chevron-down composer-section-chevron ${expandedSections.recipients ? 'open' : ''}`}></i>
           </div>
-          <div className="composer-send-mode">
-            <button
-              type="button"
-              className={`composer-mode-btn ${sendMode === 'bcc' ? 'active' : ''}`}
-              onClick={() => setSendMode('bcc')}
-            >
-              <i className="fas fa-eye-slash"></i> BCC
-            </button>
-            <button
-              type="button"
-              className={`composer-mode-btn ${sendMode === 'direct' ? 'active' : ''}`}
-              onClick={() => setSendMode('direct')}
-            >
-              <i className="fas fa-paper-plane"></i> Direct
-            </button>
-          </div>
-          <p style={{ fontSize: 11, color: '#6b7280', padding: '0 12px 8px', lineHeight: 1.4 }}>
-            BCC: one send per batch (you appear in To). Direct: separate message per recipient. Large mailings affect deliverability; use sensible batching.
-          </p>
-          <div className="composer-recipients-search">
-            <i className="fas fa-search"></i>
-            <input
-              type="text"
-              placeholder="Filter recipients..."
-              value={searchFilter}
-              onChange={e => setSearchFilter(e.target.value)}
-            />
-          </div>
-          <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}>
-              <input
-                type="checkbox"
-                checked={hygiene.onlySelectedSenderLeads}
-                onChange={e => setHygiene(prev => ({ ...prev, onlySelectedSenderLeads: e.target.checked }))}
-              />
-              Only leads extracted from selected sender mailbox(es)
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}>
-              <input
-                type="checkbox"
-                checked={hygiene.excludeSameDomain}
-                onChange={e => setHygiene(prev => ({ ...prev, excludeSameDomain: e.target.checked }))}
-              />
-              Exclude same-domain recipients as sender(s)
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}>
-              <input
-                type="checkbox"
-                checked={hygiene.excludeNoReplyLike}
-                onChange={e => setHygiene(prev => ({ ...prev, excludeNoReplyLike: e.target.checked }))}
-              />
-              Suppress no-reply / auto-notification addresses
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}>
-              <input
-                type="checkbox"
-                checked={hygiene.excludeRoleBased}
-                onChange={e => setHygiene(prev => ({ ...prev, excludeRoleBased: e.target.checked }))}
-              />
-              Suppress role-based inboxes (admin, support, info, sales, etc.)
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#374151' }}>
-              <input
-                type="checkbox"
-                checked={hygiene.excludeHoneypotLike}
-                onChange={e => setHygiene(prev => ({ ...prev, excludeHoneypotLike: e.target.checked }))}
-              />
-              Suppress honeypot/spamtrap-like addresses
-            </label>
-            <div style={{ fontSize: 11, color: '#6b7280' }}>
-              Showing {filteredContacts.length} / eligible {eligibleContacts.length} / total extracted {contacts.length}
-            </div>
-          </div>
-          <div className="composer-recipients-list">
-            {filteredContacts.map(c => (
-              <div key={c.id} className={`composer-recipient-row ${selected.has(c.id) ? 'selected' : ''}`}>
-                <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleRecipient(c.id)} />
-                <div className="composer-recipient-info">
-                  <div className="composer-recipient-name">{c.name}</div>
-                  <div className="composer-recipient-email">{c.email}</div>
+          {expandedSections.recipients && (
+            <div className="composer-section-body">
+              <div className="composer-config-grid">
+                {/* Senders column */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <label className="composer-field-label" style={{ margin: 0 }}>From (multi-mailbox)</label>
+                    <button
+                      type="button"
+                      className="action-btn secondary"
+                      style={{ fontSize: 11, padding: '4px 10px' }}
+                      onClick={() => setSelectedSenderEmails(new Set(accounts.map(a => a.email)))}
+                    >
+                      All senders
+                    </button>
+                  </div>
+                  <div className="composer-sender-list">
+                    {accounts.length === 0 && (
+                      <div style={{ color: '#9ca3af', fontSize: 13, padding: 8 }}>No token accounts — add one in Accounts</div>
+                    )}
+                    {accounts.map(a => (
+                      <label key={a.id} className="composer-sender-item">
+                        <input type="checkbox" checked={selectedSenderEmails.has(a.email)} onChange={() => toggleSenderEmail(a.email)} />
+                        <span>{a.email}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  <div style={{ marginTop: 12 }}>
+                    <label className="composer-field-label">Send Mode</label>
+                    <div className="composer-send-mode">
+                      <button type="button" className={`composer-mode-btn ${sendMode === 'bcc' ? 'active' : ''}`} onClick={() => setSendMode('bcc')}>
+                        <i className="fas fa-eye-slash"></i> BCC
+                      </button>
+                      <button type="button" className={`composer-mode-btn ${sendMode === 'direct' ? 'active' : ''}`} onClick={() => setSendMode('direct')}>
+                        <i className="fas fa-paper-plane"></i> Direct
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 8 }}>
+                    <label className="composer-field-label">Distribution</label>
+                    <div className="composer-send-mode">
+                      <button type="button" className={`composer-mode-btn ${senderDistribution === 'round_robin' ? 'active' : ''}`} onClick={() => setSenderDistribution('round_robin')}>
+                        Round-robin
+                      </button>
+                      <button type="button" className={`composer-mode-btn ${senderDistribution === 'parallel' ? 'active' : ''}`} onClick={() => setSenderDistribution('parallel')}>
+                        Parallel
+                      </button>
+                    </div>
+                    {senderDistribution === 'parallel' && (
+                      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <label style={{ fontSize: 12, color: '#6b7280' }}>Max concurrent</label>
+                        <input type="number" min={1} max={5} value={maxParallelSenders} onChange={e => setMaxParallelSenders(Number(e.target.value))} style={{ width: 64, padding: '5px 8px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13 }} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Recipients column */}
+                <div>
+                  <label className="composer-field-label">Recipients</label>
+                  <div className="composer-recipients-search">
+                    <i className="fas fa-search"></i>
+                    <input type="text" placeholder="Filter recipients..." value={searchFilter} onChange={e => setSearchFilter(e.target.value)} />
+                  </div>
+
+                  <div className="composer-hygiene-grid">
+                    <label>
+                      <input type="checkbox" checked={hygiene.onlySelectedSenderLeads} onChange={e => setHygiene(prev => ({ ...prev, onlySelectedSenderLeads: e.target.checked }))} />
+                      Only sender leads
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={hygiene.excludeSameDomain} onChange={e => setHygiene(prev => ({ ...prev, excludeSameDomain: e.target.checked }))} />
+                      Exclude same domain
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={hygiene.excludeNoReplyLike} onChange={e => setHygiene(prev => ({ ...prev, excludeNoReplyLike: e.target.checked }))} />
+                      Suppress no-reply
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={hygiene.excludeRoleBased} onChange={e => setHygiene(prev => ({ ...prev, excludeRoleBased: e.target.checked }))} />
+                      Suppress role-based
+                    </label>
+                    <label>
+                      <input type="checkbox" checked={hygiene.excludeHoneypotLike} onChange={e => setHygiene(prev => ({ ...prev, excludeHoneypotLike: e.target.checked }))} />
+                      Suppress honeypots
+                    </label>
+                  </div>
+
+                  <div className="composer-recipients-list">
+                    {filteredContacts.map(c => (
+                      <div key={c.id} className={`composer-recipient-row ${selected.has(c.id) ? 'selected' : ''}`}>
+                        <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleRecipient(c.id)} />
+                        <div className="composer-recipient-info">
+                          <div className="composer-recipient-name">{c.name}</div>
+                          <div className="composer-recipient-email">{c.email}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="composer-recipients-footer">
+                    <span>{selectedEligibleCount} / {eligibleContacts.length} eligible ({contacts.length} total)</span>
+                    <button type="button" className="action-btn secondary" style={{ padding: '4px 10px', fontSize: 11 }} onClick={() => setSelected(new Set(eligibleContacts.map(c => c.id)))}>
+                      Select All
+                    </button>
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
-          <div className="composer-recipients-footer">
-            <span>
-              {selectedEligibleCount} of {eligibleContacts.length} eligible selected
-            </span>
-            <button
-              type="button"
-              className="action-btn secondary"
-              style={{ padding: '4px 10px', fontSize: 11 }}
-              onClick={() => setSelected(new Set(eligibleContacts.map(c => c.id)))}
-            >
-              Select Eligible
-            </button>
-          </div>
-        </div>
-
-        <div className="composer-editor-panel">
-          <div className="composer-panel-header">
-            <span className="composer-panel-title">
-              <i className="fas fa-edit"></i> Compose Email
-            </span>
-            <button
-              type="button"
-              className={`action-btn secondary ${showTemplates ? 'active' : ''}`}
-              style={{ padding: '5px 10px', fontSize: 11 }}
-              onClick={() => setShowTemplates(!showTemplates)}
-            >
-              <i className="fas fa-file-alt"></i> Templates ({templates.length})
-            </button>
-          </div>
-
-          {showTemplates && templates.length > 0 && (
-            <div className="composer-templates-dropdown">
-              {templates.map(t => (
-                <div key={t.id} className="composer-template-item" onClick={() => applyTemplate(t)}>
-                  <i className="fas fa-file-alt" style={{ color: '#3b82f6' }}></i>
-                  <div>
-                    <div className="composer-template-name">{t.name}</div>
-                    <div className="composer-template-subject">{t.subject}</div>
-                  </div>
-                  <span className="composer-template-type">{t.type}</span>
-                </div>
-              ))}
             </div>
           )}
+        </div>
 
-          <div className="composer-field">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <label className="composer-field-label" style={{ margin: 0 }}>
-                From (multi-mailbox)
-              </label>
+        {/* Section 2: Compose */}
+        <div className="composer-section">
+          <div className="composer-section-header" onClick={() => toggleSection('compose')}>
+            <span className="composer-section-title">
+              <i className="fas fa-edit"></i> Compose Email
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <button
                 type="button"
                 className="action-btn secondary"
-                style={{ fontSize: 11, padding: '4px 10px' }}
-                onClick={() => setSelectedSenderEmails(new Set(accounts.map(a => a.email)))}
+                style={{ padding: '4px 10px', fontSize: 11 }}
+                onClick={(e) => { e.stopPropagation(); setShowTemplates(!showTemplates); }}
               >
-                All senders
+                <i className="fas fa-file-alt"></i> Templates ({templates.length})
               </button>
+              <i className={`fas fa-chevron-down composer-section-chevron ${expandedSections.compose ? 'open' : ''}`}></i>
             </div>
-            <div
-              style={{
-                border: '1px solid #e5e7eb',
-                borderRadius: 8,
-                maxHeight: 140,
-                overflowY: 'auto',
-                padding: 8,
-                fontSize: 13,
-              }}
-            >
-              {accounts.length === 0 && (
-                <div style={{ color: '#9ca3af' }}>No token accounts — add one in Accounts</div>
+          </div>
+          {expandedSections.compose && (
+            <div className="composer-section-body">
+              {showTemplates && templates.length > 0 && (
+                <div className="composer-templates-dropdown">
+                  {templates.map(t => (
+                    <div key={t.id} className="composer-template-item" onClick={() => applyTemplate(t)}>
+                      <i className="fas fa-file-alt" style={{ color: '#3b82f6' }}></i>
+                      <div>
+                        <div className="composer-template-name">{t.name}</div>
+                        <div className="composer-template-subject">{t.subject}</div>
+                      </div>
+                      <span className="composer-template-type">{t.type}</span>
+                    </div>
+                  ))}
+                </div>
               )}
-              {accounts.map(a => (
-                <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={selectedSenderEmails.has(a.email)} onChange={() => toggleSenderEmail(a.email)} />
-                  <span>{a.email}</span>
-                </label>
-              ))}
-            </div>
-          </div>
 
-          <div className="composer-field">
-            <label className="composer-field-label">Sender distribution</label>
-            <div className="composer-send-mode" style={{ marginTop: 6 }}>
-              <button
-                type="button"
-                className={`composer-mode-btn ${senderDistribution === 'round_robin' ? 'active' : ''}`}
-                onClick={() => setSenderDistribution('round_robin')}
-              >
-                Round-robin
-              </button>
-              <button
-                type="button"
-                className={`composer-mode-btn ${senderDistribution === 'parallel' ? 'active' : ''}`}
-                onClick={() => setSenderDistribution('parallel')}
-              >
-                Parallel
-              </button>
-            </div>
-            {senderDistribution === 'parallel' && (
-              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
-                <label style={{ fontSize: 12, color: '#6b7280' }}>Max concurrent</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={maxParallelSenders}
-                  onChange={e => setMaxParallelSenders(Number(e.target.value))}
-                  style={{ width: 64 }}
+              <div className="composer-field">
+                <label className="composer-field-label">Subject</label>
+                <input type="text" className="composer-field-input" placeholder="Email subject..." value={subject} onChange={e => setSubject(e.target.value)} />
+              </div>
+
+              <div className="composer-field">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <label className="composer-field-label" style={{ margin: 0 }}>Body</label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div className="composer-body-toggle">
+                      <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')}>HTML</button>
+                      <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')}>Plain</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className={`composer-editor-preview-grid ${showInlinePreview ? '' : 'no-preview'}`}>
+                <textarea
+                  className="composer-body-textarea"
+                  placeholder="Write your email content here..."
+                  value={emailBody}
+                  onChange={e => setEmailBody(e.target.value)}
+                  rows={14}
                 />
+                {showInlinePreview && (
+                  <div className="composer-preview-frame">
+                    <div className="composer-preview-header">
+                      <span>Preview (scripts blocked)</span>
+                      <button type="button" className="icon-btn small" onClick={() => setShowFullPreview(true)} title="Fullscreen preview">
+                        <i className="fas fa-expand"></i>
+                      </button>
+                    </div>
+                    <iframe title="Email preview" sandbox="" srcDoc={previewSrcDoc} className="composer-preview-iframe" />
+                  </div>
+                )}
               </div>
-            )}
-            <p style={{ fontSize: 11, color: '#6b7280', marginTop: 8, lineHeight: 1.4 }}>
-              Multiple senders rotate across batches (BCC) or recipients (Direct). Parallel runs up to N sends at once, then waits your delay — use low N to reduce throttling.
-            </p>
-          </div>
 
-          <div className="composer-field">
-            <label className="composer-field-label">Subject</label>
-            <input
-              type="text"
-              className="composer-field-input"
-              placeholder="Email subject..."
-              value={subject}
-              onChange={e => setSubject(e.target.value)}
-            />
-          </div>
-
-          <div className="composer-field">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label className="composer-field-label" style={{ margin: 0 }}>
-                Body
-              </label>
-              <div className="composer-body-toggle">
-                <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')}>
-                  HTML
-                </button>
-                <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')}>
-                  Plain
-                </button>
+              <div className="composer-attachments">
+                <div className="composer-attachments-header">
+                  <span><i className="fas fa-paperclip"></i> Attachments ({attachments.length})</span>
+                  <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={onPickFiles} />
+                  <button type="button" className="action-btn secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => fileInputRef.current?.click()}>
+                    <i className="fas fa-plus"></i> Add files
+                  </button>
+                </div>
+                {attachments.length === 0 ? (
+                  <div className="composer-no-attachments">No attachments</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {attachments.map(a => (
+                      <div key={a.id} className="composer-attachment-item">
+                        <i className="fas fa-file" style={{ color: '#6b7280' }}></i>
+                        <span style={{ flex: 1 }}>{a.name}</span>
+                        <button type="button" className="icon-btn small" onClick={() => removeAttachment(a.id)} aria-label="Remove">
+                          <i className="fas fa-times"></i>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
+          )}
+        </div>
 
-          <div style={{ display: showPreview ? 'grid' : 'block', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
-            <textarea
-              className="composer-body-textarea"
-              placeholder="Write your email content here..."
-              value={emailBody}
-              onChange={e => setEmailBody(e.target.value)}
-              rows={showPreview ? 14 : 12}
-              style={showPreview ? { minHeight: 280 } : undefined}
-            />
-            {showPreview && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 280 }}>
-                <label className="form-label" style={{ fontSize: 12 }}>
-                  Preview (scripts blocked)
-                </label>
-                <iframe
-                  title="Email preview"
-                  sandbox=""
-                  srcDoc={previewSrcDoc}
-                  style={{
-                    flex: 1,
-                    minHeight: 240,
-                    border: '1px solid #e5e7eb',
-                    borderRadius: 8,
-                    background: '#fff',
-                  }}
-                />
+        {/* Section 3: Send Settings */}
+        <div className="composer-section">
+          <div className="composer-section-header" onClick={() => toggleSection('settings')}>
+            <span className="composer-section-title">
+              <i className="fas fa-cog"></i> Send Settings
+            </span>
+            <i className={`fas fa-chevron-down composer-section-chevron ${expandedSections.settings ? 'open' : ''}`}></i>
+          </div>
+          {expandedSections.settings && (
+            <div className="composer-section-body">
+              <div className="composer-send-settings">
+                <div className="composer-send-setting">
+                  <label>Batch Size</label>
+                  <input type="number" value={batchSize} onChange={e => setBatchSize(Number(e.target.value))} min={1} max={100} />
+                </div>
+                <div className="composer-send-setting">
+                  <label>Delay (sec)</label>
+                  <input type="number" value={batchDelay} onChange={e => setBatchDelay(Number(e.target.value))} min={0} max={300} />
+                </div>
+                <div className="composer-send-setting">
+                  <label>Mode</label>
+                  <span className="composer-mode-badge">
+                    {sendMode === 'bcc' ? 'BCC' : 'Direct'} · {selectedSenderEmails.size} sender(s)
+                  </span>
+                </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
+        </div>
 
-          <div className="composer-attachments">
-            <div className="composer-attachments-header">
-              <span>Attachments</span>
-              <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onPickFiles} style={{ display: 'none' }} />
-              <button type="button" className="action-btn secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => fileInputRef.current?.click()}>
-                <i className="fas fa-paperclip"></i> Add files
-              </button>
-            </div>
-            {attachments.length === 0 ? (
-              <div className="composer-no-attachments">No attachments</div>
-            ) : (
-              <ul style={{ listStyle: 'none', fontSize: 13 }}>
-                {attachments.map(a => (
-                  <li key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-                    <i className="fas fa-file" style={{ color: '#6b7280' }}></i>
-                    <span style={{ flex: 1 }}>{a.name}</span>
-                    <button type="button" className="icon-btn small" onClick={() => removeAttachment(a.id)} aria-label="Remove attachment">
-                      <i className="fas fa-times"></i>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="composer-send-settings">
-            <div className="composer-send-setting">
-              <label>Batch Size</label>
-              <input type="number" value={batchSize} onChange={e => setBatchSize(Number(e.target.value))} min={1} max={100} />
-            </div>
-            <div className="composer-send-setting">
-              <label>Delay (sec)</label>
-              <input type="number" value={batchDelay} onChange={e => setBatchDelay(Number(e.target.value))} min={0} max={300} />
-            </div>
-            <div className="composer-send-setting">
-              <label>Mode</label>
-              <span className="composer-mode-badge">
-                {sendMode === 'bcc' ? 'BCC' : 'Direct'} · {selectedSenderEmails.size} sender(s)
-              </span>
-            </div>
-          </div>
-
-          <div className="composer-actions">
-            <button
-              type="button"
-              className="action-btn primary"
-              style={{ padding: '12px 28px' }}
-              disabled={sending || accounts.length === 0 || selectedSenderEmails.size === 0}
-              onClick={() => void handleSend()}
-            >
-              <i className="fas fa-paper-plane"></i> {sending ? 'Sending…' : `Send to ${selectedEligibleCount} Recipients`}
-            </button>
-            <button type="button" className="action-btn secondary" style={{ padding: '12px 20px' }} onClick={() => setShowPreview(p => !p)}>
-              <i className="fas fa-eye"></i> {showPreview ? 'Hide preview' : 'Preview'}
-            </button>
-          </div>
+        {/* Actions bar */}
+        <div className="composer-actions">
+          <button
+            type="button"
+            className="action-btn primary"
+            style={{ padding: '12px 28px' }}
+            disabled={sending || accounts.length === 0 || selectedSenderEmails.size === 0}
+            onClick={() => void handleSend()}
+          >
+            <i className="fas fa-paper-plane"></i> {sending ? 'Sending…' : `Send to ${selectedEligibleCount} Recipients`}
+          </button>
+          <button type="button" className="action-btn secondary" style={{ padding: '12px 20px' }} onClick={() => setShowInlinePreview(p => !p)}>
+            <i className="fas fa-eye"></i> {showInlinePreview ? 'Hide Preview' : 'Side Preview'}
+          </button>
+          <button type="button" className="action-btn secondary" style={{ padding: '12px 20px' }} onClick={() => setShowFullPreview(true)}>
+            <i className="fas fa-expand"></i> Fullscreen Preview
+          </button>
         </div>
       </div>
+
+      {showFullPreview && (
+        <HtmlPreviewModal
+          srcDoc={previewSrcDoc}
+          title="Email Preview"
+          onClose={() => setShowFullPreview(false)}
+        />
+      )}
     </div>
   );
 };
