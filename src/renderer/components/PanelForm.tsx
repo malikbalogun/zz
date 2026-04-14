@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import * as panelService from '../services/panelService';
+import React, { useState, useCallback } from 'react';
+import { testPanelConnection } from '../services/panelService';
 
 export type PanelFormPayload = {
   name: string;
@@ -20,6 +20,13 @@ interface PanelFormProps {
   };
 }
 
+interface FieldErrors {
+  name?: string;
+  url?: string;
+  username?: string;
+  password?: string;
+}
+
 const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData }) => {
   const isEdit = initialData != null;
   const [name, setName] = useState(initialData?.name || '');
@@ -28,22 +35,54 @@ const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData 
   const [password, setPassword] = useState(initialData?.password || '');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [testPassed, setTestPassed] = useState(false);
+
+  const validate = useCallback((): FieldErrors => {
+    const errors: FieldErrors = {};
+    if (!name.trim()) errors.name = 'Panel name is required';
+    if (!url.trim()) {
+      errors.url = 'Panel URL is required';
+    } else if (!/^https?:\/\/.+/i.test(url.trim())) {
+      errors.url = 'URL must start with http:// or https://';
+    }
+    if (!username.trim()) errors.username = 'Admin username is required';
+    if (!isEdit && !password) errors.password = 'Password is required for new panels';
+    return errors;
+  }, [name, url, username, password, isEdit]);
+
+  const clearFieldError = (field: keyof FieldErrors) => {
+    setFieldErrors(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  };
 
   const handleTest = async () => {
+    const errors = validate();
     if (!url || !username || !password) {
-      setError('URL, username, and password are required');
+      if (!url) errors.url = errors.url || 'URL is required to test';
+      if (!username) errors.username = errors.username || 'Username is required to test';
+      if (!password) errors.password = errors.password || 'Password is required to test';
+      setFieldErrors(errors);
       return;
     }
+    setFieldErrors({});
     setTesting(true);
     setError(null);
     setSuccess(null);
+    setTestPassed(false);
     try {
-      const token = await panelService.testPanelConnection(url, username, password);
-      setSuccess(`Connection successful! Token received (${token.substring(0, 20)}…)`);
+      await testPanelConnection(url, username, password);
+      setSuccess('Connection successful — panel is reachable and credentials are valid.');
+      setTestPassed(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setTestPassed(false);
     } finally {
       setTesting(false);
     }
@@ -51,14 +90,12 @@ const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData 
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !url.trim() || !username.trim()) {
-      setError('Name, URL, and username are required');
+    const errors = validate();
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
       return;
     }
-    if (!isEdit && !password) {
-      setError('Password is required');
-      return;
-    }
+    setFieldErrors({});
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -78,6 +115,7 @@ const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData 
         setUrl('');
         setUsername('');
         setPassword('');
+        setTestPassed(false);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -86,68 +124,73 @@ const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData 
     }
   };
 
+  const renderFieldError = (field: keyof FieldErrors) =>
+    fieldErrors[field] ? (
+      <div className="form-field-error">{fieldErrors[field]}</div>
+    ) : null;
+
   return (
     <div className="form-card">
       <h2 className="form-title">{isEdit ? 'Edit Panel' : 'Add Panel'}</h2>
-      <form onSubmit={handleSubmit}>
-        <div className="form-group">
+      <form onSubmit={handleSubmit} noValidate>
+        <div className={`form-group ${fieldErrors.name ? 'has-error' : ''}`}>
           <label className="form-label">Panel Name</label>
           <input
             type="text"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={e => { setName(e.target.value); clearFieldError('name'); }}
             className="form-input"
             placeholder="My Webmail Panel"
-            required
           />
+          {renderFieldError('name')}
         </div>
-        <div className="form-group">
+        <div className={`form-group ${fieldErrors.url ? 'has-error' : ''}`}>
           <label className="form-label">Panel URL</label>
           <input
             type="url"
             value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            onChange={e => { setUrl(e.target.value); clearFieldError('url'); setTestPassed(false); }}
             className="form-input"
             placeholder="https://panel.example.com"
-            required
           />
-          <div className="form-helper">Include https:// - no trailing slash</div>
+          <div className="form-helper">Include https:// — no trailing slash</div>
+          {renderFieldError('url')}
         </div>
-        <div className="form-group">
+        <div className={`form-group ${fieldErrors.username ? 'has-error' : ''}`}>
           <label className="form-label">Admin Username</label>
           <input
             type="text"
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            onChange={e => { setUsername(e.target.value); clearFieldError('username'); setTestPassed(false); }}
             className="form-input"
             placeholder="admin"
-            required
           />
+          {renderFieldError('username')}
         </div>
-        <div className="form-group">
+        <div className={`form-group ${fieldErrors.password ? 'has-error' : ''}`}>
           <label className="form-label">Admin Password</label>
           <input
             type="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={e => { setPassword(e.target.value); clearFieldError('password'); setTestPassed(false); }}
             className="form-input"
-            placeholder={isEdit ? 'Leave blank to keep current password' : ''}
-            required={!isEdit}
+            placeholder={isEdit ? 'Leave blank to keep current password' : 'Enter admin password'}
             autoComplete="new-password"
           />
           {isEdit && (
             <div className="form-helper">Optional — only fill in to change the stored password</div>
           )}
+          {renderFieldError('password')}
         </div>
 
         {error && (
-          <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
-            <strong>Error:</strong> {error}
+          <div className="panel-form-feedback panel-form-error">
+            <i className="fas fa-exclamation-circle" /> {error}
           </div>
         )}
         {success && (
-          <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-xl text-green-700 text-sm">
-            <strong>Success:</strong> {success}
+          <div className="panel-form-feedback panel-form-success">
+            <i className="fas fa-check-circle" /> {success}
           </div>
         )}
 
@@ -155,23 +198,27 @@ const PanelForm: React.FC<PanelFormProps> = ({ onSuccess, onCancel, initialData 
           <button
             type="button"
             onClick={handleTest}
-            disabled={testing}
-            className="form-btn test"
+            disabled={testing || saving}
+            className={`form-btn test ${testPassed ? 'test-passed' : ''}`}
           >
-            <i className="fas fa-plug"></i> {testing ? 'Testing…' : 'Test Connection'}
+            {testPassed
+              ? <><i className="fas fa-check" /> Verified</>
+              : <><i className="fas fa-plug" /> {testing ? 'Testing…' : 'Test Connection'}</>
+            }
           </button>
           <button
             type="submit"
-            disabled={saving}
+            disabled={saving || testing}
             className="form-btn save"
           >
-            <i className="fas fa-save"></i> {saving ? 'Saving…' : isEdit ? 'Save Changes' : 'Save Panel'}
+            <i className="fas fa-save" /> {saving ? 'Saving…' : isEdit ? 'Save Changes' : 'Save Panel'}
           </button>
           {onCancel && (
             <button
               type="button"
               onClick={onCancel}
               className="form-btn cancel"
+              disabled={saving}
             >
               Cancel
             </button>
