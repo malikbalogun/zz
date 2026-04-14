@@ -1,3 +1,5 @@
+export type PanelStatus = 'connected' | 'disconnected' | 'error' | 'reconnecting';
+
 export interface Panel {
   id: string;
   name: string;
@@ -7,7 +9,7 @@ export interface Panel {
   token?: string;            // JWT token after login
   tokenExpiry?: string;      // ISO timestamp when token expires
   lastSync?: string;         // ISO timestamp of last successful sync
-  status: 'connected' | 'disconnected' | 'error';
+  status: PanelStatus;
   error?: string;
 }
 

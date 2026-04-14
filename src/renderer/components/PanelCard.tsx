@@ -20,11 +20,13 @@ const PanelCard: React.FC<PanelCardProps> = ({ panel, onDelete, onTestConnection
     return () => clearInterval(interval);
   }, [panel.id]);
 
-  const statusColor = {
+  const statusColorMap: Record<string, string> = {
     connected: 'bg-green-500',
     disconnected: 'bg-yellow-500',
     error: 'bg-red-500',
-  }[panel.status];
+    reconnecting: 'bg-orange-500',
+  };
+  const statusColor = statusColorMap[panel.status] ?? 'bg-gray-500';
 
   return (
     <div className="bg-gray-800 rounded-xl p-5 border border-gray-700 hover:border-gray-600 transition-colors">

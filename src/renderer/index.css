@@ -591,3 +591,107 @@
 .dark .search-results-card { background: #1f2937; border-color: #374151; }
 .search-stat-banner { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; font-size: 14px; color: #374151; }
 .dark .search-stat-banner { background: #1f2937; border-color: #374151; color: #e5e7eb; }
+
+/* ── Panel card: extended connection-state visuals ── */
+
+/* Busy overlay — reduces card opacity while an action is in-flight */
+.pcard-busy { opacity: 0.75; pointer-events: auto; }
+
+/* Error-state left border accent */
+.pcard-has-error { border-left: 3px solid #ef4444; }
+
+/* Red accent for error state */
+.pcard-accent-red { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+/* Gray accent for disconnected state */
+.pcard-accent-gray { background: linear-gradient(90deg, #9ca3af, #d1d5db); }
+
+/* Gray icon for disconnected */
+.pcard-icon-gray { background: linear-gradient(135deg, #f3f4f6, #e5e7eb); color: #6b7280; }
+.dark .pcard-icon-gray { background: linear-gradient(135deg, #374151, #4b5563); color: #9ca3af; }
+
+/* Red icon for error */
+.pcard-icon-red { background: linear-gradient(135deg, #fee2e2, #fecaca); color: #991b1b; }
+.dark .pcard-icon-red { background: linear-gradient(135deg, #450a0a, #7f1d1d); color: #fca5a5; }
+
+/* Status pill variants */
+.pcard-pill-connected { background: #d1fae5; color: #065f46; }
+.dark .pcard-pill-connected { background: #064e3b; color: #6ee7b7; }
+
+.pcard-pill-live { background: #d1fae5; color: #065f46; }
+.dark .pcard-pill-live { background: #064e3b; color: #6ee7b7; }
+
+.pcard-pill-disconnected { background: #f3f4f6; color: #6b7280; }
+.dark .pcard-pill-disconnected { background: #374151; color: #9ca3af; }
+
+.pcard-pill-connecting,
+.pcard-pill-disconnecting { background: #dbeafe; color: #1d4ed8; }
+.dark .pcard-pill-connecting,
+.dark .pcard-pill-disconnecting { background: #1e3a8a; color: #93c5fd; }
+
+.pcard-pill-reconnecting { background: #fef3c7; color: #92400e; }
+.dark .pcard-pill-reconnecting { background: #78350f; color: #fde68a; }
+
+.pcard-pill-error { background: #fee2e2; color: #991b1b; }
+.dark .pcard-pill-error { background: #450a0a; color: #fca5a5; }
+
+/* Pulsing dot for live WebSocket state */
+.pcard-dot-pulse {
+  animation: pcardDotPulse 1.5s ease-in-out infinite;
+}
+@keyframes pcardDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.4); }
+}
+
+/* Per-card inline error */
+.pcard-error-inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #991b1b;
+  line-height: 1.4;
+}
+.dark .pcard-error-inline {
+  background: #450a0a;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+.pcard-error-inline i:first-child {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.pcard-error-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.pcard-error-dismiss {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.pcard-error-dismiss:hover { opacity: 1; }
+
+/* WebSocket meta badges */
+.pcard-ws-badge { color: #10b981 !important; font-weight: 600; }
+.dark .pcard-ws-badge { color: #6ee7b7 !important; }
+.pcard-ws-connecting { color: #f59e0b !important; }
+.dark .pcard-ws-connecting { color: #fde68a !important; }
+.pcard-ws-error { color: #ef4444 !important; }
+.dark .pcard-ws-error { color: #fca5a5 !important; }

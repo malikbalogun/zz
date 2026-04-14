@@ -1,21 +1,48 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import PanelForm from '../PanelForm';
 import { getPanels, addPanel, updatePanel, deletePanel, authenticatePanel } from '../../services/panelService';
 import { Panel } from '../../../types/panel';
 import { getAccounts } from '../../services/accountService';
 import { syncPanelAccounts } from '../../services/accountSyncService';
+import { websocketManager, WebSocketStatus } from '../../services/websocketService';
+
+type CardAction = 'connecting' | 'disconnecting' | 'syncing' | 'deleting' | null;
+
+interface CardState {
+  action: CardAction;
+  error: string | null;
+  wsStatus: WebSocketStatus;
+}
 
 const PanelsView = () => {
   const [panels, setPanels] = useState<Panel[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingPanel, setEditingPanel] = useState<Panel | null>(null);
-  const [error, setError] = useState<string>('');
+  const [globalError, setGlobalError] = useState<string>('');
 
-  // Load panels and accounts
+  const [cardStates, setCardStates] = useState<Record<string, CardState>>({});
+
+  const getCardState = useCallback((panelId: string): CardState => {
+    return cardStates[panelId] ?? { action: null, error: null, wsStatus: 'disconnected' };
+  }, [cardStates]);
+
+  const setCardAction = useCallback((panelId: string, action: CardAction) => {
+    setCardStates(prev => ({
+      ...prev,
+      [panelId]: { ...prev[panelId] ?? { action: null, error: null, wsStatus: 'disconnected' }, action, error: action ? null : (prev[panelId]?.error ?? null) },
+    }));
+  }, []);
+
+  const setCardError = useCallback((panelId: string, error: string | null) => {
+    setCardStates(prev => ({
+      ...prev,
+      [panelId]: { ...prev[panelId] ?? { action: null, error: null, wsStatus: 'disconnected' }, action: null, error },
+    }));
+  }, []);
+
   const loadData = async () => {
-    setLoading(true);
     try {
       const [panelsData, accountsData] = await Promise.all([
         getPanels(),
@@ -25,9 +52,9 @@ const PanelsView = () => {
       setAccounts(accountsData);
     } catch (err) {
       console.error('Failed to load data:', err);
-      setError('Failed to load panels');
+      setGlobalError('Failed to load panels');
     } finally {
-      setLoading(false);
+      setInitialLoading(false);
     }
   };
 
@@ -35,7 +62,25 @@ const PanelsView = () => {
     loadData();
   }, []);
 
-  // Compute panel stats
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCardStates(prev => {
+        const next = { ...prev };
+        let changed = false;
+        for (const panel of panels) {
+          const wsStatus = websocketManager.getStatus(panel.id);
+          const existing = next[panel.id];
+          if (!existing || existing.wsStatus !== wsStatus) {
+            next[panel.id] = { ...existing ?? { action: null, error: null, wsStatus: 'disconnected' }, wsStatus };
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [panels]);
+
   const getPanelStats = (panelId: string) => {
     const panelAccounts = accounts.filter(a => a.panelId === panelId);
     const total = panelAccounts.length;
@@ -44,35 +89,30 @@ const PanelsView = () => {
     return { total, active, lastSync };
   };
 
-  // Add panel
   const handleAddPanel = async (data: { name: string; url: string; username: string; password?: string }) => {
     if (!data.password) {
       const msg = 'Password is required';
-      setError(msg);
+      setGlobalError(msg);
       throw new Error(msg);
     }
-    setLoading(true);
     try {
       await addPanel({ ...data, password: data.password });
       setShowAddModal(false);
       await loadData();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
+      setGlobalError(msg);
       throw err instanceof Error ? err : new Error(msg);
-    } finally {
-      setLoading(false);
     }
   };
 
-  // Edit panel
   const handleEditPanel = (panel: Panel) => {
     setEditingPanel(panel);
   };
 
   const handleSaveEdit = async (data: { name: string; url: string; username: string; password?: string }) => {
     if (!editingPanel) return;
-    setLoading(true);
+    setCardAction(editingPanel.id, 'connecting');
     try {
       await updatePanel(editingPanel.id, {
         name: data.name,
@@ -81,76 +121,76 @@ const PanelsView = () => {
         ...(data.password ? { password: data.password } : {}),
       });
       setEditingPanel(null);
+      setCardAction(editingPanel.id, null);
       await loadData();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
+      setCardError(editingPanel.id, msg);
       throw err instanceof Error ? err : new Error(msg);
-    } finally {
-      setLoading(false);
     }
   };
 
-  // Delete panel
   const handleDeletePanel = async (panelId: string) => {
     if (!confirm('Delete this panel? Accounts will be marked as Detached.')) return;
-    setLoading(true);
+    setCardAction(panelId, 'deleting');
     try {
       await deletePanel(panelId);
+      setCardStates(prev => {
+        const next = { ...prev };
+        delete next[panelId];
+        return next;
+      });
       await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+      setCardError(panelId, err instanceof Error ? err.message : String(err));
     }
   };
 
-  // Toggle enable/disable (simple status toggle)
   const handleTogglePanel = async (panel: Panel) => {
-    setLoading(true);
-    try {
-      if (panel.status === 'connected') {
-        // Disconnect: clear token and set status
+    if (panel.status === 'connected') {
+      setCardAction(panel.id, 'disconnecting');
+      try {
         await updatePanel(panel.id, {
           status: 'disconnected',
           token: undefined,
           tokenExpiry: undefined,
           error: undefined,
         });
-      } else {
-        // Connect: authenticate and get token
-        await authenticatePanel(panel.id);
+        setCardAction(panel.id, null);
+        await loadData();
+      } catch (err) {
+        setCardError(panel.id, err instanceof Error ? err.message : String(err));
       }
-      await loadData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+    } else {
+      setCardAction(panel.id, 'connecting');
+      try {
+        await authenticatePanel(panel.id);
+        setCardAction(panel.id, null);
+        await loadData();
+      } catch (err) {
+        setCardError(panel.id, err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
-
-
-  // Sync accounts from panel
   const handleSyncPanel = async (panel: Panel) => {
-    setLoading(true);
+    setCardAction(panel.id, 'syncing');
     try {
       await syncPanelAccounts(panel.id);
-      await loadData(); // refresh panels and accounts
+      setCardAction(panel.id, null);
+      await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+      setCardError(panel.id, err instanceof Error ? err.message : String(err));
     }
   };
 
-  // Format time
   const formatTime = (iso?: string) => {
     if (!iso) return 'Never';
     const date = new Date(iso);
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return 'Just now';
     if (diffMins < 60) return `${diffMins}m ago`;
     const diffHours = Math.floor(diffMins / 60);
     if (diffHours < 24) return `${diffHours}h ago`;
@@ -160,23 +200,27 @@ const PanelsView = () => {
     return date.toLocaleDateString();
   };
 
-  // Get panel accent color
-  const getAccentClass = (panel: Panel) => {
-    if (panel.status === 'connected') return 'pcard-accent-green';
-    if (panel.status === 'error') return 'pcard-accent-amber';
-    return 'pcard-accent-amber';
+  const getEffectiveStatus = (panel: Panel, cs: CardState): string => {
+    if (cs.action === 'connecting') return 'connecting';
+    if (cs.action === 'disconnecting') return 'disconnecting';
+    if (panel.status === 'reconnecting') return 'reconnecting';
+    if (panel.status === 'error') return 'error';
+    if (panel.status === 'connected' && cs.wsStatus === 'connected') return 'live';
+    if (panel.status === 'connected') return 'connected';
+    return 'disconnected';
   };
 
-  // Get panel icon class
-  const getIconClass = (panel: Panel) => {
-    if (panel.status === 'connected') return 'pcard-icon-green';
-    if (panel.status === 'error') return 'pcard-icon-amber';
-    return 'pcard-icon-amber';
+  const statusConfig: Record<string, { accent: string; icon: string; iconClass: string; pillClass: string; label: string; dotPulse: boolean }> = {
+    connected:     { accent: 'pcard-accent-green', icon: 'fas fa-cloud',         iconClass: 'pcard-icon-green', pillClass: 'pcard-pill-connected',     label: 'Connected',     dotPulse: false },
+    live:          { accent: 'pcard-accent-green', icon: 'fas fa-bolt',          iconClass: 'pcard-icon-green', pillClass: 'pcard-pill-live',          label: 'Live',          dotPulse: true },
+    disconnected:  { accent: 'pcard-accent-gray',  icon: 'fas fa-cloud',         iconClass: 'pcard-icon-gray',  pillClass: 'pcard-pill-disconnected',  label: 'Disconnected',  dotPulse: false },
+    connecting:    { accent: 'pcard-accent-blue',  icon: 'fas fa-spinner fa-spin', iconClass: 'pcard-icon-blue',  pillClass: 'pcard-pill-connecting',    label: 'Connecting…',   dotPulse: false },
+    disconnecting: { accent: 'pcard-accent-blue',  icon: 'fas fa-spinner fa-spin', iconClass: 'pcard-icon-blue',  pillClass: 'pcard-pill-disconnecting', label: 'Disconnecting…', dotPulse: false },
+    reconnecting:  { accent: 'pcard-accent-amber', icon: 'fas fa-sync fa-spin',  iconClass: 'pcard-icon-amber', pillClass: 'pcard-pill-reconnecting',  label: 'Reconnecting…', dotPulse: false },
+    error:         { accent: 'pcard-accent-red',   icon: 'fas fa-exclamation-triangle', iconClass: 'pcard-icon-red', pillClass: 'pcard-pill-error', label: 'Error', dotPulse: false },
   };
 
-  // Full-page loader only when not adding/editing a panel. Otherwise setLoading(true)
-  // with zero panels would replace the whole view and unmount the modal (broken inputs/save).
-  if (loading && panels.length === 0 && !showAddModal && !editingPanel) {
+  if (initialLoading && panels.length === 0 && !showAddModal && !editingPanel) {
     return <div id="panelsView">Loading panels...</div>;
   }
 
@@ -189,10 +233,10 @@ const PanelsView = () => {
         </button>
       </div>
 
-      {error && (
+      {globalError && (
         <div className="error-message" style={{ background: '#fee2e2', color: '#991b1b', padding: '12px', borderRadius: '10px', marginBottom: '20px' }}>
-          <i className="fas fa-exclamation-circle"></i> {error}
-          <button onClick={() => setError('')} style={{ marginLeft: '12px', background: 'none', border: 'none', color: '#991b1b', cursor: 'pointer' }}>
+          <i className="fas fa-exclamation-circle"></i> {globalError}
+          <button onClick={() => setGlobalError('')} style={{ marginLeft: '12px', background: 'none', border: 'none', color: '#991b1b', cursor: 'pointer' }}>
             <i className="fas fa-times"></i>
           </button>
         </div>
@@ -201,27 +245,45 @@ const PanelsView = () => {
       <div className="panel-grid" id="panelGrid">
         {panels.map(panel => {
           const stats = getPanelStats(panel.id);
+          const cs = getCardState(panel.id);
+          const effectiveStatus = getEffectiveStatus(panel, cs);
+          const cfg = statusConfig[effectiveStatus] ?? statusConfig.disconnected;
           const activePercent = stats.total > 0 ? Math.round((stats.active / stats.total) * 100) : 0;
           const expiredCount = Math.max(0, stats.total - stats.active);
-          const adminUsers = accounts.filter(a => a.panelId === panel.id && a.tags?.includes('admin')).slice(0, 3);
-          const adminInitials = adminUsers.map(a => a.email.substring(0, 2).toUpperCase()).join(', ');
+          const cardBusy = cs.action !== null;
+          const cardError = cs.error || panel.error;
 
           return (
-            <div className="pcard" key={panel.id}>
-              <div className={`pcard-accent ${getAccentClass(panel)}`}></div>
+            <div className={`pcard${cardBusy ? ' pcard-busy' : ''}${cardError ? ' pcard-has-error' : ''}`} key={panel.id}>
+              <div className={`pcard-accent ${cfg.accent}`}></div>
               <div className="pcard-body">
                 <div className="pcard-header">
-                  <div className={`pcard-icon ${getIconClass(panel)}`}>
-                    <i className="fas fa-cloud"></i>
+                  <div className={`pcard-icon ${cfg.iconClass}`}>
+                    <i className={cfg.icon}></i>
                   </div>
                   <div className="pcard-title-group">
                     <div className="pcard-name">{panel.name}</div>
                     <div className="pcard-url">{panel.url}</div>
                   </div>
-                  <div className={`pcard-status-pill ${panel.status}`}>
-                    <span className="pcard-dot"></span> {panel.status}
+                  <div className={`pcard-status-pill ${cfg.pillClass}`}>
+                    <span className={`pcard-dot${cfg.dotPulse ? ' pcard-dot-pulse' : ''}`}></span> {cfg.label}
                   </div>
                 </div>
+
+                {cardError && (
+                  <div className="pcard-error-inline">
+                    <i className="fas fa-exclamation-circle"></i>
+                    <span className="pcard-error-text">{cardError}</span>
+                    <button
+                      className="pcard-error-dismiss"
+                      onClick={() => setCardError(panel.id, null)}
+                      title="Dismiss"
+                    >
+                      <i className="fas fa-times"></i>
+                    </button>
+                  </div>
+                )}
+
                 <div className="pcard-divider"></div>
                 <div className="pcard-stats">
                   <div className="pcard-stat">
@@ -240,7 +302,21 @@ const PanelsView = () => {
                 <div className="pcard-divider"></div>
                 <div className="pcard-meta">
                   <span className="pcard-meta-item"><i className="fas fa-user-shield"></i> {panel.username}</span>
-                  <span className="pcard-meta-item"><i className="fas fa-users"></i> {adminInitials || '—'}</span>
+                  {cs.wsStatus === 'connected' && panel.status === 'connected' && (
+                    <span className="pcard-meta-item pcard-ws-badge">
+                      <i className="fas fa-bolt"></i> WebSocket
+                    </span>
+                  )}
+                  {cs.wsStatus === 'connecting' && panel.status === 'connected' && (
+                    <span className="pcard-meta-item pcard-ws-connecting">
+                      <i className="fas fa-spinner fa-spin"></i> WS connecting
+                    </span>
+                  )}
+                  {cs.wsStatus === 'error' && panel.status === 'connected' && (
+                    <span className="pcard-meta-item pcard-ws-error">
+                      <i className="fas fa-bolt"></i> WS error
+                    </span>
+                  )}
                   {expiredCount > 0 ? (
                     <span className="pcard-meta-item"><i className="fas fa-exclamation-triangle" style={{ color: '#f59e0b' }}></i> {expiredCount} expired</span>
                   ) : stats.total > 0 ? (
@@ -255,7 +331,7 @@ const PanelsView = () => {
                       type="checkbox"
                       checked={panel.status === 'connected'}
                       onChange={() => handleTogglePanel(panel)}
-                      disabled={loading}
+                      disabled={cardBusy}
                     />
                     <span className="toggle-slider"></span>
                   </label>
@@ -264,15 +340,15 @@ const PanelsView = () => {
                       className="icon-btn small"
                       title="Sync accounts"
                       onClick={() => handleSyncPanel(panel)}
-                      disabled={loading}
+                      disabled={cardBusy}
                     >
-                      <i className="fas fa-sync"></i>
+                      <i className={`fas fa-sync${cs.action === 'syncing' ? ' fa-spin' : ''}`}></i>
                     </button>
                     <button
                       className="icon-btn small"
                       title="Edit panel"
                       onClick={() => handleEditPanel(panel)}
-                      disabled={loading}
+                      disabled={cardBusy}
                     >
                       <i className="fas fa-edit"></i>
                     </button>
@@ -280,9 +356,9 @@ const PanelsView = () => {
                       className="action-btn secondary delete"
                       style={{ width: '32px', height: '32px', padding: '0', flex: 'none' }}
                       onClick={() => handleDeletePanel(panel.id)}
-                      disabled={loading}
+                      disabled={cardBusy}
                     >
-                      <i className="fas fa-trash"></i>
+                      <i className={`fas ${cs.action === 'deleting' ? 'fa-spinner fa-spin' : 'fa-trash'}`}></i>
                     </button>
                   </div>
                 </div>
@@ -291,7 +367,7 @@ const PanelsView = () => {
           );
         })}
 
-        {panels.length === 0 && !loading && (
+        {panels.length === 0 && !initialLoading && (
           <div className="empty-state" style={{ textAlign: 'center', padding: '60px 20px', color: '#6b7280', gridColumn: '1/-1' }}>
             <i className="fas fa-cloud" style={{ fontSize: '48px', marginBottom: '16px', opacity: 0.5 }}></i>
             <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '8px' }}>No panels added yet</h3>
@@ -303,7 +379,6 @@ const PanelsView = () => {
         )}
       </div>
 
-      {/* Add Panel Modal */}
       {showAddModal && (
         <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
@@ -315,7 +390,6 @@ const PanelsView = () => {
         </div>
       )}
 
-      {/* Edit Panel Modal */}
       {editingPanel && (
         <div className="modal-overlay" onClick={() => setEditingPanel(null)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
@@ -324,7 +398,7 @@ const PanelsView = () => {
                 name: editingPanel.name,
                 url: editingPanel.url,
                 username: editingPanel.username,
-                password: '', // password not stored in plaintext
+                password: '',
               }}
               onSuccess={handleSaveEdit}
               onCancel={() => setEditingPanel(null)}

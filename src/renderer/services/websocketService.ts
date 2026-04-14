@@ -2,7 +2,7 @@ import { getSettings } from './settingsService';
 import { getPanels } from './panelService';
 import { syncPanelAccounts } from './accountSyncService';
 
-export type WebSocketStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type WebSocketStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
 interface WebSocketConnection {
   ws: WebSocket;
@@ -172,9 +172,9 @@ class WebSocketManager {
     const conn = this.connections.get(panelId);
     if (!conn) return;
 
-    conn.status = 'disconnected';
     // If closure was abnormal (not intentional) and we haven't exceeded max attempts, schedule reconnect
     if (event.code !== 1000 && conn.reconnectAttempts < this.maxReconnectAttempts) {
+      conn.status = 'reconnecting';
       const delay = this.baseReconnectDelay * Math.pow(1.5, conn.reconnectAttempts);
       console.log(`Scheduling reconnect for panel ${panelId} in ${delay}ms (attempt ${conn.reconnectAttempts + 1})`);
       const timer = setTimeout(() => {

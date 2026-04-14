@@ -1,3 +1,5 @@
+export type PanelStatus = 'connected' | 'disconnected' | 'error' | 'reconnecting';
+
 export interface Panel {
     id: string;
     name: string;
@@ -7,7 +9,7 @@ export interface Panel {
     token?: string;
     tokenExpiry?: string;
     lastSync?: string;
-    status: 'connected' | 'disconnected' | 'error';
+    status: PanelStatus;
     error?: string;
 }
 export interface Account {
