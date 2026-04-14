@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import './index.css';
 import { getSettings, updateSettings } from './services/settingsService';
 import { startBackgroundScheduler, stopBackgroundScheduler } from './services/backgroundScheduler';
 import { getMonitoringAlerts } from './services/monitoringService';
 import { getAccounts } from './services/accountService';
 import { websocketManager } from './services/websocketService';
-
 
 import watcherLogo from './assets/watcherlogo.png';
 
@@ -15,29 +14,39 @@ declare global {
   }
 }
 
-// Import view components
+import type { AddAccountInitialTab } from './components/AddAccountModal';
+
+// Core views (eagerly loaded — always visible or frequently used)
 import DashboardView from './components/views/DashboardView';
 import PanelsView from './components/views/PanelsView';
 import AccountsView from './components/views/AccountsView';
-import type { AddAccountInitialTab } from './components/AddAccountModal';
-import MonitoringView from './components/views/MonitoringView';
-import SearchView from './components/views/SearchView';
 import SettingsView from './components/views/SettingsView';
-import CentralInboxView from './components/views/CentralInboxView';
-import ContactsView from './components/views/ContactsView';
-import EmailComposerView from './components/views/EmailComposerView';
-import AIAnalysisView from './components/views/AIAnalysisView';
-import SecurityView from './components/views/SecurityView';
-import AutoReplyView from './components/views/AutoReplyView';
-import TelegramConfigView from './components/views/TelegramConfigView';
-import TaskManagerView from './components/views/TaskManagerView';
-import AnalyticsView from './components/views/AnalyticsView';
-import TemplateManagerView from './components/views/TemplateManagerView';
-import DomainIntelView from './components/views/DomainIntelView';
-import AuditLogView from './components/views/AuditLogView';
-import WebhooksView from './components/views/WebhooksView';
-import AccountHealthView from './components/views/AccountHealthView';
-import ReputationView from './components/views/ReputationView';
+
+// Secondary views (lazy loaded — reduce initial bundle)
+const MonitoringView = lazy(() => import('./components/views/MonitoringView'));
+const SearchView = lazy(() => import('./components/views/SearchView'));
+const CentralInboxView = lazy(() => import('./components/views/CentralInboxView'));
+const ContactsView = lazy(() => import('./components/views/ContactsView'));
+const EmailComposerView = lazy(() => import('./components/views/EmailComposerView'));
+const AIAnalysisView = lazy(() => import('./components/views/AIAnalysisView'));
+const SecurityView = lazy(() => import('./components/views/SecurityView'));
+const AutoReplyView = lazy(() => import('./components/views/AutoReplyView'));
+const TelegramConfigView = lazy(() => import('./components/views/TelegramConfigView'));
+const TaskManagerView = lazy(() => import('./components/views/TaskManagerView'));
+const AnalyticsView = lazy(() => import('./components/views/AnalyticsView'));
+const TemplateManagerView = lazy(() => import('./components/views/TemplateManagerView'));
+const DomainIntelView = lazy(() => import('./components/views/DomainIntelView'));
+const AuditLogView = lazy(() => import('./components/views/AuditLogView'));
+const WebhooksView = lazy(() => import('./components/views/WebhooksView'));
+const AccountHealthView = lazy(() => import('./components/views/AccountHealthView'));
+const ReputationView = lazy(() => import('./components/views/ReputationView'));
+
+const LazyFallback = () => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200, color: '#9ca3af' }}>
+    <i className="fas fa-spinner fa-spin" style={{ fontSize: 20, marginRight: 10 }}></i>
+    Loading...
+  </div>
+);
 
 // View types
 type View = 'dashboard' | 'panels' | 'accounts' | 'monitoring' | 'search' | 'settings' | 'inbox' | 'contacts' | 'composer' | 'ai-analysis' | 'security' | 'auto-reply' | 'telegram' | 'tasks' | 'analytics' | 'templates' | 'domain-intel' | 'audit' | 'webhooks' | 'health' | 'reputation';
@@ -257,6 +266,8 @@ const App = () => {
     if (loading) {
       return <div className="loading">Loading settings...</div>;
     }
+
+    // Core views (eagerly loaded, no Suspense needed)
     switch (activeView) {
       case 'dashboard':
         return <DashboardView setActiveView={navigate} />;
@@ -269,45 +280,35 @@ const App = () => {
             onOpenAddAccountConsumed={clearAccountsOpenAddModalTab}
           />
         );
-      case 'monitoring':
-        return <MonitoringView />;
-      case 'search':
-        return <SearchView />;
       case 'settings':
         return <SettingsView />;
-      case 'inbox':
-        return <CentralInboxView />;
-      case 'contacts':
-        return <ContactsView />;
-      case 'composer':
-        return <EmailComposerView />;
-      case 'ai-analysis':
-        return <AIAnalysisView />;
-      case 'security':
-        return <SecurityView />;
-      case 'auto-reply':
-        return <AutoReplyView />;
-      case 'telegram':
-        return <TelegramConfigView />;
-      case 'tasks':
-        return <TaskManagerView />;
-      case 'analytics':
-        return <AnalyticsView />;
-      case 'templates':
-        return <TemplateManagerView />;
-      case 'domain-intel':
-        return <DomainIntelView />;
-      case 'audit':
-        return <AuditLogView />;
-      case 'webhooks':
-        return <WebhooksView />;
-      case 'health':
-        return <AccountHealthView />;
-      case 'reputation':
-        return <ReputationView />;
-      default:
-        return <DashboardView setActiveView={navigate} />;
     }
+
+    // Lazy-loaded views wrapped in Suspense
+    const lazyView = (() => {
+      switch (activeView) {
+        case 'monitoring': return <MonitoringView />;
+        case 'search': return <SearchView />;
+        case 'inbox': return <CentralInboxView />;
+        case 'contacts': return <ContactsView />;
+        case 'composer': return <EmailComposerView />;
+        case 'ai-analysis': return <AIAnalysisView />;
+        case 'security': return <SecurityView />;
+        case 'auto-reply': return <AutoReplyView />;
+        case 'telegram': return <TelegramConfigView />;
+        case 'tasks': return <TaskManagerView />;
+        case 'analytics': return <AnalyticsView />;
+        case 'templates': return <TemplateManagerView />;
+        case 'domain-intel': return <DomainIntelView />;
+        case 'audit': return <AuditLogView />;
+        case 'webhooks': return <WebhooksView />;
+        case 'health': return <AccountHealthView />;
+        case 'reputation': return <ReputationView />;
+        default: return <DashboardView setActiveView={navigate} />;
+      }
+    })();
+
+    return <Suspense fallback={<LazyFallback />}>{lazyView}</Suspense>;
   };
 
   const sidebarClass = sidebarCollapsed ? 'sidebar collapsed' : 'sidebar';

@@ -724,14 +724,30 @@ const CentralInboxView: React.FC = () => {
                   </div>
                 </div>
               </div>
-              <div className="inbox-reader-body">
+              <div className="inbox-reader-body" style={{ padding: 0, overflow: 'hidden' }}>
                 {loadingBody ? (
                   <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
                     <i className="fas fa-spinner fa-spin" style={{ fontSize: 24 }}></i>
                     <p style={{ marginTop: 8 }}>Loading email body...</p>
                   </div>
                 ) : (
-                  <div dangerouslySetInnerHTML={{ __html: msgBody }}></div>
+                  <iframe
+                    title="Email body"
+                    sandbox="allow-same-origin"
+                    srcDoc={(() => {
+                      const body = msgBody || '';
+                      const isFullDoc = /^<!DOCTYPE/i.test(body.trim()) || /^<html[\s>]/i.test(body.trim());
+                      if (isFullDoc) return body;
+                      return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:'Segoe UI',Roboto,system-ui,sans-serif;padding:20px;margin:0;font-size:14px;line-height:1.7;color:#374151;word-break:break-word;}img{max-width:100%;height:auto;}a{color:#2563eb;}</style></head><body>${body}</body></html>`;
+                    })()}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      border: 'none',
+                      display: 'block',
+                      minHeight: 300,
+                    }}
+                  />
                 )}
               </div>
               {showReplyBox && (

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { getTemplates, addTemplate, updateTemplate, deleteTemplate, type EmailTemplate } from '../../services/templateService';
 import HtmlPreviewModal from '../shared/HtmlPreviewModal';
+import AutoSizeIframe from '../shared/AutoSizeIframe';
 
 /** Build srcDoc for HTML preview: full documents pass through; fragments get a safe wrapper. */
 function buildHtmlSrcDoc(html: string): string {
@@ -197,11 +198,12 @@ const TemplateManagerView: React.FC = () => {
                   }}
                 >
                   {fType === 'html' ? (
-                    <iframe
+                    <AutoSizeIframe
                       title="HTML template preview"
-                      sandbox=""
+                      sandbox="allow-same-origin"
                       srcDoc={buildHtmlSrcDoc(fBody)}
-                      style={{ width: '100%', height: 280, border: 'none', display: 'block' }}
+                      minHeight={200}
+                      maxHeight={500}
                     />
                   ) : (
                     <pre
@@ -309,11 +311,12 @@ const TemplateManagerView: React.FC = () => {
             </div>
             <div style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden', background: '#fff' }}>
               {libraryPreview.type === 'html' ? (
-                <iframe
+                <AutoSizeIframe
                   title="Library template preview"
-                  sandbox=""
+                  sandbox="allow-same-origin"
                   srcDoc={buildHtmlSrcDoc(libraryPreview.body)}
-                  style={{ width: '100%', height: 320, border: 'none', display: 'block' }}
+                  minHeight={120}
+                  maxHeight={600}
                 />
               ) : (
                 <pre
