@@ -566,7 +566,15 @@ const EmailComposerView: React.FC = () => {
                 type="button"
                 className="action-btn secondary"
                 style={{ padding: '4px 10px', fontSize: 11 }}
-                onClick={(e) => { e.stopPropagation(); setShowTemplates(!showTemplates); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!expandedSections.compose) {
+                    setExpandedSections(prev => ({ ...prev, compose: true }));
+                    setShowTemplates(true);
+                    return;
+                  }
+                  setShowTemplates(prev => !prev);
+                }}
               >
                 <i className="fas fa-file-alt"></i> Templates ({templates.length})
               </button>
