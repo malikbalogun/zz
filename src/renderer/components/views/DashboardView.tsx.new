@@ -1,0 +1,213 @@
+import { useState, useEffect } from 'react';
+import { getPanels } from '../../services/panelService';
+import { getAccounts } from '../../services/accountService';
+import { getSettings } from '../../services/settingsService';
+
+const DashboardView = () => {
+  const [panels, setPanels] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const [panelsData, accountsData] = await Promise.all([
+          getPanels(),
+          getAccounts(),
+        ]);
+        setPanels(panelsData);
+        setAccounts(accountsData);
+      } catch (err) {
+        console.error('Failed to load dashboard data', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchData();
+  }, []);
+
+  if (loading) {
+    return <div className="db-loading">Loading dashboard...</div>;
+  }
+
+  const onlinePanels = panels.filter(p => p.status === 'online').length;
+  const activeAccounts = accounts.filter(a => a.status === 'active').length;
+  const expiredAccounts = accounts.filter(a => a.status === 'expired').length;
+
+  return (
+    <div id="dashboardView">
+      <div className="db-metrics">
+        <div className="db-metric">
+          <div className="db-metric-left">
+            <div className="db-metric-icon" style={{ background: 'linear-gradient(135deg,#3b82f6,#2563eb)' }}>
+              <i className="fas fa-server"></i>
+            </div>
+            <div>
+              <div className="db-metric-val">{onlinePanels}<span className="db-metric-of">/{panels.length}</span></div>
+              <div className="db-metric-label">Panels Online</div>
+            </div>
+          </div>
+          <div className="db-metric-status db-status-warn">{panels.length - onlinePanels} offline</div>
+        </div>
+        <div className="db-metric">
+          <div className="db-metric-left">
+            <div className="db-metric-icon" style={{ background: 'linear-gradient(135deg,#10b981,#059669)' }}>
+              <i className="fas fa-users"></i>
+            </div>
+            <div>
+              <div className="db-metric-val">{activeAccounts}<span className="db-metric-of">/{accounts.length}</span></div>
+              <div className="db-metric-label">Active Accounts</div>
+            </div>
+          </div>
+          <div className="db-metric-status db-status-warn">{expiredAccounts} expired</div>
+        </div>
+        <div className="db-metric">
+          <div className="db-metric-left">
+            <div className="db-metric-icon" style={{ background: 'linear-gradient(135deg,#8b5cf6,#7c3aed)' }}>
+              <i className="fas fa-key"></i>
+            </div>
+            <div>
+              <div className="db-metric-val">{activeAccounts}</div>
+              <div className="db-metric-label">Live Tokens</div>
+            </div>
+          </div>
+          <div className="db-metric-status db-status-ok">autorefresh on</div>
+        </div>
+        <div className="db-metric" style={{ cursor: 'pointer' }}>
+          <div className="db-metric-left">
+            <div className="db-metric-icon" style={{ background: 'linear-gradient(135deg,#f59e0b,#d97706)' }}>
+              <i className="fas fa-bell"></i>
+            </div>
+            <div>
+              <div className="db-metric-val">4</div>
+              <div className="db-metric-label">Unread Alerts</div>
+            </div>
+          </div>
+          <div className="db-metric-status db-status-warn">view →</div>
+        </div>
+      </div>
+
+      <div className="db-grid">
+        <div className="db-col-left">
+          <div className="db-card">
+            <div className="db-card-header">
+              <span className="db-card-title">
+                <i className="fas fa-server" style={{ color: '#3b82f6' }}></i> Panel Status
+              </span>
+              <button className="mon-header-btn action-btn secondary">View All →</button>
+            </div>
+            {panels.map(panel => (
+              <div key={panel.id} className="db-panel-row">
+                <div className={`db-panel-dot ${panel.status === 'online' ? 'db-dot-green' : 'db-dot-amber'}`}></div>
+                <div className="db-panel-info">
+                  <div className="db-panel-name">{panel.name}</div>
+                  <div className="db-panel-meta">{panel.url} · Synced today 2:45 PM</div>
+                </div>
+                <div className="db-panel-stat"><span className={`status-pill ${panel.status === 'online' ? 'active' : 'expired'}`}>{panel.status}</span></div>
+                <div className="db-panel-stat" style={{ fontSize: '12px', color: '#6b7280' }}>{panel.accounts?.length || 0} accounts</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="db-card" style={{ marginTop: '20px' }}>
+            <div className="db-card-header">
+              <span className="db-card-title">
+                <i className="fas fa-key" style={{ color: '#8b5cf6' }}></i> Token Health
+              </span>
+            </div>
+            <div className="db-token-row">
+              <div className="db-token-label">Next auto-refresh</div>
+              <div className="db-token-val" style={{ color: '#10b981' }}>in 42 minutes</div>
+            </div>
+            <div className="db-token-row">
+              <div className="db-token-label">On autorefresh tag</div>
+              <div className="db-token-val">{activeAccounts} accounts</div>
+            </div>
+            <div className="db-token-row">
+              <div className="db-token-label">Manual only</div>
+              <div className="db-token-val" style={{ color: '#f59e0b' }}>robert.brown - expired</div>
+            </div>
+            <div className="db-token-row">
+              <div className="db-token-label">Telegram alerts</div>
+              <div className="db-token-val" style={{ color: '#f59e0b' }}>Not configured</div>
+            </div>
+            <div className="db-token-row">
+              <div className="db-token-label">Token storage</div>
+              <div className="db-token-val" style={{ color: '#10b981' }}>Encrypted · Healthy</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="db-col-right">
+          <div className="db-card">
+            <div className="db-card-header">
+              <span className="db-card-title">
+                <i className="fas fa-history" style={{ color: '#06b6d4' }}></i> Recent Activity
+              </span>
+            </div>
+            <div className="db-activity-feed">
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#8b5cf6' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Token refreshed - <strong>alice.smith@business.com</strong></div>
+                  <div className="db-activity-time">Today, 09:15 AM · Backup Panel</div>
+                </div>
+              </div>
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#f59e0b' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Alert triggered - <strong>john.doe@company.com</strong> · keyword: "invoice"</div>
+                  <div className="db-activity-time">Today, 10:24 AM · Production Panel</div>
+                </div>
+              </div>
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#f59e0b' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Alert triggered - <strong>mike.taylor@startup.io</strong> · keyword: "wire"</div>
+                  <div className="db-activity-time">Today, 08:50 AM · Production Panel</div>
+                </div>
+              </div>
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#dc2626' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Token expired - <strong>robert.brown@enterprise.com</strong></div>
+                  <div className="db-activity-time">Yesterday · Production Panel</div>
+                </div>
+              </div>
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#10b981' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Panel synced - <strong>Production Panel</strong> · 3 accounts updated</div>
+                  <div className="db-activity-time">Today, 2:45 PM</div>
+                </div>
+              </div>
+              <div className="db-activity-item">
+                <div className="db-activity-dot" style={{ background: '#6b7280' }}></div>
+                <div className="db-activity-body">
+                  <div className="db-activity-text">Panel offline - <strong>Backup Server</strong> · connection lost</div>
+                  <div className="db-activity-time">Yesterday, 11:20 AM</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="db-card" style={{ marginTop: '20px' }}>
+            <div className="db-card-header">
+              <span className="db-card-title">
+                <i className="fas fa-bolt" style={{ color: '#f59e0b' }}></i> Quick Actions
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginTop: '4px' }}>
+              <button className="action-btn secondary"><i className="fas fa-plus"></i> Add Panel</button>
+              <button className="action-btn secondary"><i className="fas fa-sync"></i> Sync All</button>
+              <button className="action-btn secondary"><i className="fas fa-download"></i> Export Tokens</button>
+              <button className="action-btn secondary"><i className="fas fa-user-plus"></i> Add Account</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default DashboardView;

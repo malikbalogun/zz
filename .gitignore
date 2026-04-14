@@ -1,0 +1,21 @@
+node_modules
+dist
+release
+.DS_Store
+*.log
+.env
+.env.local
+# Local OAuth seed for dev (never commit secrets)
+local-dev-account.json
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/.idea
+/.vscode
+/coverage
+/build
+/.cache
+/.parcel-cache

