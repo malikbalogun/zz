@@ -579,7 +579,7 @@ if (typeof window !== 'undefined') {
       }
       
       console.log(`[Debug] Adding account ${email} with scopeType: ${scope}`);
-      const result = await window.electron.actions.addViaToken(email, cid, auth, token, scope);
+      const result = await window.electron.accounts.addViaToken(email, cid, auth, token, scope);
       console.log('[Debug] Account added:', result);
       return result;
     }

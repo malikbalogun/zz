@@ -20,9 +20,16 @@ export interface ElectronAPI {
     refreshBulk: (ids: string[]) => Promise<unknown>;
     exportCSV: () => Promise<unknown>;
     exportJSON: () => Promise<unknown>;
-    exportJSONData: (accountIds?: string[]) => Promise<unknown>;
+    exportJSONData: (
+      accountIds?: string[]
+    ) => Promise<{ success: boolean; data?: any; count?: number; error?: string }>;
     importJSON: (filePath: string) => Promise<unknown>;
-    importJSONDialog: () => Promise<unknown>;
+    importJSONDialog: () => Promise<{
+      success: boolean;
+      canceled?: boolean;
+      count?: number;
+      error?: string;
+    }>;
   };
   platform: string;
   versions: {
@@ -34,6 +41,11 @@ export interface ElectronAPI {
     get: (key: string) => Promise<any>;
     set: (key: string, value: any) => Promise<boolean>;
     delete: (key: string) => Promise<boolean>;
+  };
+  state: {
+    get: () => Promise<any>;
+    set: (state: any) => Promise<any>;
+    update: (updates: any) => Promise<any>;
   };
   safeStorage: {
     encrypt: (plaintext: string) => Promise<string>;
@@ -83,6 +95,8 @@ export interface ElectronAPI {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => Promise<any>;
     openOwaExternalSignIn: (accountId: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
+    /** Returns the list of accountIds for which Outlook BrowserWindows are currently open. */
+    getOpenOutlookWindows: () => Promise<string[]>;
     telegramSendAlert: (bot: string, message: string) => Promise<{ success: boolean; error?: string }>;
     telegramSendSearchResults: (bot: string, results: any[]) => Promise<{ success: boolean; error?: string }>;
     telegramAccountsNotify: (email: string, via: string) => Promise<{ success: boolean; error?: string }>;

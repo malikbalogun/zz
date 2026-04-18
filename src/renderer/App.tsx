@@ -9,12 +9,6 @@ import { websocketManager } from './services/websocketService';
 
 import watcherLogo from './assets/watcherlogo.png';
 
-declare global {
-  interface Window {
-    electron: any;
-  }
-}
-
 // Import view components
 import DashboardView from './components/views/DashboardView';
 import PanelsView from './components/views/PanelsView';

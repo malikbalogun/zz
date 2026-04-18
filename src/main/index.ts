@@ -3352,7 +3352,9 @@ function setupIpcHandlers() {
     store.settings = { ...(store.settings || {}), ...allSettings };
     await writeStore(store);
     // Restart token refresh scheduler with possibly new interval
-    // TEMPORARILY DISABLED: startTokenRefreshScheduler().catch(err => console.error('Failed to restart token refresh scheduler:', err));
+    startTokenRefreshScheduler().catch(err =>
+      console.error('Failed to restart token refresh scheduler:', err)
+    );
     return { success: true };
   });
 
@@ -3382,13 +3384,10 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle('updater:check', async () => {
-    try {
-      const response = await fetch('https://api.github.com/repos/YOUR_ORG/watcher/releases/latest',
-        { headers: { 'User-Agent': 'Watcher-App' }, signal: timeoutSignal(10000) } as any);
-      if (!response.ok) return { hasUpdate: false };
-      const data: any = await response.json();
-      return { hasUpdate: true, version: data.tag_name, url: data.html_url };
-    } catch { return { hasUpdate: false, message: 'Update check failed' }; }
+    // Updater is not yet wired to a real release feed. Returning a stable
+    // "no update" response avoids hitting a guaranteed 404 (and burning
+    // GitHub anti-abuse budget) on every check.
+    return { hasUpdate: false, message: 'Updater not configured' };
   });
 
   // Microsoft Graph OAuth (main process, no CORS)
@@ -3588,8 +3587,9 @@ app.whenReady().then(async () => {
     await seedDevAccountFromLocalFile();
     setupIpcHandlers();
     console.log('[Main] IPC handlers setup');
-    // TEMPORARILY DISABLED: startTokenRefreshScheduler();
-    console.log('[Main] Token refresh scheduler DISABLED for debugging');
+    startTokenRefreshScheduler().catch(err =>
+      console.error('[Main] Failed to start token refresh scheduler:', err)
+    );
 
     // 1. Read saved state
     const state = await readState();
@@ -3597,8 +3597,7 @@ app.whenReady().then(async () => {
 
     // 2. Run session validity check for all accounts
     console.log('[Main] Running session validity check...');
-    // TEMPORARILY DISABLED: await checkSessionValidity();
-    console.log('[Main] Session validity check DISABLED for debugging');
+    await checkSessionValidity();
 
     // 3. Determine if monitoring was paused during downtime
     const now = new Date();
@@ -3627,12 +3626,13 @@ app.whenReady().then(async () => {
   });
 });
 
-// Save state before quit
-app.on('before-quit', async () => {
+// Stop background timers before quit.
+// NOTE: keep this synchronous — Electron does not await async listeners on
+// `before-quit`, so any awaited fs work would race process exit. The renderer
+// already persists `state.json` on view changes / settings save; the
+// `lastState.timestamp` field is purely informational at next launch.
+app.on('before-quit', () => {
   stopTokenRefreshScheduler();
-  const state = await readState();
-  state.lastState.timestamp = new Date().toISOString();
-  await writeState(state);
 });
 
 app.on('window-all-closed', () => {

@@ -307,7 +307,7 @@ export async function refreshAccountTokenViaCredential(accountId: string): Promi
     throw new Error('Account does not have credential auth');
   }
   
-  // TODO: decrypt password, reâ€‘login to panel, obtain new token
+  // TODO: decrypt password, re-login to panel, obtain new token
   // For now, just update lastRefresh
   const updated = await updateAccount(accountId, {
     lastRefresh: new Date().toISOString(),

@@ -1,11 +1,10 @@
 import { Panel } from '../../types/panel';
 import { replacePanelTag } from './accountService';
-
-// Lazy import to avoid circular dependency
-async function getWebsocketManager() {
-  const { websocketManager } = await import('./websocketService');
-  return websocketManager;
-}
+// `websocketService` imports `getPanels` from this module, so there is a
+// static-graph cycle. ES module live bindings handle it because we only touch
+// `websocketManager` inside async function bodies — by the time those run,
+// both modules have finished evaluating.
+import { websocketManager } from './websocketService';
 
 
 
@@ -82,7 +81,7 @@ export async function deletePanel(id: string) {
   const panels = await getPanels();
   const filtered = panels.filter(p => p.id !== id);
   // Stop WebSocket connection for this panel
-  (await getWebsocketManager()).stopForPanel(id);
+  websocketManager.stopForPanel(id);
   await savePanels(filtered);
   // Update accounts: replace panel tag (production/backup) with 'detached'
   try {
@@ -145,12 +144,12 @@ export async function authenticatePanel(panelId: string): Promise<Panel> {
       error: undefined,
     });
     // Start WebSocket connection for real‑time token capture
-    (await getWebsocketManager()).startForPanel(panelId, updated.url).catch(err => 
+    websocketManager.startForPanel(panelId, updated.url).catch(err =>
       console.error(`Failed to start WebSocket for panel ${panelId}:`, err)
     );
     return updated;
   } catch (error) {
-    (await getWebsocketManager()).stopForPanel(panelId);
+    websocketManager.stopForPanel(panelId);
     await updatePanel(panelId, {
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
