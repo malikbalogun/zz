@@ -19,3 +19,11 @@ yarn-error.log*
 /build
 /.cache
 /.parcel-cache
+
+# Build artifacts
+*.tsbuildinfo
+tsc-*.txt
+
+# Editor backups (history is in git, not in shadow files)
+*.backup
+*.new
