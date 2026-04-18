@@ -113,7 +113,9 @@ const App = () => {
             setActiveView(view as View);
           }
         }
-        // TODO: restore activeTag, monitoringRunning, etc.
+        // Note: AccountsView now restores its own `activeTag` from the saved
+        // state. `monitoringRunning` is reserved in the schema but no
+        // renderer flow currently produces it, so there is nothing to restore.
       } catch (err) {
         console.warn('Failed to load saved state:', err);
       }

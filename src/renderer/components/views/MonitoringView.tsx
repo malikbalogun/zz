@@ -628,13 +628,12 @@ const MonitoringView = () => {
               <div className="listener-status">
                 <span className="status-pill active">Active</span>
               </div>
-              <div className="listener-actions">
-                <button className="icon-btn" title="Pause listener" disabled>
-                  <i className="fas fa-pause"></i>
-                </button>
-                <button className="icon-btn" title="Delete listener" disabled>
-                  <i className="fas fa-trash"></i>
-                </button>
+              <div
+                className="listener-actions"
+                title="The Token Watcher is a built-in listener and cannot be paused or removed from this view."
+                style={{ opacity: 0.5, fontSize: 12, color: '#6b7280', alignSelf: 'center' }}
+              >
+                Built-in
               </div>
             </div>
           </div>
@@ -713,9 +712,13 @@ const MonitoringView = () => {
                     <div className="ft-actions">
                       <button
                         className="icon-btn"
-                        title="Open email"
-                        onClick={() => alert('Open email not implemented')}
-                        disabled={loading}
+                        title={alert.webLink ? 'Open email in Outlook' : 'No web link captured for this alert'}
+                        onClick={() => {
+                          if (alert.webLink) {
+                            void window.electron.browser.open(alert.webLink);
+                          }
+                        }}
+                        disabled={loading || !alert.webLink}
                       >
                         <i className="fas fa-eye"></i>
                       </button>

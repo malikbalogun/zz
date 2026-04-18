@@ -502,8 +502,13 @@ const SearchView = () => {
                       <div className="ft-actions">
                         <button
                           className="icon-btn"
-                          onClick={() => alert('Open email not implemented')}
-                          title="Open email"
+                          onClick={() => {
+                            if (result.webLink) {
+                              void window.electron.browser.open(result.webLink);
+                            }
+                          }}
+                          disabled={!result.webLink}
+                          title={result.webLink ? 'Open email in Outlook' : 'No web link captured for this result'}
                         >
                           <i className="fas fa-eye"></i>
                         </button>

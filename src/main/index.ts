@@ -2771,10 +2771,12 @@ function setupIpcHandlers() {
     return exportTokensToPath(picked.filePath);
   });
 
-  // Clear activity feed
+  // Clear activity feed (also reachable via the dashboard:clearActivity channel —
+  // both preload bindings should result in an actual reset).
   ipcMain.handle('activity:clear', async () => {
-    console.log('Clear activity feed');
-    // TODO: clear activity feed in state.json
+    const store = await readStore();
+    store.activityFeed = [];
+    await writeStore(store);
     return { success: true };
   });
 
@@ -2881,22 +2883,9 @@ function setupIpcHandlers() {
     return panel;
   });
 
-  ipcMain.handle('panel:syncAll', async () => {
-    const store = await readStore();
-    const panels: any[] = store.panels || [];
-    const connected = panels.filter(p => p.status === 'connected');
-    const results = [];
-    for (const panel of connected) {
-      try {
-        // TODO: call panel API fetch accounts and sync
-        console.log(`Syncing panel ${panel.name}`);
-        results.push({ panelId: panel.id, success: true });
-      } catch (err) {
-        results.push({ panelId: panel.id, success: false, error: String(err) });
-      }
-    }
-    return results;
-  });
+  // NOTE: an old `panel:syncAll` IPC stub used to live here. Per-panel sync is
+  // driven from the renderer (`syncPanelAccounts(panelId)`); the stub did
+  // nothing but report success, which was misleading. Removed for honesty.
 
   ipcMain.handle('panel:delete', async (_, panelId: string) => {
     const store = await readStore();
@@ -3604,9 +3593,25 @@ app.whenReady().then(async () => {
     const lastStateTime = new Date(state.lastState.timestamp);
     const hoursSince = (now.getTime() - lastStateTime.getTime()) / (1000 * 60 * 60);
     if (state.monitoringRunning && hoursSince > 1) {
-      // Monitoring was paused for >1 hour, add note to activity feed
-      // TODO: add activity feed entry (store in store.json under activityFeed)
       console.log(`Monitoring paused for ${hoursSince.toFixed(1)} hours`);
+      // Add a single activity-feed entry so the user can see why monitoring
+      // is no longer in the running state when they reopen the app.
+      try {
+        const store = await readStore();
+        const feed: any[] = Array.isArray(store.activityFeed) ? store.activityFeed : [];
+        feed.unshift({
+          id: crypto.randomUUID(),
+          type: 'monitoring',
+          severity: 'warning',
+          message: `Monitoring paused — app was closed for ${hoursSince.toFixed(1)} hours`,
+          timestamp: new Date().toISOString(),
+        });
+        // Cap the feed to a reasonable size so it doesn't grow unbounded.
+        store.activityFeed = feed.slice(0, 500);
+        await writeStore(store);
+      } catch (err) {
+        console.warn('[Main] Failed to write monitoring-paused activity entry:', err);
+      }
     }
 
     // 4. Create window

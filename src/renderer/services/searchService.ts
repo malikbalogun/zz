@@ -252,6 +252,8 @@ export async function runSearchJob(id: string) {
             date: received,
             folder: folderLabels[i] || 'All folders',
             keywords: job.keywords,
+            webLink: typeof msg.webLink === 'string' ? msg.webLink : undefined,
+            emailId: typeof msg.id === 'string' ? msg.id : undefined,
           };
           const saved = await addSearchResult(searchResult);
           results.push(saved);

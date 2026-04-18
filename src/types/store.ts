@@ -112,6 +112,10 @@ export interface SearchResult {
   folder: string;
   /** Keywords from the search job (for display). */
   keywords?: string[];
+  /** Outlook web link (Graph WebLink) so the row can open the message in OWA. */
+  webLink?: string;
+  /** Graph message id, kept for future deep-link / pull-from-mailbox flows. */
+  emailId?: string;
 }
 
 export type AutoReplyScope = 'global' | 'account';

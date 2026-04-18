@@ -48,7 +48,6 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('panel:save', name, url, username, password),
     connect: (panelId: string) => ipcRenderer.invoke('panel:connect', panelId),
     disconnect: (panelId: string) => ipcRenderer.invoke('panel:disconnect', panelId),
-    syncAll: () => ipcRenderer.invoke('panel:syncAll'),
     delete: (panelId: string) => ipcRenderer.invoke('panel:delete', panelId),
     detachAccounts: (panelId: string) => ipcRenderer.invoke('panel:detachAccounts', panelId),
     previewAccounts: (panelId: string) => ipcRenderer.invoke('panel:previewAccounts', panelId),

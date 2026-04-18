@@ -438,13 +438,39 @@ const AccountsView: FC<AccountsViewProps> = ({
     });
   });
 
-  // Filter accounts by selected tag (if any)
-  const [activeTag, setActiveTag] = useState<string | null>(null);
+  // Filter accounts by selected tag (if any). Persisted via the main-process
+  // state store so the user's last-selected sidebar tag survives a relaunch.
+  const [activeTag, setActiveTagState] = useState<string | null>(null);
+  const [activeTagLoaded, setActiveTagLoaded] = useState(false);
 
-  // Reset current page when filters change
   useEffect(() => {
+    void (async () => {
+      try {
+        const saved = await window.electron.state.get();
+        if (saved && Object.prototype.hasOwnProperty.call(saved, 'activeTag')) {
+          setActiveTagState(saved.activeTag ?? null);
+        }
+      } catch (err) {
+        console.warn('Failed to restore activeTag:', err);
+      } finally {
+        setActiveTagLoaded(true);
+      }
+    })();
+  }, []);
+
+  const setActiveTag = (next: string | null) => {
+    setActiveTagState(next);
+    // Fire-and-forget; persistence failure shouldn't block the UI.
+    void window.electron.state.update({ activeTag: next }).catch(() => {});
+  };
+
+  // Reset current page when filters change. Wait until we've finished
+  // restoring activeTag so the first transition (null -> saved) doesn't
+  // trigger a spurious page reset.
+  useEffect(() => {
+    if (!activeTagLoaded) return;
     setCurrentPage(1);
-  }, [accounts, activeTag, statusFilter, searchTerm, sortBy]);
+  }, [accounts, activeTag, statusFilter, searchTerm, sortBy, activeTagLoaded]);
   const filteredAccounts = accounts.filter(acc => {
     if (activeTag && !acc.tags.includes(activeTag)) return false;
     if (statusFilter === 'active' && acc.status !== 'active') return false;
