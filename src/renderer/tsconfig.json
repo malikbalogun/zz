@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0",
+    "composite": true,
+    "outDir": "../../dist/renderer",
+    "rootDir": "..",
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "module": "ESNext",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"],
+      "@shared/*": ["../shared/*"]
+    }
+  },
+  "include": ["./**/*", "../shared/**/*.ts", "../types/**/*.ts", "../types/**/*.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

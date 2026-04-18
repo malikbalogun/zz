@@ -1,0 +1,71 @@
+{
+  "name": "panel-manager",
+  "version": "0.1.0",
+  "description": "Desktop client to manage multiple webmail panels, sync tokens, and keep accounts alive.",
+  "main": "dist/main/main/index.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "cross-env NODE_ENV=development electronmon .",
+    "build": "npm run build:ts && npm run build:vite",
+    "build:ts": "tsc -b",
+    "build:vite": "vite build",
+    "test:oauth": "npm run build:ts && node --test dist/main/main/microsoftOAuthRefresh.test.js",
+    "test:cookie": "npx tsc -b src/main/tsconfig.json && node --test dist/main/main/cookieFormat.test.js",
+    "start": "electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "build:win": "npm run build && electron-builder --win",
+    "build:mac": "npm run build && electron-builder --mac"
+  },
+  "keywords": [
+    "electron",
+    "panel",
+    "webmail",
+    "token",
+    "manager"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "electron": "^41.0.4",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron-builder": "^26.8.1",
+    "electronmon": "^2.0.4",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.panelmanager.app",
+    "productName": "Panel Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

@@ -1,0 +1,234 @@
+import { authenticatePanel, fetchAccounts, exportToken, getPanel, encryptPassword, decryptPassword } from './panelService';
+import { addAccount, getAccounts, updateAccount } from './accountService';
+import { getSettings } from './settingsService';
+import { UIAccount } from '../../types/store';
+
+// ----------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------
+async function encryptCookies(cookies: string): Promise<string> {
+  // Use safeStorage encrypt (same as password encryption)
+  return window.electron.safeStorage.encrypt(cookies);
+}
+
+async function decryptCookies(encrypted: string): Promise<string> {
+  return window.electron.safeStorage.decrypt(encrypted);
+}
+
+// ----------------------------------------------------------------------
+// Panel Sync
+// ----------------------------------------------------------------------
+export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
+  const panel = await authenticatePanel(panelId);
+  const remoteAccounts = await fetchAccounts(panel);
+  
+  // Determine panel's system tag
+  const panelTag = panel.name.toLowerCase().includes('backup') ? 'backup' : 'production';
+  const settings = await getSettings();
+  const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
+  
+  const existing = await getAccounts();
+  const added: UIAccount[] = [];
+  
+  for (const remote of remoteAccounts) {
+    // Detect admin (assume remote.role === 'admin' or email pattern)
+    const isAdmin = remote.role === 'admin' || remote.email?.toLowerCase().includes('admin');
+    
+    const tags = [panelTag];
+    if (isAdmin) tags.push('admin');
+    if (autoRefreshTagId) tags.push(autoRefreshTagId);
+    
+    const existingAccount = existing.find(a => a.email === remote.email && a.panelId === panelId);
+    
+    // Prepare auth object
+    let auth: UIAccount['auth'];
+    if (remote.clientId && remote.authorityEndpoint && remote.refreshToken) {
+      auth = {
+        type: 'token',
+        clientId: remote.clientId,
+        authorityEndpoint: remote.authorityEndpoint,
+        refreshToken: remote.refreshToken,
+      };
+    } else {
+      // Unknown auth type; treat as credential? For now, token with empty fields.
+      auth = {
+        type: 'token',
+        clientId: '',
+        authorityEndpoint: '',
+        refreshToken: '',
+      };
+    }
+    
+    const accountData: Omit<UIAccount, 'id'> = {
+      email: remote.email,
+      name: remote.name || remote.email.split('@')[0],
+      panelId,
+      added: existingAccount?.added || new Date().toISOString(),
+      status: remote.status === 'active' ? 'active' : 'expired',
+      tags,
+      auth,
+      lastRefresh: remote.lastRefresh || existingAccount?.lastRefresh,
+      notes: remote.notes,
+    };
+    
+    if (existingAccount) {
+      const updated = await updateAccount(existingAccount.id, accountData);
+      added.push(updated);
+    } else {
+      const newAccount = await addAccount(accountData);
+      added.push(newAccount);
+    }
+  }
+  
+  return added;
+}
+
+// ----------------------------------------------------------------------
+// Cookie Import
+// ----------------------------------------------------------------------
+export async function importAccountViaCookie(url: string, email: string): Promise<UIAccount> {
+  const result = await window.electron.actions.captureCookies(url);
+  if (!result.success) {
+    throw new Error(`Cookie capture failed: ${result.message}`);
+  }
+  
+  const cookiesEncrypted = await encryptCookies(result.cookies);
+  const settings = await getSettings();
+  const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
+  
+  const tags = ['cookie-import'];
+  if (autoRefreshTagId) tags.push(autoRefreshTagId);
+  
+  const accountData: Omit<UIAccount, 'id'> = {
+    email,
+    added: new Date().toISOString(),
+    status: 'active',
+    tags,
+    auth: {
+      type: 'cookie',
+      cookies: cookiesEncrypted,
+    },
+  };
+  
+  return addAccount(accountData);
+}
+
+// ----------------------------------------------------------------------
+// Credential Login
+// ----------------------------------------------------------------------
+export async function addAccountViaCredentials(
+  panelId: string,
+  email: string,
+  password: string
+): Promise<UIAccount> {
+  const panel = await authenticatePanel(panelId);
+  // TODO: call panel API to login as this user and obtain token
+  // For now, simulate token acquisition (use panel token as placeholder)
+  const passwordEncrypted = await encryptPassword(password);
+  
+  const settings = await getSettings();
+  const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
+  
+  const tags = ['credential'];
+  if (autoRefreshTagId) tags.push(autoRefreshTagId);
+  
+  const accountData: Omit<UIAccount, 'id'> = {
+    email,
+    panelId,
+    added: new Date().toISOString(),
+    status: 'active',
+    tags,
+    auth: {
+      type: 'credential',
+      username: email,
+      passwordEncrypted,
+    },
+  };
+  
+  return addAccount(accountData);
+}
+
+// ----------------------------------------------------------------------
+// Admin Harvest
+// ----------------------------------------------------------------------
+export async function harvestAssociatedAccounts(adminAccountId: string): Promise<UIAccount[]> {
+  const associated = await window.electron.actions.adminHarvest(adminAccountId);
+  const settings = await getSettings();
+  const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
+  
+  const added: UIAccount[] = [];
+  for (const acc of associated) {
+    const tags = ['admin-harvest'];
+    if (autoRefreshTagId) tags.push(autoRefreshTagId);
+    
+    const accountData: Omit<UIAccount, 'id'> = {
+      email: acc.email,
+      panelId: acc.panelId,
+      added: new Date().toISOString(),
+      status: acc.status || 'active',
+      tags,
+      auth: acc.auth, // assume already encrypted
+    };
+    const newAccount = await addAccount(accountData);
+    added.push(newAccount);
+  }
+  return added;
+}
+
+// ----------------------------------------------------------------------
+// Token Refresh
+// ----------------------------------------------------------------------
+export async function refreshAccountToken(accountId: string): Promise<UIAccount> {
+  const accounts = await getAccounts();
+  const account = accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  
+  if (account.auth?.type !== 'token') {
+    throw new Error('Account does not have token-based auth');
+  }
+  
+  const panel = await getPanel(account.panelId!);
+  if (!panel) throw new Error('Panel not found');
+  
+  // Use exportToken endpoint to refresh token
+  const tokenData = await exportToken(panel, account.email);
+  
+  const updatedAuth = {
+    ...account.auth,
+    clientId: tokenData.clientId,
+    authorityEndpoint: tokenData.authorityEndpoint,
+    refreshToken: tokenData.refreshToken,
+  };
+  
+  const updated = await updateAccount(accountId, {
+    auth: updatedAuth,
+    lastRefresh: new Date().toISOString(),
+    status: 'active',
+  });
+  return updated;
+}
+
+export async function refreshAccountTokenViaCredential(accountId: string): Promise<UIAccount> {
+  const accounts = await getAccounts();
+  const account = accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  
+  if (account.auth?.type !== 'credential') {
+    throw new Error('Account does not have credential auth');
+  }
+  
+  // TODO: decrypt password, re‑login to panel, obtain new token
+  // For now, just update lastRefresh
+  const updated = await updateAccount(accountId, {
+    lastRefresh: new Date().toISOString(),
+    status: 'active',
+  });
+  return updated;
+}
+
+// ----------------------------------------------------------------------
+// Mailbox Viewer
+// ----------------------------------------------------------------------
+export async function openMailbox(accountId: string): Promise<void> {
+  await window.electron.actions.openMailbox(accountId);
+}

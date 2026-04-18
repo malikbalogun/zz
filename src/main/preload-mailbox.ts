@@ -1,0 +1,124 @@
+import { ipcRenderer } from 'electron';
+
+console.log('[HighHopes] Preload script loaded for mailbox window');
+
+// ---------------------------------------------------------------------------
+// 1. Clear stale MSAL keys then inject fresh cache from main process
+// ---------------------------------------------------------------------------
+try {
+  const staleKeys: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && (key.startsWith('msal') || key.startsWith('appmetadata-') || key === 'olk-msalexp')) {
+      staleKeys.push(key);
+    }
+  }
+  if (staleKeys.length > 0) {
+    staleKeys.forEach(k => localStorage.removeItem(k));
+    console.log(`[HighHopes] Cleared ${staleKeys.length} stale MSAL keys`);
+  }
+} catch (err) {
+  console.error('[HighHopes] Failed to clear stale keys:', (err as any).message);
+}
+
+try {
+  console.log('[HighHopes] Requesting MSAL cache from main process...');
+  const entries = ipcRenderer.sendSync('get-msal-cache');
+  console.log('[HighHopes] Received entries:', entries ? Object.keys(entries).length : 0, 'keys');
+  if (entries && typeof entries === 'object') {
+    const keys = Object.keys(entries);
+    for (const k of keys) localStorage.setItem(k, entries[k]);
+    console.log(`[HighHopes] MSAL cache injected: ${keys.length} entries`);
+  } else {
+    console.warn('[HighHopes] No MSAL cache entries received');
+  }
+} catch (err) {
+  console.error('[HighHopes] Cache injection error:', (err as any).message);
+}
+
+// ---------------------------------------------------------------------------
+// 2. Capture OWA client ID from fetch requests to login endpoints
+// ---------------------------------------------------------------------------
+(function () {
+  function captureClientId(url: string) {
+    try {
+      const u = new URL(url);
+      const cid = u.searchParams.get('client_id');
+      if (cid && cid !== 'd3590ed6-52b3-4102-aeff-aad2292ab01c') {
+        console.log('[PRELOAD] OWA client ID intercepted:', cid);
+        ipcRenderer.send('owa-client-id-found', cid);
+      }
+    } catch {}
+  }
+
+  const originalCreateElement = document.createElement.bind(document);
+  (document.createElement as any) = function (tag: string) {
+    const el = originalCreateElement(tag);
+    if (tag.toLowerCase() === 'iframe') {
+      const isLoginUrl = (s: string) =>
+        typeof s === 'string' && (s.includes('login.microsoftonline.com') || s.includes('login.windows.net'));
+
+      let _src = '';
+      Object.defineProperty(el, 'src', {
+        set(v) {
+          if (isLoginUrl(v)) { captureClientId(v); _src = ''; return; }
+          _src = v; el.setAttribute('src', v);
+        },
+        get() { return _src; },
+      });
+      const origSA = el.setAttribute.bind(el);
+      el.setAttribute = function (n: string, v: string) {
+        if (n === 'src' && isLoginUrl(v)) { captureClientId(v); return; }
+        return origSA(n, v);
+      };
+    }
+    return el;
+  };
+  console.log('[PRELOAD] Iframe blocker + client-ID capture installed');
+})();
+
+// ---------------------------------------------------------------------------
+// 3. Auto-heal transient OWA "session expired / Sign in" banners
+// ---------------------------------------------------------------------------
+(function () {
+  const SIGN_IN_TEXT = /sign\s*in/i;
+  const SESSION_EXPIRED_TEXT = /session has expired|you need to sign in/i;
+  let autoClicked = 0;
+  const maxAutoClicks = 6;
+
+  function tryAutoClickSignIn(): void {
+    if (autoClicked >= maxAutoClicks) return;
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    const showsExpiryBanner =
+      bodyText.includes('session has expired') || bodyText.includes('you need to sign in');
+    if (!showsExpiryBanner && !SESSION_EXPIRED_TEXT.test(bodyText)) return;
+
+    const candidates = Array.from(
+      document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
+    ) as HTMLElement[];
+    const signInEl = candidates.find((el) => {
+      const txt = (el.innerText || (el as HTMLInputElement).value || '').trim();
+      return SIGN_IN_TEXT.test(txt);
+    });
+    if (!signInEl) return;
+
+    autoClicked++;
+    console.log(`[OWA AutoSignIn] Clicking sign-in button attempt ${autoClicked}/${maxAutoClicks}`);
+    try {
+      signInEl.click();
+    } catch (err: any) {
+      console.warn('[OWA AutoSignIn] click failed:', err?.message || err);
+    }
+  }
+
+  const interval = window.setInterval(tryAutoClickSignIn, 2500);
+  window.setTimeout(() => window.clearInterval(interval), 120_000);
+
+  const observer = new MutationObserver(() => {
+    tryAutoClickSignIn();
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+})();
+
+console.log('[HighHopes] Preload complete');

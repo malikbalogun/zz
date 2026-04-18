@@ -1,0 +1,143 @@
+/**
+ * Shared cookie paste parsing (Netscape export, JSON array, or "a=b; c=d" header).
+ * Used by renderer (Add Account) and main (session hydration + token conversion).
+ */
+
+export interface ParsedCookie {
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  /** Unix seconds */
+  expirationDate?: number;
+}
+
+/** Substrings; cookie domain may be `.login.microsoftonline.com` etc. */
+export const MICROSOFT_COOKIE_DOMAIN_HINTS: string[] = [
+  'login.microsoftonline.com',
+  'login.live.com',
+  'outlook.office.com',
+  'outlook.cloud.microsoft',
+  'microsoftonline.com',
+  'office.com',
+  'microsoft.com',
+  'live.com',
+];
+
+export function parseCookiePaste(raw: string): ParsedCookie[] {
+  const t = raw.trim();
+  if (!t) return [];
+
+  if (t.startsWith('[')) {
+    try {
+      const arr = JSON.parse(t) as unknown;
+      if (!Array.isArray(arr)) return [];
+      const out: ParsedCookie[] = [];
+      for (const row of arr) {
+        if (!row || typeof row !== 'object') continue;
+        const o = row as Record<string, unknown>;
+        const name = String(o.name ?? o.Name ?? '').trim();
+        const value = String(o.value ?? o.Value ?? '').trim();
+        if (!name) continue;
+        const domainRaw = o.domain ?? o.Domain ?? o.host ?? o.Host;
+        const pathRaw = o.path ?? o.Path ?? '/';
+        const exp =
+          typeof o.expirationDate === 'number'
+            ? o.expirationDate
+            : typeof (o as { expires?: unknown }).expires === 'number'
+              ? ((o as { expires: number }).expires > 1e12 ? Math.floor((o as { expires: number }).expires / 1000)
+                  : (o as { expires: number }).expires)
+              : undefined;
+        out.push({
+          name,
+          value,
+          domain: domainRaw != null ? String(domainRaw).trim() : undefined,
+          path: pathRaw != null ? String(pathRaw).trim() : '/',
+          secure: !!(o.secure ?? o.Secure ?? o.httpOnly),
+          expirationDate: exp,
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  const lines = t.split(/\r?\n/);
+  const looksNetscape =
+    lines.some(l => l.trim().startsWith('#')) ||
+    lines.filter(l => l.trim() && !l.trim().startsWith('#')).some(l => l.split('\t').length >= 7);
+
+  if (looksNetscape) {
+    const out: ParsedCookie[] = [];
+    for (const line of lines) {
+      const L = line.trim();
+      if (!L || L.startsWith('#')) continue;
+      const parts = L.split('\t');
+      if (parts.length < 7) continue;
+      const domain = parts[0]?.trim();
+      const path = parts[2]?.trim() || '/';
+      const secure = (parts[3]?.trim() || '').toUpperCase() === 'TRUE';
+      const expirySec = parseInt(parts[4]?.trim() || '0', 10) || undefined;
+      const name = parts[5]?.trim();
+      const value = parts.slice(6).join('\t').trim();
+      if (!name) continue;
+      out.push({
+        domain,
+        path,
+        secure,
+        expirationDate: expirySec && expirySec > 0 ? expirySec : undefined,
+        name,
+        value,
+      });
+    }
+    if (out.length) return out;
+  }
+
+  if (t.includes('=')) {
+    const out: ParsedCookie[] = [];
+    for (const p of t.split(';').map(x => x.trim()).filter(Boolean)) {
+      const eq = p.indexOf('=');
+      if (eq <= 0) continue;
+      const name = p.slice(0, eq).trim();
+      const value = p.slice(eq + 1).trim();
+      if (name) out.push({ name, value });
+    }
+    return out;
+  }
+
+  return [];
+}
+
+export function cookiesToHeaderString(cookies: ParsedCookie[]): string {
+  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+}
+
+export function normalizeCookiePasteToHeaderString(raw: string): string {
+  const parsed = parseCookiePaste(raw);
+  if (!parsed.length) return raw.trim();
+  return cookiesToHeaderString(parsed);
+}
+
+function domainMatchesHint(domainLower: string, hint: string): boolean {
+  const h = hint.replace(/^\./, '');
+  return domainLower === h || domainLower.endsWith('.' + h);
+}
+
+/** Keep cookies that look Microsoft-related, or header-only cookies (no domain). */
+export function filterMicrosoftRelatedCookies(cookies: ParsedCookie[]): ParsedCookie[] {
+  return cookies.filter(c => {
+    const d = (c.domain || '').toLowerCase();
+    if (!d) return true;
+    return MICROSOFT_COOKIE_DOMAIN_HINTS.some(h => domainMatchesHint(d, h));
+  });
+}
+
+/** Base URL for Electron session.cookies.set */
+export function cookieToSetUrl(c: ParsedCookie): string {
+  let host = (c.domain || '').replace(/^\./, '').trim();
+  if (!host) return 'https://outlook.office.com/';
+  const proto = c.secure === false ? 'http' : 'https';
+  return `${proto}://${host}/`;
+}
