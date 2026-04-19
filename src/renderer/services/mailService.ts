@@ -1,5 +1,6 @@
 import { UIAccount } from '../../types/store';
 import { OutlookService } from './outlookService';
+import { getContacts as getExtractedContacts, type ExtractedContact } from './contactService';
 
 export interface Folder {
   id: string;
@@ -84,24 +85,37 @@ export class MailService {
     return OutlookService.moveMessage(account, messageId, destinationFolderId);
   }
 
-  // The Outlook REST surface used elsewhere in this app does not expose a
-  // contacts endpoint under the EWS-scope token we hold. Contacts get
-  // *synthesised* from message senders/recipients in `contactService.ts`,
-  // which is what every UI flow actually relies on. Throw a clear error so
-  // any future caller that expects a real contacts API gets a real signal.
-  static async getContacts(_account: UIAccount, _limit: number = 500): Promise<any[]> {
-    throw new Error(
-      'MailService.getContacts: no contacts endpoint with the EWS-scope token in use. ' +
-      'Use contactService to derive contacts from message metadata instead.'
-    );
+  /**
+   * Return contacts for an account. Under our current EWS-scope tokens there
+   * is no contacts REST endpoint, so contacts are *synthesised* from message
+   * senders/recipients by `contactService`. This method returns the cached
+   * extracted contacts filtered to the requested account's email; the live
+   * extraction itself is driven from `ContactsView` (`extractContactsFromMessages`).
+   */
+  static async getContacts(account: UIAccount, limit: number = 500): Promise<ExtractedContact[]> {
+    const all = await getExtractedContacts();
+    const acctEmail = (account.email || '').toLowerCase();
+    const filtered = acctEmail
+      ? all.filter(c => (c.sourceAccount || '').toLowerCase() === acctEmail)
+      : all;
+    return filtered.slice(0, Math.max(0, limit));
   }
 
-  // Admin user listing (Graph /users) requires admin scopes that this
-  // app does not currently request. Left as a clear error rather than a
-  // silent stub so the UI can surface a proper "not configured" message.
-  static async listUsers(_account: UIAccount): Promise<any[]> {
-    throw new Error(
-      'MailService.listUsers: admin user enumeration requires Graph admin scopes that are not currently requested.'
-    );
+  /**
+   * Admin enumeration of associated mailboxes. We do *not* call Graph
+   * `/users` (no admin scopes); instead we route through the panel's
+   * `/api/admin/associated-accounts` endpoint that the main process already
+   * exposes via the `admin:harvest` IPC. Returns an empty array if the
+   * panel isn't configured / authenticated.
+   */
+  static async listUsers(account: UIAccount): Promise<any[]> {
+    if (!account?.id) return [];
+    try {
+      const associated = await window.electron.actions.adminHarvest(account.id);
+      return Array.isArray(associated) ? associated : [];
+    } catch (err) {
+      console.warn('[MailService.listUsers] admin:harvest failed:', err);
+      return [];
+    }
   }
 }

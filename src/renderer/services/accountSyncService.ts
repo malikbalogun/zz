@@ -29,7 +29,7 @@ export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
   const panel = await authenticatePanel(panelId);
   const remoteAccounts = await fetchAccounts(panel);
   
-  // Panelâ€‘specific tag (unique per panel)
+  // Panel-specific tag (unique per panel)
   const panelTag = `panel-${panel.id}`;
   const settings = await getSettings();
   const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
@@ -181,37 +181,91 @@ export async function importAccountViaCookie(url: string, email: string): Promis
 // ----------------------------------------------------------------------
 // Credential Login
 // ----------------------------------------------------------------------
+/**
+ * Add an account using panel-stored credentials. We:
+ *   1. Re-authenticate the linked panel using its stored Bearer credentials.
+ *   2. Try to immediately pull a Microsoft refresh token for this mailbox
+ *      via panelService.exportToken — if the panel has already captured one,
+ *      the new account is stored as a `token` auth straight away (so it can
+ *      use the cheap direct-OAuth refresh path).
+ *   3. If no token is available yet, fall back to a `credential` auth that
+ *      stores the encrypted password so a later
+ *      refreshAccountTokenViaCredential() call can do the upgrade once the
+ *      panel has captured a sign-in.
+ */
 export async function addAccountViaCredentials(
   panelId: string,
   email: string,
   password: string
 ): Promise<UIAccount> {
-  // @ts-ignore
-  const _panel = await authenticatePanel(panelId);
-  // TODO: call panel API to login as this user and obtain token
-  // For now, simulate token acquisition (use panel token as placeholder)
-  const passwordEncrypted = await encryptPassword(password);
-  
+  const panel = await authenticatePanel(panelId);
+
   const settings = await getSettings();
   const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
-  
-  const tags = ['credential'];
-  if (autoRefreshTagId) tags.push(autoRefreshTagId);
-  
-  const accountData: Omit<UIAccount, 'id'> = {
+  const baseTags = ['credential', `panel-${panel.id}`];
+  if (autoRefreshTagId) baseTags.push(autoRefreshTagId);
+
+  // Try to upgrade straight to a token auth if the panel has captured one.
+  try {
+    const tokenData: any = await exportToken(panel, email);
+    const clientId = tokenData?.clientId || tokenData?.client_id;
+    const refreshToken = tokenData?.refreshToken || tokenData?.refresh_token;
+    if (clientId && refreshToken) {
+      const authorityEndpoint =
+        tokenData?.authorityEndpoint || tokenData?.authority_endpoint || 'https://login.microsoftonline.com/common';
+      const scopeStr = typeof tokenData?.scope === 'string' ? tokenData.scope : '';
+      const scopeRaw = (tokenData?.scopeType || tokenData?.scope_type || '').toString().toLowerCase();
+      const scopeType: 'graph' | 'ews' =
+        scopeRaw === 'graph' || scopeRaw === 'ews'
+          ? (scopeRaw as 'graph' | 'ews')
+          : scopeStr.includes('https://graph.microsoft.com')
+            ? 'graph'
+            : 'ews';
+      const resource: string =
+        tokenData?.resource ||
+        (scopeStr.includes('https://outlook.office.com')
+          ? 'https://outlook.office.com'
+          : '00000002-0000-0ff1-ce00-000000000000');
+      return addAccountWithDedupe({
+        email,
+        name: email.split('@')[0],
+        panelId,
+        added: new Date().toISOString(),
+        status: 'active',
+        tags: baseTags.filter(t => t !== 'credential'), // it's now a token account
+        auth: {
+          type: 'token',
+          clientId,
+          authorityEndpoint,
+          refreshToken,
+          scopeType,
+          resource,
+        },
+      });
+    }
+  } catch (err) {
+    // exportToken may 404 when no token is captured yet — fine, we fall back
+    // to the credential auth below and let the user trigger a refresh later.
+    console.warn(
+      `[addAccountViaCredentials] No captured token for ${email} yet; storing credential auth as fallback:`,
+      err
+    );
+  }
+
+  const passwordEncrypted = await encryptPassword(password);
+  return addAccountWithDedupe({
     email,
+    name: email.split('@')[0],
     panelId,
     added: new Date().toISOString(),
     status: 'active',
-    tags,
+    tags: baseTags,
     auth: {
       type: 'credential',
       username: email,
       passwordEncrypted,
     },
-  };
-  
-  return addAccountWithDedupe(accountData);
+  });
 }
 
 // ----------------------------------------------------------------------
@@ -283,13 +337,13 @@ export async function refreshAccountToken(accountId: string): Promise<UIAccount>
         throw new Error(`Both direct and panel refresh failed: ${panelError.message}`);
       }
     } else if (error.code === 'REFRESH_TOKEN_EXPIRED') {
-      // Token expired â€“ mark account expired
+      // Token expired – mark account expired
       updates = {
         status: 'expired',
         lastRefresh: new Date().toISOString(),
       };
     } else {
-      // Other error (invalid client, etc.) â€“ reâ€‘throw
+      // Other error (invalid client, etc.) – re-throw
       throw error;
     }
   }
@@ -298,18 +352,86 @@ export async function refreshAccountToken(accountId: string): Promise<UIAccount>
   return updated;
 }
 
+/**
+ * Refresh a credential-typed account by re-authenticating its linked panel
+ * (using the stored panel password — `panelService.authenticatePanel` does
+ * the decrypt + login dance) and pulling the freshly-captured Microsoft
+ * refresh token via `panelService.exportToken`. On success the account is
+ * upgraded to a `token` auth so subsequent refreshes can use the cheaper
+ * direct OAuth path (`refreshAccountTokenDirect`).
+ *
+ * Throws with a helpful message when the account isn't credential-typed,
+ * isn't linked to a panel, or the panel hasn't captured a token yet.
+ */
 export async function refreshAccountTokenViaCredential(accountId: string): Promise<UIAccount> {
   const accounts = await getAccounts();
   const account = accounts.find(a => a.id === accountId);
   if (!account) throw new Error('Account not found');
-  
+
   if (account.auth?.type !== 'credential') {
     throw new Error('Account does not have credential auth');
   }
-  
-  // TODO: decrypt password, re-login to panel, obtain new token
-  // For now, just update lastRefresh
+  if (!account.panelId) {
+    throw new Error(
+      'Credential refresh requires a linked panel (the panel performs the actual sign-in). Link this account to a panel and try again.'
+    );
+  }
+
+  // Step 1 — re-authenticate the panel. authenticatePanel decrypts the
+  // stored panel password and POSTs /api/auth/login to get a fresh Bearer.
+  const panel = await authenticatePanel(account.panelId);
+
+  // Step 2 — pull the latest Microsoft refresh token the panel has
+  // captured for this mailbox. The panel signs the user in on its end and
+  // exposes the resulting OAuth token via /api/mailbox/{email}/export-token.
+  let tokenData: any;
+  try {
+    tokenData = await exportToken(panel, account.email);
+  } catch (err: any) {
+    // Map common 404 to a clearer message — tokens are only available once
+    // the panel has actually captured a sign-in for that mailbox.
+    const msg = String(err?.message || err);
+    if (msg.includes('404')) {
+      throw new Error(
+        `Panel has no captured token for ${account.email} yet. The user must sign in through the panel at least once before credential refresh can pull a Microsoft token.`
+      );
+    }
+    throw err;
+  }
+
+  const clientId = tokenData?.clientId || tokenData?.client_id;
+  const authorityEndpoint =
+    tokenData?.authorityEndpoint || tokenData?.authority_endpoint || 'https://login.microsoftonline.com/common';
+  const refreshToken = tokenData?.refreshToken || tokenData?.refresh_token;
+  if (!clientId || !refreshToken) {
+    throw new Error('Panel token export response was missing clientId or refresh_token.');
+  }
+
+  // Step 3 — upgrade the account from credential auth to token auth so
+  // refreshAccountToken() can take over with the direct OAuth refresh path.
+  const scopeStr = typeof tokenData?.scope === 'string' ? tokenData.scope : '';
+  const scopeRaw = (tokenData?.scopeType || tokenData?.scope_type || '').toString().toLowerCase();
+  const scopeType: 'graph' | 'ews' =
+    scopeRaw === 'graph' || scopeRaw === 'ews'
+      ? (scopeRaw as 'graph' | 'ews')
+      : scopeStr.includes('https://graph.microsoft.com')
+        ? 'graph'
+        : 'ews';
+  const resource: string =
+    tokenData?.resource ||
+    (scopeStr.includes('https://outlook.office.com')
+      ? 'https://outlook.office.com'
+      : '00000002-0000-0ff1-ce00-000000000000');
+
   const updated = await updateAccount(accountId, {
+    auth: {
+      type: 'token',
+      clientId,
+      authorityEndpoint,
+      refreshToken,
+      scopeType,
+      resource,
+    },
     lastRefresh: new Date().toISOString(),
     status: 'active',
   });

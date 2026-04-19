@@ -5,6 +5,7 @@ import { startBackgroundScheduler, stopBackgroundScheduler } from './services/ba
 import { getMonitoringAlerts } from './services/monitoringService';
 import { getAccounts } from './services/accountService';
 import { websocketManager } from './services/websocketService';
+import { setOutlookMockMode } from './services/outlookService';
 
 
 import watcherLogo from './assets/watcherlogo.png';
@@ -123,6 +124,11 @@ const App = () => {
       const settings = await getSettings();
       setDarkMode(settings.appearance.darkMode);
       setSidebarCollapsed(settings.appearance.sidebarCollapsed);
+      // Initialise the OutlookService mock-mode flag from the freshly-loaded
+      // settings so getOutlookService() can answer synchronously thereafter.
+      setOutlookMockMode(
+        !!(settings.debug?.useMockOutlookApi ?? settings.debug?.useMockGraphApi)
+      );
       // Fetch alerts for sidebar badge
       try {
         const alerts = await getMonitoringAlerts();

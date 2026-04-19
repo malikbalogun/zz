@@ -1,5 +1,6 @@
 import type { UIAccount } from '../../types/store';
 import { refreshMicrosoftToken } from './microsoftTokenService';
+import { getSettings } from './settingsService';
 
 export interface OutlookRecipient {
   emailAddress: { address?: string; name?: string };
@@ -707,12 +708,46 @@ export class OutlookService {
 }
 
 /**
- * Factory to pick real or mock service based on settings.
+ * Cached mock-mode flag. Updated synchronously by `setOutlookMockMode` so the
+ * factory below can answer without awaiting a fresh settings read on every
+ * call. `initOutlookServiceFromSettings()` should be invoked once at app
+ * startup (App.tsx) and again whenever Settings → Debug is saved.
+ *
+ * Default `false` keeps the production behaviour (real OutlookService) if
+ * initialisation fails or has not run yet.
+ */
+let __useMockOutlook = false;
+
+export function setOutlookMockMode(useMock: boolean): void {
+  __useMockOutlook = !!useMock;
+}
+
+/**
+ * Read the persisted Settings once and update the cached mock-mode flag.
+ * Honours both the new `useMockOutlookApi` field and the legacy
+ * `useMockGraphApi` field for back-compat with older stored settings.
+ */
+export async function initOutlookServiceFromSettings(): Promise<void> {
+  try {
+    const settings = await getSettings();
+    const flag =
+      settings.debug?.useMockOutlookApi ??
+      settings.debug?.useMockGraphApi ??
+      false;
+    setOutlookMockMode(!!flag);
+  } catch (err) {
+    // Never let a settings read failure crash startup; default to real service.
+    console.warn('[OutlookService] init from settings failed; using real service:', err);
+    setOutlookMockMode(false);
+  }
+}
+
+/**
+ * Factory to pick real or mock service. Synchronous so existing call-sites
+ * (`getOutlookService().fetchMessages(...)`) keep working without changes.
  */
 export function getOutlookService() {
-  // @ts-ignore – will be replaced with real settings check
-  const useMock = window.electron?.store?.get('settings')?.debug?.useMockOutlookApi ?? false;
-  return useMock ? MockOutlookService : OutlookService;
+  return __useMockOutlook ? MockOutlookService : OutlookService;
 }
 
 /**

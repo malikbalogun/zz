@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getSettings, updateSettings } from '../../services/settingsService';
 import { websocketManager } from '../../services/websocketService';
+import { setOutlookMockMode } from '../../services/outlookService';
 import { Tag } from '../../../types/store';
 import { createUserTag, updateUserTag, deleteUserTag } from '../../services/tagService';
 import { getAccounts } from '../../services/accountService';
@@ -47,6 +48,11 @@ const SettingsView = () => {
       await updateSettings(settings);
       // Refresh WebSocket connections if sync settings changed
       websocketManager.refreshConnections().catch(err => console.error('Failed to refresh WebSocket connections:', err));
+      // Re-apply the OutlookService mock-mode flag in case Debug → Use mock
+      // Outlook API was just toggled.
+      setOutlookMockMode(
+        !!(settings.debug?.useMockOutlookApi ?? settings.debug?.useMockGraphApi)
+      );
       showToast('Settings saved successfully!');
     } catch (error) {
       showToast('Failed to save settings.');

@@ -251,6 +251,13 @@ export interface Settings {
     showAccountAdded: boolean;
   };
   debug?: {
+    /**
+     * When true, getOutlookService() returns the in-memory MockOutlookService
+     * (no network calls; deterministic fixtures). Useful for offline dev /
+     * UI smoke testing without burning Microsoft tokens.
+     */
+    useMockOutlookApi?: boolean;
+    /** Legacy name for the same flag, honoured for back-compat. */
     useMockGraphApi?: boolean;
     logLevel?: 'debug' | 'info' | 'warn' | 'error';
   };
