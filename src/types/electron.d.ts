@@ -32,6 +32,30 @@ export interface ElectronAPI {
   tokens: {
     refresh: (accountId: string) => Promise<unknown>;
     refreshBulk: (ids: string[]) => Promise<unknown>;
+    /** Snapshot of the background refresh scheduler. */
+    refreshStatus: () => Promise<{
+      schedulerRunning: boolean;
+      intervalMinutes: number;
+      lastRunAt: string | null;
+      lastReason: string | null;
+      lastResult: {
+        success: number;
+        expired: number;
+        failed: number;
+        errors: Array<{ accountId: string; error: string }>;
+      } | null;
+    }>;
+    /** Trigger an immediate refresh of every active token-typed account. */
+    refreshNow: () => Promise<{
+      success: boolean;
+      ranAt: string;
+      result: {
+        success: number;
+        expired: number;
+        failed: number;
+        errors: Array<{ accountId: string; error: string }>;
+      };
+    }>;
     exportCSV: () => Promise<unknown>;
     exportJSON: () => Promise<unknown>;
     exportJSONData: (

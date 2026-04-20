@@ -300,6 +300,9 @@ const SettingsView = () => {
               <div className="toggle-knob"></div>
             </div>
           </div>
+
+          {/* Background refresh status — read-only mirror of the main-process scheduler. */}
+          <RefreshStatusPanel />
         </div>
 
         {/* Microsoft OAuth (device code + cookie → token) */}
@@ -863,6 +866,113 @@ const SettingsView = () => {
       {toast && (
         <div className="toast show" id="toast">
           {toast}
+        </div>
+      )}
+    </div>
+  );
+};
+
+type RefreshStatus = Awaited<ReturnType<typeof window.electron.tokens.refreshStatus>>;
+
+function formatTimeAgo(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const diff = Math.max(0, Date.now() - t);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return new Date(iso).toLocaleString();
+}
+
+const RefreshStatusPanel = () => {
+  const [status, setStatus] = useState<RefreshStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string>('');
+
+  const reload = async () => {
+    try {
+      const s = await window.electron.tokens.refreshStatus();
+      setStatus(s);
+    } catch (err) {
+      console.warn('refreshStatus failed:', err);
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+    // Cheap re-poll so 'last run' time stays fresh while Settings is open.
+    const interval = setInterval(() => void reload(), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleRunNow = async () => {
+    setBusy(true);
+    setMsg('Refreshing all token accounts…');
+    try {
+      const r = await window.electron.tokens.refreshNow();
+      const { success, expired, failed } = r.result;
+      setMsg(`Done — ${success} succeeded, ${expired} expired, ${failed} failed.`);
+      await reload();
+    } catch (err) {
+      setMsg(`Refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: 12,
+        background: '#f9fafb',
+        border: '1px solid #e5e7eb',
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontWeight: 600 }}>
+          <i
+            className={`fas ${status?.schedulerRunning ? 'fa-circle' : 'fa-circle-notch'}`}
+            style={{ color: status?.schedulerRunning ? '#10b981' : '#9ca3af', marginRight: 8, fontSize: 10 }}
+          />
+          Background refresh:{' '}
+          {status
+            ? status.schedulerRunning
+              ? `running every ${status.intervalMinutes} min`
+              : 'disabled'
+            : 'loading…'}
+        </div>
+        <button
+          type="button"
+          className="action-btn primary"
+          style={{ padding: '6px 12px', fontSize: 13 }}
+          onClick={() => void handleRunNow()}
+          disabled={busy}
+        >
+          <i className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-bolt'}`} style={{ marginRight: 6 }} />
+          Run now
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: '#6b7280', marginTop: 8 }}>
+        {status?.lastRunAt
+          ? (
+              <>
+                Last run {formatTimeAgo(status.lastRunAt)}
+                {status.lastReason ? ` (${status.lastReason})` : ''}
+                {status.lastResult
+                  ? ` — ${status.lastResult.success} succeeded, ${status.lastResult.expired} expired, ${status.lastResult.failed} failed`
+                  : ''}
+              </>
+            )
+          : 'No refresh has run yet in this session.'}
+      </div>
+      {msg && (
+        <div style={{ marginTop: 8, fontSize: 12, color: msg.startsWith('Refresh failed') ? '#dc2626' : '#374151' }}>
+          {msg}
         </div>
       )}
     </div>

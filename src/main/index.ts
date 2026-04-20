@@ -1219,12 +1219,19 @@ async function exchangeV1ForV2Token(
   }
 }
 
-async function refreshAllTokens(): Promise<{
+type RefreshAllResult = {
   success: number;
   expired: number;
   failed: number;
   errors: Array<{ accountId: string; error: string }>;
-}> {
+};
+
+/** Last result + when it ran. Read by `tokens:refreshStatus`. */
+let lastTokenRefresh: { ranAt: string; result: RefreshAllResult } | null = null;
+/** Reason the last run started — 'startup' | 'interval' | 'settings' | 'manual'. */
+let lastTokenRefreshReason: string | null = null;
+
+async function refreshAllTokens(): Promise<RefreshAllResult> {
   try {
     const store = await readStore();
     const accounts: any[] = store.accounts || [];
@@ -1275,10 +1282,18 @@ async function refreshAllTokens(): Promise<{
     }
     // Save updated store
     await writeStore(store);
+    lastTokenRefresh = { ranAt: new Date().toISOString(), result: results };
     return results;
   } catch (error: any) {
     console.error('refreshAllTokens failed:', error);
-    return { success: 0, expired: 0, failed: 0, errors: [{ accountId: '', error: error.message }] };
+    const errResult: RefreshAllResult = {
+      success: 0,
+      expired: 0,
+      failed: 0,
+      errors: [{ accountId: '', error: error.message }],
+    };
+    lastTokenRefresh = { ranAt: new Date().toISOString(), result: errResult };
+    return errResult;
   }
 }
 
@@ -1300,6 +1315,7 @@ async function startTokenRefreshScheduler() {
   console.log(`Starting token refresh scheduler, interval: ${intervalMinutes} minutes`);
   // Run first refresh after 1 minute
   setTimeout(() => {
+    lastTokenRefreshReason = 'startup';
     refreshAllTokens().then(results => {
       console.log(`Initial token refresh completed: ${results.success} succeeded, ${results.expired} expired, ${results.failed} failed`);
     });
@@ -1307,6 +1323,7 @@ async function startTokenRefreshScheduler() {
   // Schedule periodic refreshes
   const intervalMs = intervalMinutes * 60 * 1000;
   tokenRefreshIntervalId = setInterval(() => {
+    lastTokenRefreshReason = 'interval';
     refreshAllTokens().then(results => {
       console.log(`Periodic token refresh completed: ${results.success} succeeded, ${results.expired} expired, ${results.failed} failed`);
     });
@@ -3558,6 +3575,29 @@ function setupIpcHandlers() {
     const header = 'email,token,status';
     const rows = accounts.map((a: any) => [a.email, a.auth?.refreshToken || '', a.status].join(','));
     return [header, ...rows].join('\n');
+  });
+
+  /**
+   * Snapshot of the background token refresh scheduler. Renderer reads this on
+   * Settings open to show: scheduler running?, last run time, last summary.
+   */
+  ipcMain.handle('tokens:refreshStatus', async () => {
+    const store = await readStore();
+    const intervalMinutes = store.settings?.refresh?.intervalMinutes ?? 45;
+    return {
+      schedulerRunning: tokenRefreshIntervalId !== null,
+      intervalMinutes,
+      lastRunAt: lastTokenRefresh?.ranAt ?? null,
+      lastReason: lastTokenRefreshReason,
+      lastResult: lastTokenRefresh?.result ?? null,
+    };
+  });
+
+  /** Manual 'Run now' button on Settings → Refresh. */
+  ipcMain.handle('tokens:refreshNow', async () => {
+    lastTokenRefreshReason = 'manual';
+    const result = await refreshAllTokens();
+    return { success: true, ranAt: lastTokenRefresh?.ranAt ?? new Date().toISOString(), result };
   });
 
   ipcMain.handle('ui:openTagEditor', async (_, accountId: string) => {

@@ -74,6 +74,10 @@ contextBridge.exposeInMainWorld('electron', {
   // Token management
   tokens: {
     refresh: (accountId: string) => ipcRenderer.invoke('token:refresh', accountId),
+    /** Background refresh scheduler status snapshot. */
+    refreshStatus: () => ipcRenderer.invoke('tokens:refreshStatus'),
+    /** 'Run now' — refreshes every active token-typed account immediately. */
+    refreshNow: () => ipcRenderer.invoke('tokens:refreshNow'),
     refreshBulk: (ids: string[]) => ipcRenderer.invoke('token:refreshBulk', ids),
     exportCSV: () => ipcRenderer.invoke('tokens:exportCSV'),
     exportJSON: () => ipcRenderer.invoke('tokens:exportJSON'),
