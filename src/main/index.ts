@@ -29,6 +29,21 @@ const owaRefreshLocks = new Set<string>();
 /** Open Outlook windows per account (accountId -> BrowserWindow) to prevent duplicate windows. */
 const outlookWindows = new Map<string, BrowserWindow>();
 
+/**
+ * Monotonic counter per windowKey ('accountId:mode') incremented on every
+ * successful Outlook window open. Each window's `closed` handler captures the
+ * generation it belonged to and only runs its cleanup when the current
+ * generation still matches — protecting against a stale close-handler from
+ * a previous open running *after* the user has already reopened the window
+ * and clobbering the fresh `outlookTokenStore` entry / protocol handler.
+ *
+ * This was the root cause of the "press play, close, press play again,
+ * doesn't open" symptom: the first open's close handler was firing late,
+ * deleting the second open's tokens and unregistering its protocol
+ * interceptor, leaving the second window with no auth.
+ */
+const outlookWindowGeneration = new Map<string, number>();
+
 
 type OwaTokenBundle = {
   account: any;
@@ -376,10 +391,16 @@ async function openOwaWithCookieSession(
     },
   });
   outlookWindows.set(windowKey, outlookWindow);
+  const myGeneration = (outlookWindowGeneration.get(windowKey) || 0) + 1;
+  outlookWindowGeneration.set(windowKey, myGeneration);
 
   outlookWindow.on('closed', () => {
-    outlookSessionAuth.delete(outlookSession);
-    outlookWindows.delete(windowKey);
+    const currentGeneration = outlookWindowGeneration.get(windowKey);
+    if (currentGeneration === myGeneration) {
+      outlookSessionAuth.delete(outlookSession);
+      outlookWindows.delete(windowKey);
+      outlookWindowGeneration.delete(windowKey);
+    }
   });
 
   outlookWindow.webContents.setUserAgent(
@@ -2240,6 +2261,11 @@ function setupIpcHandlers() {
       windowToAccountMap.set(windowId, accountId);
       outlookWindows.set(windowKey, outlookWindow);
 
+      // Generation guard: bump on every open; the close handler captures this
+      // value and only runs cleanup if it's still the latest generation.
+      const myGeneration = (outlookWindowGeneration.get(windowKey) || 0) + 1;
+      outlookWindowGeneration.set(windowKey, myGeneration);
+
       const OWA_REFRESH_INTERVAL_MS = 18 * 60 * 1000;
       const owaRefreshTimer = setInterval(() => {
         if (outlookWindow.isDestroyed()) {
@@ -2249,19 +2275,32 @@ function setupIpcHandlers() {
         void tryRefreshOwaWindowSession(accountId, outlookSession, outlookWindow.webContents, 0, 'interval');
       }, OWA_REFRESH_INTERVAL_MS);
 
-      // Clean up mapping when window closes
+      // Clean up mapping when this *specific* window closes. Protected by the
+      // generation check so a delayed close from an earlier open does not
+      // wipe the state of a freshly-opened window for the same account.
       outlookWindow.on('closed', () => {
         clearInterval(owaRefreshTimer);
-        try {
-          outlookSession.protocol.unhandle('https');
-        } catch {
-          /* ignore */
-        }
+        // Always safe: per-window resources.
         windowToAccountMap.delete(windowId);
-        msalCacheMap.delete(accountId);
-        outlookTokenStore.delete(accountId);
-        owaLastSuccessfulRefresh.delete(accountId);
-        outlookWindows.delete(windowKey);
+        // Per-(account,mode) shared resources: only purge if we are still
+        // the latest open. Otherwise a newer open already replaced them.
+        const currentGeneration = outlookWindowGeneration.get(windowKey);
+        if (currentGeneration === myGeneration) {
+          try {
+            outlookSession.protocol.unhandle('https');
+          } catch {
+            /* ignore */
+          }
+          msalCacheMap.delete(accountId);
+          outlookTokenStore.delete(accountId);
+          owaLastSuccessfulRefresh.delete(accountId);
+          outlookWindows.delete(windowKey);
+          outlookWindowGeneration.delete(windowKey);
+        } else {
+          appendOutlookDebug(
+            `[Outlook] Stale close-handler skipped (gen=${myGeneration}, current=${currentGeneration}) for ${windowKey}`
+          );
+        }
       });
 
       console.log('[Outlook] Window created with partition:', (outlookWindow.webContents.session as any).partition);
@@ -2510,7 +2549,9 @@ function setupIpcHandlers() {
         throw new Error('Cookie export only applies to token-based Microsoft accounts.');
       }
 
-      const partitionName = `persist:outlook-token-${accountId}`;
+      // Must match the partition used by mailbox:openOutlook (token path) so
+      // we read cookies from the same jar OWA actually populated.
+      const partitionName = `persist:outlook-${accountId}`;
       const owaSession = session.fromPartition(partitionName);
 
       const readMicrosoftCookies = async () => {
