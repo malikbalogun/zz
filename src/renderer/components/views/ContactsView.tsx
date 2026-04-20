@@ -607,7 +607,40 @@ const ContactsView: React.FC = () => {
           <div className="contacts-table-wrap">
             <div className="contacts-table">
               <div className="contacts-table-header">
-                <div className="contacts-th" style={{ width: 40 }}></div>
+                <div className="contacts-th" style={{ width: 40, display: 'flex', justifyContent: 'center' }}>
+                  <input
+                    ref={el => {
+                      if (el) {
+                        const allOnPage = filtered.length > 0 && filtered.every(c => selected.has(c.id));
+                        const someOnPage = !allOnPage && filtered.some(c => selected.has(c.id));
+                        el.indeterminate = someOnPage;
+                        el.checked = allOnPage;
+                      }
+                    }}
+                    type="checkbox"
+                    title={
+                      filtered.length === 0
+                        ? 'No contacts match the current filter'
+                        : filtered.every(c => selected.has(c.id))
+                          ? 'Deselect all (visible)'
+                          : 'Select all (visible)'
+                    }
+                    aria-label="Select all visible contacts"
+                    disabled={filtered.length === 0}
+                    onChange={() => {
+                      const allOnPage = filtered.length > 0 && filtered.every(c => selected.has(c.id));
+                      setSelected(prev => {
+                        const next = new Set(prev);
+                        if (allOnPage) {
+                          for (const c of filtered) next.delete(c.id);
+                        } else {
+                          for (const c of filtered) next.add(c.id);
+                        }
+                        return next;
+                      });
+                    }}
+                  />
+                </div>
                 <div className="contacts-th" style={{ flex: 2 }}>Contact</div>
                 <div className="contacts-th" style={{ flex: 1.5 }}>Domain</div>
                 <div className="contacts-th" style={{ flex: 1 }}>Provider</div>
