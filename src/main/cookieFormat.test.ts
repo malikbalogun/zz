@@ -5,6 +5,7 @@ import {
   normalizeCookiePasteToHeaderString,
   filterMicrosoftRelatedCookies,
   cookieToSetUrl,
+  cookiesToNetscape,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -50,4 +51,60 @@ test('filterMicrosoftRelatedCookies keeps MS domains', () => {
 
 test('cookieToSetUrl', () => {
   assert.ok(cookieToSetUrl({ name: 'n', value: 'v', domain: '.outlook.office.com' }).includes('outlook.office.com'));
+});
+
+test('cookiesToNetscape round-trip via parseCookiePaste', () => {
+  const original = parseCookiePaste(
+    JSON.stringify([
+      {
+        name: 'ESTSAUTH',
+        value: 'abc123',
+        domain: '.login.microsoftonline.com',
+        path: '/',
+        secure: true,
+        expirationDate: 1893456000,
+      },
+      {
+        name: 'X-OWA',
+        value: 'def456',
+        domain: 'outlook.office.com',
+        path: '/owa',
+        secure: false,
+      },
+    ])
+  );
+
+  const text = cookiesToNetscape(original);
+  assert.ok(text.startsWith('# Netscape HTTP Cookie File'));
+  // Each cookie line has 7 tab-separated fields
+  const dataLines = text.split('\n').filter(l => l && !l.startsWith('#'));
+  for (const line of dataLines) {
+    assert.equal(line.split('\t').length, 7, `line missing fields: ${line}`);
+  }
+
+  const reparsed = parseCookiePaste(text);
+  assert.equal(reparsed.length, original.length);
+
+  const ests = reparsed.find(c => c.name === 'ESTSAUTH');
+  assert.ok(ests, 'ESTSAUTH should round-trip');
+  assert.equal(ests!.value, 'abc123');
+  assert.equal(ests!.domain, '.login.microsoftonline.com');
+  assert.equal(ests!.secure, true);
+  assert.equal(ests!.expirationDate, 1893456000);
+
+  const owa = reparsed.find(c => c.name === 'X-OWA');
+  assert.ok(owa, 'X-OWA should round-trip');
+  assert.equal(owa!.value, 'def456');
+  assert.equal(owa!.path, '/owa');
+  assert.equal(owa!.secure, false);
+});
+
+test('cookiesToNetscape skips entries with no domain', () => {
+  const text = cookiesToNetscape([
+    { name: 'orphan', value: 'v' }, // no domain — Netscape requires one
+    { name: 'ok', value: 'v', domain: 'outlook.office.com' },
+  ]);
+  const dataLines = text.split('\n').filter(l => l && !l.startsWith('#'));
+  assert.equal(dataLines.length, 1);
+  assert.ok(dataLines[0].endsWith('\tok\tv'));
 });

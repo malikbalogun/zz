@@ -268,6 +268,33 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
+  const handleExportOwaCookies = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const account = accounts.find(a => a.id === accountId);
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success || !result.netscape) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const saved = await window.electron.files.saveTextWithDialog({
+        defaultFilename: `${safeEmail}-cookies-${new Date().toISOString().slice(0, 10)}.txt`,
+        content: result.netscape,
+        filters: [
+          { name: 'Netscape Cookie File', extensions: ['txt', 'cookies'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (saved.ok) {
+        alert(`Exported ${result.count} cookies to ${saved.path}`);
+      }
+    } catch (error) {
+      alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSetOwaMode = async (accountId: string, mode: 'token' | 'cookie') => {
     setLoading(true);
     try {
@@ -813,6 +840,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                           }}
                         >
                           <i className="fas fa-cookie-bite"></i> Pull OWA cookies from panel
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleExportOwaCookies(account.id);
+                          }}
+                          title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
+                        >
+                          <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

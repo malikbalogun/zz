@@ -13,6 +13,20 @@ export interface ElectronAPI {
     deleteBulk: (ids: string[]) => Promise<unknown>;
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
+    /**
+     * Export the Microsoft OWA session cookies for a token-typed account as a
+     * Netscape HTTP Cookie File string. The returned string is round-tripable
+     * through the existing cookie-import path.
+     */
+    exportOwaCookies: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      count?: number;
+      email?: string;
+      netscape?: string;
+      error?: string;
+    }>;
     testLogin: (email: string, password: string) => Promise<unknown>;
   };
   tokens: {

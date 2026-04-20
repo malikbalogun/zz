@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('electron', {
     delete: (accountId: string) => ipcRenderer.invoke('account:delete', accountId),
     deleteBulk: (ids: string[]) => ipcRenderer.invoke('account:deleteBulk', ids),
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
+    /** Token account → Netscape cookie file (round-trip with the cookie import path). */
+    exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
     exportBulkCSV: (ids: string[]) => ipcRenderer.invoke('account:exportBulkCSV', ids),
     testLogin: (email: string, password: string) =>
       ipcRenderer.invoke('account:testLogin', email, password),
