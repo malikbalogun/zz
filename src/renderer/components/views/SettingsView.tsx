@@ -343,6 +343,61 @@ const SettingsView = () => {
           </div>
         </div>
 
+        {/* Translation */}
+        <div className="settings-card">
+          <h3 className="settings-title">
+            <span className="settings-icon"><i className="fas fa-language"></i></span> Translation
+          </h3>
+          <div className="toggle-row">
+            <span className="toggle-label">Enable Translate button in Inbox</span>
+            <div
+              className={`toggle ${settings.translation?.enabled !== false ? 'active' : ''}`}
+              onClick={() =>
+                updateSetting('translation.enabled', !(settings.translation?.enabled !== false))
+              }
+            >
+              <div className="toggle-knob"></div>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Target language (ISO 639-1)</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="en"
+              value={settings.translation?.targetLang ?? 'en'}
+              onChange={e => updateSetting('translation.targetLang', e.target.value)}
+            />
+            <div className="form-helper">
+              Examples: en (English), es (Spanish), fr (French), de (German), zh (Chinese).
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">LibreTranslate-compatible endpoint</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="https://translate.argosopentech.com/translate"
+              value={settings.translation?.endpoint ?? ''}
+              onChange={e => updateSetting('translation.endpoint', e.target.value)}
+            />
+            <div className="form-helper">
+              Default: Argos public instance (no API key required). Override with any
+              LibreTranslate-compatible URL — including a self-hosted instance.
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">API key (optional)</label>
+            <input
+              type="password"
+              className="form-input"
+              placeholder="Leave blank for the public Argos instance"
+              value={settings.translation?.apiKey ?? ''}
+              onChange={e => updateSetting('translation.apiKey', e.target.value)}
+            />
+          </div>
+        </div>
+
         {/* Token Storage */}
         <div className="settings-card">
           <h3 className="settings-title">

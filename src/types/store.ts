@@ -287,6 +287,16 @@ export interface Settings {
     redirectUri?: string;
     scopes?: string[];
   };
+  /** In-app message body translator (LibreTranslate-compatible endpoint). */
+  translation?: {
+    enabled?: boolean;
+    /** ISO 639-1 target language (e.g. 'en', 'es', 'fr'). Default 'en'. */
+    targetLang?: string;
+    /** LibreTranslate-compatible POST endpoint. Defaults to the public Argos instance. */
+    endpoint?: string;
+    /** Optional API key for self-hosted / paid instances. Sent as `api_key`. */
+    apiKey?: string;
+  };
   version?: string;
   platform?: string;
   lastUpdated?: string;

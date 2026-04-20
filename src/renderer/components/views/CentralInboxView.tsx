@@ -18,6 +18,7 @@ import {
   type EmailExportScope,
   type ExportFormat,
 } from '../../services/emailExportService';
+import { translateHtmlBody } from '../../services/translatorService';
 
 type MonitorRowHit = { keywords: string[]; read: boolean };
 type SavedInboxView = {
@@ -59,6 +60,12 @@ const CentralInboxView: React.FC = () => {
   const [error, setError] = useState('');
   const [showReplyBox, setShowReplyBox] = useState(false);
   const [replyText, setReplyText] = useState('');
+  // Translation state — cached per messageId so re-clicking is instant.
+  const [translations, setTranslations] = useState<Record<string, { text: string; sourceLang?: string }>>({});
+  const [translating, setTranslating] = useState(false);
+  const [translationError, setTranslationError] = useState('');
+  // Whether the reader is currently *showing* the translation vs. the original.
+  const [showTranslation, setShowTranslation] = useState(false);
   const [monitorHits, setMonitorHits] = useState<Record<string, MonitorRowHit>>({});
   const [reputationEntries, setReputationEntries] = useState<ReputationEntry[]>([]);
   const [savedViews, setSavedViews] = useState<SavedInboxView[]>([]);
@@ -258,6 +265,8 @@ const CentralInboxView: React.FC = () => {
     setSelectedMsg(msg);
     setShowReplyBox(false);
     setMsgBody('');
+    setShowTranslation(false);
+    setTranslationError('');
     if (!selectedAccount) return;
     setLoadingBody(true);
     try {
@@ -324,6 +333,33 @@ const CentralInboxView: React.FC = () => {
       setError(err?.message || String(err));
     } finally {
       setExportBusy(false);
+    }
+  };
+
+  const handleTranslateBody = async () => {
+    if (!selectedMsg) return;
+    setTranslationError('');
+    // Already translated? Just toggle visibility.
+    if (translations[selectedMsg.id]) {
+      setShowTranslation(true);
+      return;
+    }
+    if (!msgBody) {
+      setTranslationError('Email body has not loaded yet.');
+      return;
+    }
+    setTranslating(true);
+    try {
+      const result = await translateHtmlBody(msgBody);
+      setTranslations(prev => ({
+        ...prev,
+        [selectedMsg.id]: { text: result.translated, sourceLang: result.sourceLang },
+      }));
+      setShowTranslation(true);
+    } catch (err: any) {
+      setTranslationError(err?.message || String(err));
+    } finally {
+      setTranslating(false);
     }
   };
 
@@ -677,6 +713,24 @@ const CentralInboxView: React.FC = () => {
                       <i className="fas fa-external-link-alt"></i>
                     </button>
                   )}
+                  {showTranslation ? (
+                    <button
+                      className="icon-btn"
+                      title="Show original"
+                      onClick={() => setShowTranslation(false)}
+                    >
+                      <i className="fas fa-undo"></i>
+                    </button>
+                  ) : (
+                    <button
+                      className="icon-btn"
+                      title={translating ? 'Translating…' : 'Translate body'}
+                      onClick={() => void handleTranslateBody()}
+                      disabled={translating || loadingBody}
+                    >
+                      <i className={`fas ${translating ? 'fa-spinner fa-spin' : 'fa-language'}`}></i>
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="inbox-reader-meta">
@@ -730,8 +784,55 @@ const CentralInboxView: React.FC = () => {
                     <i className="fas fa-spinner fa-spin" style={{ fontSize: 24 }}></i>
                     <p style={{ marginTop: 8 }}>Loading email body...</p>
                   </div>
+                ) : showTranslation && translations[selectedMsg.id] ? (
+                  <>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: '#6b7280',
+                        marginBottom: 12,
+                        padding: '6px 10px',
+                        background: '#f3f4f6',
+                        borderRadius: 6,
+                        display: 'inline-block',
+                      }}
+                    >
+                      <i className="fas fa-language" style={{ marginRight: 6 }} />
+                      Translated
+                      {translations[selectedMsg.id].sourceLang
+                        ? ` from ${translations[selectedMsg.id].sourceLang}`
+                        : ''}
+                    </div>
+                    <pre
+                      style={{
+                        whiteSpace: 'pre-wrap',
+                        fontFamily: 'inherit',
+                        fontSize: 14,
+                        lineHeight: 1.5,
+                        margin: 0,
+                      }}
+                    >
+                      {translations[selectedMsg.id].text}
+                    </pre>
+                  </>
                 ) : (
                   <div dangerouslySetInnerHTML={{ __html: msgBody }}></div>
+                )}
+                {translationError && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: 10,
+                      background: '#fef2f2',
+                      border: '1px solid #fecaca',
+                      borderRadius: 6,
+                      color: '#dc2626',
+                      fontSize: 13,
+                    }}
+                  >
+                    <i className="fas fa-exclamation-triangle" style={{ marginRight: 6 }} />
+                    {translationError}
+                  </div>
                 )}
               </div>
               {showReplyBox && (

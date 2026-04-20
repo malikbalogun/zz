@@ -90,6 +90,13 @@ const DEFAULT_SETTINGS: Settings = {
     redirectUri: 'https://outlook.office.com/mail/',
     scopes: ['Mail.Read', 'Mail.Send', 'offline_access', 'openid', 'profile'],
   },
+  translation: {
+    enabled: true,
+    targetLang: 'en',
+    // LibreTranslate-compatible. Argos public instance — no API key required.
+    endpoint: 'https://translate.argosopentech.com/translate',
+    apiKey: '',
+  },
   version: '0.1.0',
   platform: '',
   lastUpdated: new Date().toISOString(),
@@ -128,6 +135,9 @@ export async function getSettings(): Promise<Settings> {
     }
     if (settings.microsoftOAuth && typeof settings.microsoftOAuth === 'object') {
       merged.microsoftOAuth = { ...DEFAULT_SETTINGS.microsoftOAuth!, ...settings.microsoftOAuth };
+    }
+    if (settings.translation && typeof settings.translation === 'object') {
+      merged.translation = { ...DEFAULT_SETTINGS.translation!, ...settings.translation };
     }
     return merged;
   }
