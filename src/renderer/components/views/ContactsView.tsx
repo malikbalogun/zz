@@ -34,6 +34,8 @@ const ContactsView: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [extracting, setExtracting] = useState(false);
   const [extractAccount, setExtractAccount] = useState('');
+  const [extractAccountSearch, setExtractAccountSearch] = useState('');
+  const [extractDropdownOpen, setExtractDropdownOpen] = useState(false);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [extractStatus, setExtractStatus] = useState('');
@@ -71,6 +73,26 @@ const ContactsView: React.FC = () => {
   useEffect(() => {
     if (!exportMailbox && accounts.length > 0) setExportMailbox(accounts[0].email);
   }, [accounts, exportMailbox]);
+
+  // Close the searchable extract-account dropdown when the user clicks outside.
+  useEffect(() => {
+    if (!extractDropdownOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.extract-account-dropdown-container')) {
+        setExtractDropdownOpen(false);
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [extractDropdownOpen]);
+
+  // Reset the search filter whenever the dropdown closes.
+  useEffect(() => {
+    if (!extractDropdownOpen) {
+      setExtractAccountSearch('');
+    }
+  }, [extractDropdownOpen]);
 
   const handleExtract = async () => {
     const account = accounts.find(a => a.id === extractAccount);
@@ -294,18 +316,105 @@ const ContactsView: React.FC = () => {
       {/* Extraction Control */}
       <div className="extraction-control">
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: 1, position: 'relative' }} className="extract-account-dropdown-container">
             <label className="form-label" style={{ marginBottom: 6 }}>Extract Contacts From Account</label>
-            <select
+            <button
+              type="button"
               className="form-input"
-              style={{ width: '100%' }}
-              value={extractAccount}
-              onChange={e => setExtractAccount(e.target.value)}
+              style={{
+                textAlign: 'left',
+                width: '100%',
+                marginBottom: 8,
+                cursor: 'pointer',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+              onClick={() => setExtractDropdownOpen(!extractDropdownOpen)}
               disabled={extracting}
+              aria-expanded={extractDropdownOpen}
+              aria-haspopup="listbox"
+              aria-label="Select an account to extract contacts from"
             >
-              <option value="">Select an account...</option>
-              {accounts.map(a => <option key={a.id} value={a.id}>{a.email}</option>)}
-            </select>
+              <span>
+                {extractAccount
+                  ? accounts.find(a => a.id === extractAccount)?.email
+                  : 'Select an account...'}
+              </span>
+              <i className={`fas ${extractDropdownOpen ? 'fa-chevron-up' : 'fa-chevron-down'}`} />
+            </button>
+            {extractDropdownOpen && (
+              <div
+                className="extract-dropdown"
+                role="listbox"
+                aria-label="Account selection"
+                style={{
+                  position: 'absolute',
+                  zIndex: 1000,
+                  backgroundColor: '#fff',
+                  border: '1px solid #d1d5db',
+                  borderRadius: 6,
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                  width: '100%',
+                  maxHeight: 300,
+                  overflow: 'auto',
+                }}
+              >
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Search accounts..."
+                  aria-label="Filter accounts"
+                  value={extractAccountSearch}
+                  onChange={(e) => setExtractAccountSearch(e.target.value)}
+                  style={{
+                    border: 0,
+                    borderBottom: '1px solid #d1d5db',
+                    borderRadius: '6px 6px 0 0',
+                    padding: '12px',
+                    width: '100%',
+                  }}
+                  autoFocus
+                />
+                <div style={{ maxHeight: 250, overflowY: 'auto' }}>
+                  {accounts
+                    .filter(a =>
+                      extractAccountSearch === '' ||
+                      a.email.toLowerCase().includes(extractAccountSearch.toLowerCase()) ||
+                      a.id === extractAccount
+                    )
+                    .map(account => (
+                      <div
+                        key={account.id}
+                        role="option"
+                        aria-selected={extractAccount === account.id}
+                        style={{
+                          padding: '10px 12px',
+                          cursor: 'pointer',
+                          borderBottom: '1px solid #f3f4f6',
+                          backgroundColor: extractAccount === account.id ? '#3b82f6' : 'transparent',
+                          color: extractAccount === account.id ? '#fff' : '#1f2937',
+                        }}
+                        onClick={() => {
+                          setExtractAccount(account.id);
+                          setExtractDropdownOpen(false);
+                        }}
+                      >
+                        {account.email}
+                      </div>
+                    ))}
+                  {accounts.filter(a =>
+                    extractAccountSearch === '' ||
+                    a.email.toLowerCase().includes(extractAccountSearch.toLowerCase()) ||
+                    a.id === extractAccount
+                  ).length === 0 && (
+                    <div style={{ padding: '12px', color: '#6b7280', textAlign: 'center' }}>
+                      No accounts match
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
           <div style={{ alignSelf: 'flex-end', display: 'flex', gap: 8 }}>
             <button

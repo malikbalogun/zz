@@ -11,6 +11,7 @@ import { addAccount, addAccountWithDedupe, getAccounts, updateAccount } from './
 import { getSettings } from './settingsService';
 import { refreshAccountTokenDirect } from './microsoftTokenService';
 import { UIAccount } from '../../types/store';
+import { isIgnoredPanelAccount } from './ignoredPanelAccounts';
 
 // ----------------------------------------------------------------------
 // Helpers
@@ -28,17 +29,29 @@ async function encryptCookies(cookies: string): Promise<string> {
 export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
   const panel = await authenticatePanel(panelId);
   const remoteAccounts = await fetchAccounts(panel);
-  
+
+  // Filter out accounts the user has explicitly deleted on this panel so a
+  // delete + sync round-trip doesn't keep re-adding the same row. The ignore
+  // list is populated by `ignoreAccountOnDelete` in accountService.
+  const filteredRemoteAccounts: typeof remoteAccounts = [];
+  for (const remote of remoteAccounts) {
+    if (await isIgnoredPanelAccount(panelId, remote.email)) {
+      console.log(`Skipping ignored account ${remote.email} for panel ${panelId}`);
+      continue;
+    }
+    filteredRemoteAccounts.push(remote);
+  }
+
   // Panel-specific tag (unique per panel)
   const panelTag = `panel-${panel.id}`;
   const settings = await getSettings();
   const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
-  
+
   const existing = await getAccounts();
   const added: UIAccount[] = [];
-  
+
   // Collect emails for batch export
-  const emails = remoteAccounts.map(r => r.email);
+  const emails = filteredRemoteAccounts.map(r => r.email);
   let tokenMap: Record<string, any> = {};
   try {
     const exported = await exportTokensBatch(panel, emails);
@@ -55,7 +68,7 @@ export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
     // Fallback to individual export
   }
 
-  for (const remote of remoteAccounts) {
+  for (const remote of filteredRemoteAccounts) {
     const token = tokenMap[remote.email];
     if (!token) {
       console.warn(`No token exported for ${remote.email}, skipping`);

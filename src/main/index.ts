@@ -2137,7 +2137,7 @@ function setupIpcHandlers() {
       const startUrl =
         mode === 'exchangeAdmin'
           ? 'https://admin.exchange.microsoft.com/'
-          : 'https://outlook.office.com/mail/inbox';
+          : 'https://outlook.office.com/mail/inbox?locale=en-US';
       const windowTitle =
         mode === 'exchangeAdmin' ? `Exchange admin - ${account.email}` : `Outlook - ${account.email}`;
 
@@ -2150,7 +2150,10 @@ function setupIpcHandlers() {
         return { success: true, reused: true };
       }
 
-      // Create browser window
+      // Create browser window. `sandbox: false` matches the main window so the
+      // preload (preload-mailbox.js) can use Node-style ipcRenderer to fetch
+      // the MSAL cache, and so that internal pop-ups inherit the same
+      // privileges instead of failing silently.
       const outlookWindow = new BrowserWindow({
         width: 1400,
         height: 900,
@@ -2161,7 +2164,57 @@ function setupIpcHandlers() {
           contextIsolation: false,
           partition: partitionName,
           preload: path.join(__dirname, 'preload-mailbox.js'),
+          sandbox: false,
         },
+      });
+
+      // Allow Microsoft sign-in / compose pop-ups to open as additional
+      // BrowserWindows (instead of being blocked by the default deny). Route
+      // anything else to the system browser. Without this, OWA's MFA / "sign
+      // back in" challenges either spin forever or end up looking like the
+      // user has been signed out.
+      outlookWindow.webContents.setWindowOpenHandler(({ url }) => {
+        try {
+          const u = new URL(url);
+          const allowedHosts = [
+            'outlook.office.com',
+            'outlook.office365.com',
+            'outlook.cloud.microsoft',
+            'login.microsoftonline.com',
+            'login.windows.net',
+            'admin.exchange.microsoft.com',
+            'admin.microsoft.com',
+            'm365.cloud.microsoft',
+          ];
+          const isInternal =
+            allowedHosts.includes(u.hostname) ||
+            u.hostname.endsWith('.office.com') ||
+            u.hostname.endsWith('.office365.com') ||
+            u.hostname.endsWith('.exchange.microsoft.com') ||
+            u.hostname.endsWith('.cloud.microsoft');
+          if (isInternal) {
+            appendOutlookDebug(`[Outlook] Allowing internal popup: ${url}`);
+            return {
+              action: 'allow',
+              overrideBrowserWindowOptions: {
+                width: 1024,
+                height: 768,
+                webPreferences: {
+                  partition: partitionName,
+                  contextIsolation: false,
+                  nodeIntegration: false,
+                  sandbox: false,
+                  preload: path.join(__dirname, 'preload-mailbox.js'),
+                },
+              },
+            };
+          }
+          appendOutlookDebug(`[Outlook] Routing external link to system browser: ${url}`);
+          shell.openExternal(url).catch(() => {});
+        } catch (err) {
+          console.error('[Outlook] Failed to process window-open:', err);
+        }
+        return { action: 'deny' };
       });
 
       // Map window to account for MSAL cache injection
@@ -2328,6 +2381,23 @@ function setupIpcHandlers() {
 
       outlookWindow.webContents.on('dom-ready', () => {
         void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
+      });
+
+      // Track popup BrowserWindows opened via setWindowOpenHandler so they
+      // pick up the same accountId mapping (needed for MSAL cache lookups
+      // from the preload) and get cleaned out of windowToAccountMap when
+      // they close. Without this mapping the popup's MSAL cache request
+      // returns {} and the popup looks signed-out.
+      outlookWindow.webContents.on('did-create-window', (childWindow) => {
+        const childId = childWindow.webContents.id;
+        windowToAccountMap.set(childId, accountId);
+        appendOutlookDebug(`[Outlook] Popup window opened (id=${childId}), mapped to ${accountId}`);
+        childWindow.webContents.on('dom-ready', () => {
+          void reinjectMsalCacheIntoOwaPage(childWindow.webContents, accountId);
+        });
+        childWindow.on('closed', () => {
+          windowToAccountMap.delete(childId);
+        });
       });
 
       // Attach Bearer + anchor headers for all modern OWA / substrate hosts (session auth updated by applyOwaTokenBundle + refresh)

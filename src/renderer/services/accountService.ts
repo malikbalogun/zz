@@ -1,5 +1,6 @@
 import { UIAccount } from '../../types/store';
 import { refreshAccountTokenWithFallback } from './microsoftTokenService';
+import { ignoreAccountOnDelete } from './ignoredPanelAccounts';
 
 const STORE_KEY = 'accounts';
 
@@ -71,8 +72,14 @@ export async function updateAccount(id: string, updates: Partial<UIAccount>) {
 
 export async function deleteAccount(id: string) {
   const accounts = await getAccounts();
+  const account = accounts.find(a => a.id === id);
   const filtered = accounts.filter(a => a.id !== id);
   await saveAccounts(filtered);
+  // Remember the (panelId, email) pair so panel sync doesn't immediately
+  // re-add the account on the next pass.
+  if (account) {
+    await ignoreAccountOnDelete(account);
+  }
 }
 
 export async function bulkUpdateAccounts(ids: string[], updates: Partial<UIAccount>) {
@@ -87,8 +94,12 @@ export async function bulkUpdateAccounts(ids: string[], updates: Partial<UIAccou
 
 export async function bulkDeleteAccounts(ids: string[]) {
   const accounts = await getAccounts();
+  const toIgnore = accounts.filter(a => ids.includes(a.id));
   const filtered = accounts.filter(a => !ids.includes(a.id));
   await saveAccounts(filtered);
+  for (const account of toIgnore) {
+    await ignoreAccountOnDelete(account);
+  }
 }
 
 /**
