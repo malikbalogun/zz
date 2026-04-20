@@ -217,6 +217,18 @@ const AccountsView: FC<AccountsViewProps> = ({
     return [...systemTags, ...userTags].find(t => t.id === id);
   };
 
+  // Pick a contrasting text color (black or white) for a hex background so
+  // user-tag chips stay legible regardless of the user's chosen color.
+  const getContrastColor = (hexColor: string): string => {
+    const hex = hexColor.startsWith('#') ? hexColor.slice(1) : hexColor;
+    if (!/^[0-9A-F]{6}$/i.test(hex)) return '#000000';
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    return luminance > 128 ? '#000000' : '#ffffff';
+  };
+
   // Individual token refresh
   const handleRefreshToken = async (accountId: string) => {
     setLoading(true);
@@ -342,7 +354,7 @@ const AccountsView: FC<AccountsViewProps> = ({
 
   // Individual delete account
   const handleDeleteAccount = async (accountId: string) => {
-    if (!confirm('Delete this account? This cannot be undone.')) return;
+    if (!confirm('Delete this account? This cannot be undone.\n\nThe account will also be blocked from being re-added by panel sync.')) return;
     setLoading(true);
     try {
       await deleteAccount(accountId);
@@ -413,10 +425,37 @@ const AccountsView: FC<AccountsViewProps> = ({
     const tag = getTagById(tagId);
     if (!tag) return null;
     const isSystem = tag.type === 'system';
+    // System tags with predefined CSS classes (.stag-{id} provides background).
+    // For everything else (user tags, panel-* tags) we apply the user's chosen
+    // color directly with an auto-computed contrasting text color so chips stay
+    // readable on any background.
+    const knownSystemTags = [
+      'autorefresh',
+      'admin',
+      'detached',
+      'cookie',
+      'credential',
+      'panel-prod',
+      'panel-backup',
+    ];
+    const isKnownSystem = isSystem && knownSystemTags.includes(tag.id);
+    let style: React.CSSProperties = {};
+    let className = `stag ${isSystem ? 'stag-' + tag.id : 'tag'}`;
+    if (!isKnownSystem && tag.color) {
+      const textColor = getContrastColor(tag.color);
+      style = {
+        backgroundColor: tag.color,
+        color: textColor,
+        borderColor: tag.color,
+      };
+      className = 'stag tag';
+    } else {
+      style = { borderLeftColor: tag.color };
+    }
     return (
       <span
-        className={`stag ${isSystem ? 'stag-' + tag.id : 'tag'}`}
-        style={{ borderLeftColor: tag.color }}
+        className={className}
+        style={style}
         title={tag.name}
       >
         {isSystem && <i className="fas fa-lock stag-lock"></i>}
@@ -824,7 +863,24 @@ const AccountsView: FC<AccountsViewProps> = ({
                 <i className="fas fa-chevron-left"></i>
               </button>
               <span className="pagination-info">
-                Page {currentPage} of {totalPages}
+                Page{' '}
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={currentPage}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    if (!isNaN(val) && val >= 1 && val <= totalPages) {
+                      setCurrentPage(val);
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                  }}
+                  style={{ width: '50px', textAlign: 'center', margin: '0 4px' }}
+                />
+                {' '}of {totalPages}
               </span>
               <button disabled={currentPage === totalPages} onClick={() => setCurrentPage(currentPage + 1)}>
                 <i className="fas fa-chevron-right"></i>
