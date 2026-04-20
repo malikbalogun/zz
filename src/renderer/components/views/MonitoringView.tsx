@@ -559,7 +559,7 @@ const MonitoringView = () => {
                           }`}
                           title={
                             account?.auth?.type === 'token'
-                              ? 'Open Microsoft Exchange admin center in your default browser'
+                              ? 'Open Microsoft Exchange admin center (uses this account\u2019s session)'
                               : account?.panelId
                                 ? 'Open panel admin in-app'
                                 : 'Admin — link a panel or use a token account'

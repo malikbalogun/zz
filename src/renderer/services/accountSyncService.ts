@@ -546,14 +546,19 @@ export async function openPanelAuthenticatedPath(accountId: string, relativePath
 }
 
 /**
- * For **token (Microsoft) accounts**: opens **Microsoft Exchange admin center** in the **system default browser**
- * (sign in there if prompted). For **panel-linked** accounts, opens the panel `/admin` UI in-app.
+ * For **token (Microsoft) accounts**: opens **Microsoft Exchange admin center**
+ * in an in-app BrowserWindow that reuses the account's OWA partition (so the
+ * Microsoft session — MSAL cache + OAuth interceptor + Bearer header
+ * injection — applies and the user lands signed in instead of being asked to
+ * authenticate again in their default browser).
+ *
+ * For **panel-linked** accounts, opens the panel `/admin` UI in-app as before.
  */
 export async function openPanelAdminDashboard(accountId: string): Promise<void> {
   const accounts = await getAccounts();
   const account = accounts.find(a => a.id === accountId);
   if (account?.auth?.type === 'token') {
-    await window.electron.browser.open('https://admin.exchange.microsoft.com/');
+    await window.electron.actions.openOutlook(accountId, { mode: 'exchangeAdmin' });
     return;
   }
   await window.electron.actions.openPanelAdmin(accountId);

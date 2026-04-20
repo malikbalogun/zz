@@ -761,7 +761,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                       }`}
                       title={
                         account.auth?.type === 'token'
-                          ? 'Open Microsoft Exchange admin center in your default browser'
+                          ? 'Open Microsoft Exchange admin center (uses this account\u2019s session)'
                           : account.panelId && panelIds.has(account.panelId)
                             ? 'Open panel admin in-app'
                             : 'Link a panel or add a Microsoft token for admin UIs'
