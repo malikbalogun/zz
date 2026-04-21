@@ -27,6 +27,20 @@ export interface ElectronAPI {
       netscape?: string;
       error?: string;
     }>;
+    /**
+     * Re-apply the stored cookie paste for this account to its OWA partition.
+     * Returns counts so the UI can show "applied X of Y cookies".
+     */
+    reapplyCookies: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      parsed?: number;
+      microsoft?: number;
+      applied?: number;
+      partition?: string;
+      error?: string;
+    }>;
     testLogin: (email: string, password: string) => Promise<unknown>;
   };
   tokens: {

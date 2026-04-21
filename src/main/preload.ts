@@ -66,6 +66,8 @@ contextBridge.exposeInMainWorld('electron', {
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
     /** Token account → Netscape cookie file (round-trip with the cookie import path). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
+    /** Re-apply the stored cookie paste to the OWA partition. */
+    reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
     exportBulkCSV: (ids: string[]) => ipcRenderer.invoke('account:exportBulkCSV', ids),
     testLogin: (email: string, password: string) =>
       ipcRenderer.invoke('account:testLogin', email, password),

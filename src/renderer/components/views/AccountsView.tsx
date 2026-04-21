@@ -234,13 +234,48 @@ const AccountsView: FC<AccountsViewProps> = ({
 
   // Individual token refresh
   const handleRefreshToken = async (accountId: string) => {
+    const account = accounts.find(a => a.id === accountId);
+    const label = account?.email || accountId;
     setLoading(true);
     try {
-      await refreshAccountToken(accountId);
-      alert(`Token refreshed for account ${accountId}`);
-      await loadData(); // refresh list
-    } catch (error) {
-      alert(`Failed to refresh token: ${error}`);
+      const updated = await refreshAccountToken(accountId);
+      const stamp = updated.lastRefresh
+        ? new Date(updated.lastRefresh).toLocaleTimeString()
+        : new Date().toLocaleTimeString();
+      alert(`Refreshed ${label} at ${stamp}\nStatus: ${updated.status}`);
+      await loadData();
+    } catch (error: any) {
+      const code = error?.code || '';
+      const detail = code === 'REFRESH_TOKEN_EXPIRED'
+        ? 'Microsoft revoked this refresh token. Use "Sign in again" to re-authenticate.'
+        : (error?.message || String(error));
+      alert(`Refresh failed for ${label}: ${detail}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Re-apply cookies for cookie accounts (or token accounts that have stored
+  // OWA cookies). Useful as a manual sanity check that the stored cookies
+  // still produce a working OWA session.
+  const handleReapplyCookies = async (accountId: string) => {
+    const account = accounts.find(a => a.id === accountId);
+    const label = account?.email || accountId;
+    setLoading(true);
+    try {
+      const result = await window.electron.accounts.reapplyCookies(accountId);
+      if (!result.success) {
+        throw new Error(result.error || 'Reapply failed');
+      }
+      alert(
+        `Reapplied cookies for ${label}\n\n` +
+        `Parsed: ${result.parsed ?? 0}\n` +
+        `Microsoft-related: ${result.microsoft ?? 0}\n` +
+        `Successfully written: ${result.applied ?? 0}\n\n` +
+        `Open Outlook to verify.`
+      );
+    } catch (error: any) {
+      alert(`Reapply cookies failed for ${label}: ${error?.message || String(error)}`);
     } finally {
       setLoading(false);
     }
@@ -842,9 +877,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                       <i className="fas fa-ellipsis-v"></i>
                     </button>
                     <div className={`act-dropdown ${openDropdownId === account.id ? 'open' : ''}`} style={openDropdownId === account.id && dropdownPosition ? { top: dropdownPosition.top, left: dropdownPosition.left } : undefined}>
-                      <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleRefreshToken(account.id); }}>
-                        <i className="fas fa-sync-alt"></i> Refresh Token
-                      </div>
+                      {account.auth?.type === 'token' && (
+                        <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleRefreshToken(account.id); }}
+                             title="Refresh this account's Microsoft access + refresh token now (extends the session).">
+                          <i className="fas fa-sync-alt"></i> Refresh token now
+                        </div>
+                      )}
+                      {(account.auth?.type === 'cookie' ||
+                        (account.auth?.type === 'token' && account.auth?.owaCookiesEncrypted)) && (
+                        <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); void handleReapplyCookies(account.id); }}
+                             title="Re-apply the stored cookie paste to this account's OWA partition.">
+                          <i className="fas fa-cookie"></i> Reapply cookies now
+                        </div>
+                      )}
                       <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleEditTags(account.id); }}>
                         <i className="fas fa-tags"></i> Edit Tags
                       </div>

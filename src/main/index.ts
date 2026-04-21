@@ -2657,6 +2657,62 @@ function setupIpcHandlers() {
     }
   });
 
+  /**
+   * Re-apply the stored cookie paste for a cookie-typed account (or a token
+   * account with `owaCookiesEncrypted` set) to the OWA partition. Useful as
+   * a manual "did the cookies actually take?" check from AccountsView.
+   *
+   * Returns how many cookies parsed, were Microsoft-related, and were
+   * successfully written.
+   */
+  ipcMain.handle('account:reapplyCookies', async (_, accountId: string) => {
+    try {
+      const storeData = await readStore();
+      const accounts: any[] = storeData.accounts || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+
+      const paste = getMicrosoftCookiePasteFromAccount(account);
+      if (!paste) {
+        throw new Error(
+          'No stored cookies for this account. For cookie accounts add cookies in Add Account → Cookie. For token accounts pull cookies from the panel first.'
+        );
+      }
+
+      const parsedAll = parseCookiePaste(paste);
+      const msCookies = filterMicrosoftRelatedCookies(parsedAll);
+      const toApply = msCookies.length ? msCookies : parsedAll;
+      if (!toApply.length) {
+        throw new Error('Stored cookie payload could not be parsed.');
+      }
+
+      // Cookie accounts use the cookie partition; token accounts with
+      // owaCookiesEncrypted use the regular OWA partition. Re-apply to whichever
+      // is active so the next "Open Outlook" picks them up.
+      const isCookieAccount = account.auth?.type === 'cookie';
+      const partitionName = isCookieAccount
+        ? `persist:outlook-cookie-${accountId}`
+        : `persist:outlook-${accountId}`;
+      const owaSession = session.fromPartition(partitionName);
+
+      const applied = await applyParsedCookiesToSession(owaSession, toApply);
+      appendOutlookDebug(
+        `[ReapplyCookies] account=${accountId} parsed=${parsedAll.length} ms=${msCookies.length} applied=${applied}`
+      );
+      return {
+        success: applied > 0,
+        parsed: parsedAll.length,
+        microsoft: msCookies.length,
+        applied,
+        partition: partitionName,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[ReapplyCookies] failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+
   // Get list of account IDs that currently have an open Outlook window
   ipcMain.handle('mailbox:getOpenOutlookWindows', () => {
     const openAccounts: string[] = [];
