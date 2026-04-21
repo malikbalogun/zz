@@ -41,6 +41,18 @@ export interface ElectronAPI {
       partition?: string;
       error?: string;
     }>;
+    /**
+     * Replace the primary auth on a token-typed account after re-authentication.
+     * Clears requiresReauth + lastError, marks status active.
+     */
+    replaceTokenAuth: (
+      accountId: string,
+      refreshToken: string,
+      authorityEndpoint?: string,
+      clientId?: string,
+      resource?: string,
+      scopeType?: string
+    ) => Promise<{ success: boolean }>;
     testLogin: (email: string, password: string) => Promise<unknown>;
   };
   tokens: {

@@ -16,6 +16,7 @@ import AddAccountModal, { type AddAccountInitialTab } from '../AddAccountModal';
 import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
+import ReAuthModal from '../ReAuthModal';
 
 interface AccountsViewProps {
   /** When set (e.g. from Dashboard), open Add Account on this tab once, then call onOpenAddAccountConsumed. */
@@ -48,6 +49,8 @@ const AccountsView: FC<AccountsViewProps> = ({
   /** When set, filters the table to children of this admin email
    *  (matches the `child-of:<email>` tag set by harvestAssociatedAccounts). */
   const [childOfFilter, setChildOfFilter] = useState<string | null>(null);
+  /** Account currently being re-authenticated (Microsoft revoked its refresh token). */
+  const [reAuthAccountId, setReAuthAccountId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'added-desc' | 'added-asc' | 'email-asc' | 'email-desc'>('added-desc');
   const [openWindowAccountIds, setOpenWindowAccountIds] = useState<string[]>([]);
@@ -815,7 +818,31 @@ const AccountsView: FC<AccountsViewProps> = ({
                     {account.email.substring(0, 2).toUpperCase()}
                   </div>
                   <div className="act-account-info">
-                    <div className="act-email">{account.email}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <div className="act-email">{account.email}</div>
+                      {account.requiresReauth && (
+                        <button
+                          type="button"
+                          className="action-btn"
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: 11,
+                            background: '#fef3c7',
+                            color: '#92400e',
+                            border: '1px solid #fbbf24',
+                            borderRadius: 4,
+                          }}
+                          title={account.lastError || 'Microsoft revoked this refresh token'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setReAuthAccountId(account.id);
+                          }}
+                        >
+                          <i className="fas fa-sign-in-alt" style={{ marginRight: 4 }} />
+                          Sign in again
+                        </button>
+                      )}
+                    </div>
                     <div
                       className="act-name"
                       title={
@@ -1084,6 +1111,19 @@ const AccountsView: FC<AccountsViewProps> = ({
           }}
         />
       )}
+      {reAuthAccountId && (() => {
+        const target = accounts.find(a => a.id === reAuthAccountId);
+        if (!target) {
+          return null;
+        }
+        return (
+          <ReAuthModal
+            account={target}
+            onCancel={() => setReAuthAccountId(null)}
+            onSuccess={() => void loadData()}
+          />
+        );
+      })()}
     </div>
   );
 };

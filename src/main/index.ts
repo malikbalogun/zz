@@ -3506,6 +3506,54 @@ function setupIpcHandlers() {
     return newAccount;
   });
 
+  /**
+   * Replace the primary `account.auth` for a token-typed account after the
+   * user re-authenticates (e.g. after Microsoft revoked the previous refresh
+   * token). Clears `requiresReauth` and `lastError`.
+   *
+   * Distinct from `account:addV2Token` which only sets the v2 sub-field for
+   * the OWA / EWS dual-token flow.
+   */
+  ipcMain.handle(
+    'account:replaceTokenAuth',
+    async (
+      _,
+      accountId: string,
+      refreshToken: string,
+      authorityEndpoint?: string,
+      clientId?: string,
+      resource?: string,
+      scopeType?: string
+    ) => {
+      if (!refreshToken) throw new Error('refreshToken is required');
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find(a => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+
+      const finalClientId = clientId || account.auth?.clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const finalAuthorityEndpoint = authorityEndpoint || account.auth?.authorityEndpoint || 'common';
+      const finalScopeType: 'graph' | 'ews' = scopeType === 'graph' ? 'graph' : 'ews';
+      const finalResource = resource || (finalScopeType === 'graph' ? 'https://graph.microsoft.com' : 'https://outlook.office.com');
+
+      account.auth = {
+        type: 'token',
+        clientId: finalClientId,
+        authorityEndpoint: finalAuthorityEndpoint,
+        refreshToken,
+        resource: finalResource,
+        scopeType: finalScopeType,
+      };
+      account.status = 'active';
+      account.requiresReauth = false;
+      account.lastError = '';
+      account.lastRefresh = new Date().toISOString();
+
+      await writeStore(store);
+      return { success: true };
+    }
+  );
+
   // Add OWA-compatible token to existing account (for OWA UI)
   ipcMain.handle('account:addV2Token', async (_, accountId: string, refreshToken: string, authorityEndpoint?: string, clientId?: string, resource?: string, scopeType?: string) => {
     console.log('[Account] addV2Token called:', { accountId, refreshTokenLength: refreshToken?.length, authorityEndpoint, clientId, resource, scopeType });

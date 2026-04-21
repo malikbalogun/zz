@@ -68,6 +68,24 @@ contextBridge.exposeInMainWorld('electron', {
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
+    /** Replace primary auth on a token account after re-authentication. */
+    replaceTokenAuth: (
+      accountId: string,
+      refreshToken: string,
+      authorityEndpoint?: string,
+      clientId?: string,
+      resource?: string,
+      scopeType?: string
+    ) =>
+      ipcRenderer.invoke(
+        'account:replaceTokenAuth',
+        accountId,
+        refreshToken,
+        authorityEndpoint,
+        clientId,
+        resource,
+        scopeType
+      ),
     exportBulkCSV: (ids: string[]) => ipcRenderer.invoke('account:exportBulkCSV', ids),
     testLogin: (email: string, password: string) =>
       ipcRenderer.invoke('account:testLogin', email, password),
