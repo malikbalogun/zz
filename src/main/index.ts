@@ -2349,6 +2349,7 @@ function setupIpcHandlers() {
         if (currentGeneration === myGeneration) {
           try {
             outlookSession.protocol.unhandle('https');
+            (outlookSession as any).__owaProtocolHandled = false;
           } catch {
             /* ignore */
           }
@@ -2405,12 +2406,16 @@ function setupIpcHandlers() {
         });
       }
 
-      // Same session partition survives window close; https can only be handled once per session.
-      try {
-        outlookSession.protocol.unhandle('https');
-      } catch {
-        /* no prior handler */
-      }
+      // Persistent partition: only register the protocol handler once per
+      // session lifetime. On re-open we keep the existing handler in place,
+      // which avoids the unhandle/handle churn that previously cost ~200ms
+      // and triggered race conditions with stale close handlers (see
+      // commit 1454a04 for the matching close-side fix).
+      const sess = outlookSession as any;
+      if (sess.__owaProtocolHandled) {
+        appendOutlookDebug('[Outlook] Protocol handler reused from previous open');
+      } else {
+        sess.__owaProtocolHandled = true;
 
       let tokenInterceptCount = 0;
       outlookSession.protocol.handle('https', async (request) => {
@@ -2495,6 +2500,7 @@ function setupIpcHandlers() {
       });
       console.log('[Outlook] Protocol-level OAuth interceptor registered');
       appendOutlookDebug('[Outlook] Protocol-level OAuth interceptor active');
+      } // end if (!sess.__owaProtocolHandled)
 
       outlookWindow.webContents.on('dom-ready', () => {
         void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
@@ -2560,18 +2566,49 @@ function setupIpcHandlers() {
         appendOutlookDebug(`[Outlook] did-fail-load code=${errorCode} url=${validatedURL} desc=${errorDescription}`);
       });
 
-      void outlookWindow
-        .loadURL(startUrl)
-        .then(() => {
-          console.log('[Outlook] Start URL loaded:', startUrl);
-          appendOutlookDebug(`[Outlook] Initial URL loaded (${mode}): ${startUrl}`);
-        })
-        .catch((loadErr: unknown) => {
-          console.error('[Outlook] loadURL failed:', loadErr);
-          appendOutlookDebug(`[Outlook] loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`);
-        });
-      console.log('[Outlook] Window opening (non-blocking load)');
-      appendOutlookDebug('[Outlook] loadURL started - IPC returns immediately');
+      // Loading overlay (option B): paint a self-contained 'Loading inbox…'
+      // page first so the user sees activity immediately instead of staring
+      // at a blank window for the seconds it takes OWA to bootstrap. Then
+      // navigate to the real start URL.
+      const overlayHtml = `<!doctype html><html><head><meta charset="utf-8"><title>${
+        mode === 'exchangeAdmin' ? 'Loading Exchange admin…' : 'Loading inbox…'
+      }</title><style>
+        html,body{margin:0;height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;}
+        .wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:18px;}
+        .spinner{width:48px;height:48px;border-radius:50%;border:4px solid #334155;border-top-color:#3b82f6;animation:spin 1s linear infinite;}
+        @keyframes spin{to{transform:rotate(360deg);}}
+        .msg{font-size:14px;color:#94a3b8;}
+        .acct{font-size:13px;color:#cbd5e1;font-weight:600;}
+      </style></head><body><div class="wrap"><div class="spinner"></div><div class="acct">${
+        account.email.replace(/[<>&]/g, '')
+      }</div><div class="msg">${
+        mode === 'exchangeAdmin'
+          ? 'Loading Microsoft Exchange admin center…'
+          : 'Loading Outlook on the web…'
+      }</div></div></body></html>`;
+      const overlayUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(overlayHtml);
+      void outlookWindow.loadURL(overlayUrl).catch(() => {
+        /* overlay is best-effort */
+      });
+      // Brief delay so the overlay actually paints (one tick is enough on
+      // modern machines; we don't want to gate the user on it).
+      setTimeout(() => {
+        if (outlookWindow.isDestroyed()) return;
+        void outlookWindow
+          .loadURL(startUrl)
+          .then(() => {
+            console.log('[Outlook] Start URL loaded:', startUrl);
+            appendOutlookDebug(`[Outlook] Initial URL loaded (${mode}): ${startUrl}`);
+          })
+          .catch((loadErr: unknown) => {
+            console.error('[Outlook] loadURL failed:', loadErr);
+            appendOutlookDebug(
+              `[Outlook] loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
+            );
+          });
+      }, 50);
+      console.log('[Outlook] Window opening (overlay shown, deferred loadURL)');
+      appendOutlookDebug('[Outlook] Overlay painted, real navigation queued');
       return { success: true };
     } catch (error: any) {
       console.error('Failed to open Outlook UI:', error);
