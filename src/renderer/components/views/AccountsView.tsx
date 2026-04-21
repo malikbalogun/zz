@@ -17,6 +17,7 @@ import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
 import ReAuthModal from '../ReAuthModal';
+import GrantAdminScopeModal from '../GrantAdminScopeModal';
 
 interface AccountsViewProps {
   /** When set (e.g. from Dashboard), open Add Account on this tab once, then call onOpenAddAccountConsumed. */
@@ -51,6 +52,8 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [childOfFilter, setChildOfFilter] = useState<string | null>(null);
   /** Account currently being re-authenticated (Microsoft revoked its refresh token). */
   const [reAuthAccountId, setReAuthAccountId] = useState<string | null>(null);
+  /** Account currently being granted admin Graph scope. */
+  const [grantAdminAccountId, setGrantAdminAccountId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'added-desc' | 'added-asc' | 'email-asc' | 'email-desc'>('added-desc');
   const [openWindowAccountIds, setOpenWindowAccountIds] = useState<string[]>([]);
@@ -353,17 +356,17 @@ const AccountsView: FC<AccountsViewProps> = ({
 
   // Individual admin harvest. After harvest, switch the table filter to
   // "children of <this admin>" so the user sees the new rows immediately.
-  const handleAdminHarvest = async (accountId: string) => {
+  const handleAdminHarvest = async (accountId: string, source: 'panel' | 'graph' | 'both' = 'panel') => {
     setLoading(true);
     try {
       const account = accounts.find(a => a.id === accountId);
-      const associated = await harvestAssociatedAccounts(accountId);
+      const associated = await harvestAssociatedAccounts(accountId, { source });
       await loadData();
       if (account?.email) {
         const adminEmail = account.email.trim().toLowerCase();
         setChildOfFilter(adminEmail);
       }
-      alert(`Harvested ${associated.length} associated accounts`);
+      alert(`Harvested ${associated.length} associated accounts (source: ${source})`);
     } catch (error) {
       alert(`Harvest failed: ${error}`);
     } finally {
@@ -1001,9 +1004,42 @@ const AccountsView: FC<AccountsViewProps> = ({
                         </>
                       )}
                       {account.tags.includes('admin') && (
-                        <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleAdminHarvest(account.id); }}>
-                          <i className="fas fa-users"></i> View Other Associated Accounts
-                        </div>
+                        <>
+                          <div
+                            className="act-dropdown-item"
+                            onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleAdminHarvest(account.id, 'panel'); }}
+                            title="Query the panel's /api/admin/associated-accounts endpoint."
+                          >
+                            <i className="fas fa-users"></i> View associated (via panel)
+                          </div>
+                          {account.auth?.type === 'token' && account.auth.adminGraphRefreshToken && (
+                            <div
+                              className="act-dropdown-item"
+                              onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleAdminHarvest(account.id, 'graph'); }}
+                              title="Enumerate the tenant's users via Microsoft Graph admin scope."
+                            >
+                              <i className="fas fa-shield-alt"></i> View associated (via Graph)
+                            </div>
+                          )}
+                          {account.auth?.type === 'token' && account.auth.adminGraphRefreshToken && (
+                            <div
+                              className="act-dropdown-item"
+                              onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleAdminHarvest(account.id, 'both'); }}
+                              title="Combine panel + Graph results, deduped by email."
+                            >
+                              <i className="fas fa-layer-group"></i> View associated (panel + Graph)
+                            </div>
+                          )}
+                          {account.auth?.type === 'token' && !account.auth.adminGraphRefreshToken && (
+                            <div
+                              className="act-dropdown-item"
+                              onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); setGrantAdminAccountId(account.id); }}
+                              title="Run the device-code flow with Directory.Read.All to enable Graph enumeration."
+                            >
+                              <i className="fas fa-shield-alt"></i> Grant admin Graph access\u2026
+                            </div>
+                          )}
+                        </>
                       )}
                       <div className="act-dropdown-divider"></div>
                       <div className="act-dropdown-item act-dropdown-danger" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleDeleteAccount(account.id); }}>
@@ -1120,6 +1156,19 @@ const AccountsView: FC<AccountsViewProps> = ({
           <ReAuthModal
             account={target}
             onCancel={() => setReAuthAccountId(null)}
+            onSuccess={() => void loadData()}
+          />
+        );
+      })()}
+      {grantAdminAccountId && (() => {
+        const target = accounts.find(a => a.id === grantAdminAccountId);
+        if (!target) {
+          return null;
+        }
+        return (
+          <GrantAdminScopeModal
+            account={target}
+            onCancel={() => setGrantAdminAccountId(null)}
             onSuccess={() => void loadData()}
           />
         );

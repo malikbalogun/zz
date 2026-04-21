@@ -290,47 +290,121 @@ export function childOfTagId(adminEmail: string): string {
   return `child-of:${adminEmail.trim().toLowerCase()}`;
 }
 
+export type HarvestSource = 'panel' | 'graph' | 'both';
+
 /**
  * Harvest associated mailboxes from an admin account. Each child mailbox is
  * upserted as its own account (deduped by email) and tagged with both
  * `admin-harvest` and `child-of:<adminEmail>` so the AccountsView can filter
  * to "siblings under this admin" with a single click.
  *
+ * Source:
+ *   - 'panel' (default): query the panel's /api/admin/associated-accounts.
+ *   - 'graph': enumerate via Microsoft Graph /users using the admin's
+ *     adminGraphRefreshToken (Directory.Read.All scope). Requires the user
+ *     to have run the "Grant admin Graph access" flow first.
+ *   - 'both': merge results, deduped by email.
+ *
  * The child's `notes` get a leading `Discovered via admin <email> on <ISO>`
  * line so the source is also visible without depending on tag presence.
+ * Graph-discovered children store only an email + display name (no auth) —
+ * the user must add auth via the normal flows. The tag link still applies.
  */
-export async function harvestAssociatedAccounts(adminAccountId: string): Promise<UIAccount[]> {
+export async function harvestAssociatedAccounts(
+  adminAccountId: string,
+  options?: { source?: HarvestSource }
+): Promise<UIAccount[]> {
   const accounts = await getAccounts();
   const adminAccount = accounts.find(a => a.id === adminAccountId);
   if (!adminAccount) throw new Error('Admin account not found');
   const adminEmail = (adminAccount.email || '').trim().toLowerCase();
+  const source = options?.source ?? 'panel';
 
-  const associated = await window.electron.actions.adminHarvest(adminAccountId);
   const settings = await getSettings();
   const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
   const childTag = childOfTagId(adminEmail);
 
-  const added: UIAccount[] = [];
-  for (const acc of associated) {
-    // Skip the admin itself if it appears in its own associated list.
-    if (acc.email && acc.email.trim().toLowerCase() === adminEmail) continue;
+  // Build the discovered set keyed by email.
+  type Discovered = { email: string; panelId?: string | null; status?: string; auth?: any; displayName?: string };
+  const discovered = new Map<string, Discovered>();
 
+  const lower = (s: string) => (s || '').trim().toLowerCase();
+
+  if (source === 'panel' || source === 'both') {
+    try {
+      const panelResults = await window.electron.actions.adminHarvest(adminAccountId);
+      for (const acc of panelResults) {
+        const k = lower(acc.email);
+        if (!k || k === adminEmail) continue;
+        if (!discovered.has(k)) discovered.set(k, { ...acc });
+      }
+    } catch (err) {
+      if (source === 'panel') throw err;
+      console.warn('[Harvest] panel source failed, continuing with graph:', err);
+    }
+  }
+
+  if (source === 'graph' || source === 'both') {
+    if (adminAccount.auth?.type !== 'token' || !adminAccount.auth.adminGraphRefreshToken) {
+      const msg =
+        'Graph admin enumeration is not configured for this account. Use "Grant admin Graph access" to consent first.';
+      if (source === 'graph') throw new Error(msg);
+      console.warn('[Harvest]', msg);
+    } else {
+      const r = await window.electron.graphAdmin.listUsers(
+        adminAccount.auth.adminGraphRefreshToken,
+        adminAccount.auth.authorityEndpoint || 'common',
+        adminAccount.auth.clientId
+      );
+      if (!r.success) {
+        const msg = r.error || 'Graph listUsers failed';
+        if (source === 'graph') throw new Error(msg);
+        console.warn('[Harvest] graph source failed, continuing with panel results:', msg);
+      } else {
+        // Persist any rotated refresh token.
+        if (r.refreshTokenRotated && adminAccount.auth.type === 'token') {
+          await updateAccount(adminAccount.id, {
+            auth: { ...adminAccount.auth, adminGraphRefreshToken: r.refreshTokenRotated },
+          });
+        }
+        for (const u of r.users || []) {
+          const email = u.mail || u.userPrincipalName;
+          if (!email) continue;
+          const k = lower(email);
+          if (k === adminEmail) continue;
+          const existing = discovered.get(k);
+          if (existing) {
+            // Panel auth wins when both sources agree.
+            if (!existing.displayName && u.displayName) existing.displayName = u.displayName;
+          } else {
+            discovered.set(k, { email, displayName: u.displayName, status: 'active' });
+          }
+        }
+      }
+    }
+  }
+
+  const added: UIAccount[] = [];
+  for (const acc of discovered.values()) {
     const tags = ['admin-harvest', childTag];
     if (autoRefreshTagId && !tags.includes(autoRefreshTagId)) tags.push(autoRefreshTagId);
 
-    const provenance = `Discovered via admin ${adminEmail} on ${new Date().toISOString()}`;
-    const existing = accounts.find(a => a.email?.trim().toLowerCase() === acc.email?.trim().toLowerCase());
+    const provenance = `Discovered via admin ${adminEmail} on ${new Date().toISOString()} (source=${source})`;
+    const existing = accounts.find(a => lower(a.email) === lower(acc.email));
     const mergedNotes = existing?.notes && existing.notes.includes('Discovered via admin')
       ? existing.notes
       : [provenance, existing?.notes].filter(Boolean).join('\n');
 
     const accountData: Omit<UIAccount, 'id'> = {
       email: acc.email,
-      panelId: acc.panelId,
-      added: new Date().toISOString(),
-      status: acc.status || 'active',
+      name: acc.displayName || existing?.name,
+      panelId: acc.panelId ?? existing?.panelId ?? undefined,
+      added: existing?.added || new Date().toISOString(),
+      status: (acc.status as any) || existing?.status || 'active',
       tags,
-      auth: acc.auth, // assume already encrypted by main / panel
+      // Only overwrite auth when we actually got one (panel source). Graph-only
+      // discovery means we know the mailbox exists but have no token for it yet.
+      auth: acc.auth || existing?.auth,
       notes: mergedNotes,
     };
     const newAccount = await addAccountWithDedupe(accountData);

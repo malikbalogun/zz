@@ -222,5 +222,14 @@ contextBridge.exposeInMainWorld('electron', {
     deviceCode: (clientId?: string, authority?: string) => ipcRenderer.invoke('oauth:deviceCode', clientId, authority),
     pollToken: (deviceCode: string, clientId?: string, authority?: string) => ipcRenderer.invoke('oauth:pollToken', deviceCode, clientId, authority),
     deviceCodeHighHopes: () => ipcRenderer.invoke('oauth:deviceCodeHighHopes'),
+    /** Same as deviceCode() but requests Graph admin scopes (Directory.Read.All + User.Read.All). */
+    deviceCodeAdminScope: (clientId?: string, authority?: string) =>
+      ipcRenderer.invoke('oauth:deviceCodeAdminScope', clientId, authority),
+  },
+
+  // Microsoft Graph admin enumeration (opt-in, requires admin-scope token).
+  graphAdmin: {
+    listUsers: (adminRefreshToken: string, authority?: string, clientId?: string) =>
+      ipcRenderer.invoke('graphAdmin:listUsers', adminRefreshToken, authority, clientId),
   },
 });

@@ -22,6 +22,14 @@ export interface UIAccount {
     owaCookiesEncrypted?: string;
     /** In-app OWA: use Bearer/MSAL injection (`token`) or stored Microsoft cookies (`cookie`). */
     owaMailboxMode?: 'token' | 'cookie';
+    /**
+     * Optional Microsoft Graph refresh token captured under admin scopes
+     * (Directory.Read.All / User.Read.All). When set, the admin enumeration
+     * UI can list every user in the tenant via Graph `/users`.
+     * Stored separately so the regular EWS-scope auth keeps working
+     * independently.
+     */
+    adminGraphRefreshToken?: string;
   } | {
     type: 'cookie';
     /** Encrypted cookie paste (renderer) or main-process `cookiesEncrypted` — both supported when loading OWA. */

@@ -192,6 +192,32 @@ export interface ElectronAPI {
     deviceCode: (clientId?: string, authority?: string) => Promise<any>;
     pollToken: (deviceCode: string, clientId?: string, authority?: string) => Promise<any>;
     deviceCodeHighHopes: () => Promise<any>;
+    /**
+     * Device-code flow that requests Microsoft Graph admin scopes
+     * (Directory.Read.All + User.Read.All). Requires global-admin consent.
+     */
+    deviceCodeAdminScope: (clientId?: string, authority?: string) => Promise<any>;
+  };
+  /** Microsoft Graph admin-scope enumeration (opt-in). */
+  graphAdmin: {
+    /** Enumerate every user in the tenant. Follows Graph @odata.nextLink. */
+    listUsers: (
+      adminRefreshToken: string,
+      authority?: string,
+      clientId?: string
+    ) => Promise<{
+      success: boolean;
+      users?: Array<{
+        id: string;
+        mail?: string;
+        userPrincipalName?: string;
+        displayName?: string;
+      }>;
+      count?: number;
+      refreshTokenRotated?: string;
+      error?: string;
+      code?: string;
+    }>;
   };
   browser: {
     open: (url: string) => Promise<void>;

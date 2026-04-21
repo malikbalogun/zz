@@ -1689,6 +1689,136 @@ function setupIpcHandlers() {
     }
   });
 
+  /**
+   * Device-code flow that requests Microsoft Graph **admin** scopes
+   * (Directory.Read.All + User.Read.All) so we can enumerate the tenant's
+   * user directory. Distinct from `oauth:deviceCode` (EWS scope only).
+   *
+   * This requires a global admin to consent. Non-admin sign-ins will fail
+   * at the consent screen with a clear AAD error which we surface verbatim.
+   */
+  ipcMain.handle('oauth:deviceCodeAdminScope', async (_, clientId?: string, authority?: string) => {
+    console.log('[OAuth] Starting device code flow for Graph admin scope');
+    const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const useAuthority = authority || 'common';
+    // Directory.Read.All gives richer enumeration (groups, license info, etc.)
+    // per the user's preference. User.Read.All would also work for just /users.
+    const adminScope = 'https://graph.microsoft.com/Directory.Read.All https://graph.microsoft.com/User.Read.All offline_access';
+    try {
+      const deviceCodeResponse = await fetch(
+        `https://login.microsoftonline.com/${useAuthority}/oauth2/v2.0/devicecode`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: useClientId,
+            scope: adminScope,
+            prompt: 'consent',
+          }),
+          signal: timeoutSignal(15000),
+        } as any
+      );
+      if (!deviceCodeResponse.ok) {
+        const error = await deviceCodeResponse.json();
+        throw new Error(`Device code request failed: ${error.error_description || deviceCodeResponse.status}`);
+      }
+      const deviceCodeData = await deviceCodeResponse.json();
+      let verificationUri = deviceCodeData.verification_uri;
+      verificationUri = verificationUri.replace('login.microsoft.com/device', 'microsoft.com/devicelogin');
+      return {
+        success: true,
+        userCode: deviceCodeData.user_code,
+        deviceCode: deviceCodeData.device_code,
+        verificationUri,
+        expiresIn: deviceCodeData.expires_in,
+        interval: deviceCodeData.interval,
+        message: deviceCodeData.message,
+        scope: adminScope,
+      };
+    } catch (error: any) {
+      console.error('[OAuth] Admin device code generation failed:', error);
+      return { success: false, error: error.message || 'Device code generation failed' };
+    }
+  });
+
+  /**
+   * Enumerate users via Microsoft Graph using a stored admin-scope refresh
+   * token. Returns ALL pages (follows @odata.nextLink). Each user object
+   * includes id, displayName, mail, userPrincipalName.
+   */
+  ipcMain.handle(
+    'graphAdmin:listUsers',
+    async (
+      _,
+      adminRefreshToken: string,
+      authority?: string,
+      clientId?: string
+    ) => {
+      const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const useAuthority = authority || 'common';
+      try {
+        // Exchange refresh -> access for graph admin scope.
+        const tokenRes = await fetch(
+          `https://login.microsoftonline.com/${useAuthority}/oauth2/v2.0/token`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'refresh_token',
+              refresh_token: adminRefreshToken,
+              client_id: useClientId,
+              scope: 'https://graph.microsoft.com/.default offline_access',
+            }),
+            signal: timeoutSignal(20000),
+          } as any
+        );
+        if (!tokenRes.ok) {
+          const err = await tokenRes.json().catch(() => ({}));
+          if (err.error === 'invalid_grant') {
+            return { success: false, error: 'REFRESH_TOKEN_EXPIRED', code: 'REFRESH_TOKEN_EXPIRED' };
+          }
+          return { success: false, error: err.error_description || `HTTP ${tokenRes.status}` };
+        }
+        const tokenData = await tokenRes.json();
+        const accessToken: string = tokenData.access_token;
+        const newRefresh: string | undefined = tokenData.refresh_token;
+
+        const users: Array<{ id: string; mail?: string; userPrincipalName?: string; displayName?: string }> = [];
+        let nextLink = `https://graph.microsoft.com/v1.0/users?$select=id,mail,userPrincipalName,displayName&$top=999`;
+        let page = 0;
+        while (nextLink && page < 50) {
+          const pageRes = await fetch(nextLink, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: timeoutSignal(30000),
+          } as any);
+          if (!pageRes.ok) {
+            const errText = await pageRes.text().catch(() => '');
+            return {
+              success: false,
+              error: `Graph /users failed: HTTP ${pageRes.status} ${errText.slice(0, 200)}`,
+            };
+          }
+          const pageData = await pageRes.json();
+          const value: any[] = Array.isArray(pageData?.value) ? pageData.value : [];
+          for (const u of value) {
+            users.push({
+              id: u.id,
+              mail: u.mail || undefined,
+              userPrincipalName: u.userPrincipalName || undefined,
+              displayName: u.displayName || undefined,
+            });
+          }
+          nextLink = typeof pageData['@odata.nextLink'] === 'string' ? pageData['@odata.nextLink'] : '';
+          page++;
+        }
+        return { success: true, users, count: users.length, refreshTokenRotated: newRefresh };
+      } catch (error: any) {
+        return { success: false, error: error?.message || String(error) };
+      }
+    }
+  );
+
   // Poll for token from device code
   ipcMain.handle('oauth:pollToken', async (_, deviceCode: string, clientId?: string, authority?: string) => {
     console.log('[OAuth] Polling for token');
