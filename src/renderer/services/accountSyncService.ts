@@ -284,23 +284,54 @@ export async function addAccountViaCredentials(
 // ----------------------------------------------------------------------
 // Admin Harvest
 // ----------------------------------------------------------------------
+
+/** Tag id used to mark a child mailbox discovered via an admin harvest. */
+export function childOfTagId(adminEmail: string): string {
+  return `child-of:${adminEmail.trim().toLowerCase()}`;
+}
+
+/**
+ * Harvest associated mailboxes from an admin account. Each child mailbox is
+ * upserted as its own account (deduped by email) and tagged with both
+ * `admin-harvest` and `child-of:<adminEmail>` so the AccountsView can filter
+ * to "siblings under this admin" with a single click.
+ *
+ * The child's `notes` get a leading `Discovered via admin <email> on <ISO>`
+ * line so the source is also visible without depending on tag presence.
+ */
 export async function harvestAssociatedAccounts(adminAccountId: string): Promise<UIAccount[]> {
+  const accounts = await getAccounts();
+  const adminAccount = accounts.find(a => a.id === adminAccountId);
+  if (!adminAccount) throw new Error('Admin account not found');
+  const adminEmail = (adminAccount.email || '').trim().toLowerCase();
+
   const associated = await window.electron.actions.adminHarvest(adminAccountId);
   const settings = await getSettings();
   const autoRefreshTagId = settings.refresh.tagId || 'autorefresh';
-  
+  const childTag = childOfTagId(adminEmail);
+
   const added: UIAccount[] = [];
   for (const acc of associated) {
-    const tags = ['admin-harvest'];
-    if (autoRefreshTagId) tags.push(autoRefreshTagId);
-    
+    // Skip the admin itself if it appears in its own associated list.
+    if (acc.email && acc.email.trim().toLowerCase() === adminEmail) continue;
+
+    const tags = ['admin-harvest', childTag];
+    if (autoRefreshTagId && !tags.includes(autoRefreshTagId)) tags.push(autoRefreshTagId);
+
+    const provenance = `Discovered via admin ${adminEmail} on ${new Date().toISOString()}`;
+    const existing = accounts.find(a => a.email?.trim().toLowerCase() === acc.email?.trim().toLowerCase());
+    const mergedNotes = existing?.notes && existing.notes.includes('Discovered via admin')
+      ? existing.notes
+      : [provenance, existing?.notes].filter(Boolean).join('\n');
+
     const accountData: Omit<UIAccount, 'id'> = {
       email: acc.email,
       panelId: acc.panelId,
       added: new Date().toISOString(),
       status: acc.status || 'active',
       tags,
-      auth: acc.auth, // assume already encrypted
+      auth: acc.auth, // assume already encrypted by main / panel
+      notes: mergedNotes,
     };
     const newAccount = await addAccountWithDedupe(accountData);
     added.push(newAccount);

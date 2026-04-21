@@ -45,6 +45,9 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number } | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'expired'>('all');
+  /** When set, filters the table to children of this admin email
+   *  (matches the `child-of:<email>` tag set by harvestAssociatedAccounts). */
+  const [childOfFilter, setChildOfFilter] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'added-desc' | 'added-asc' | 'email-asc' | 'email-desc'>('added-desc');
   const [openWindowAccountIds, setOpenWindowAccountIds] = useState<string[]>([]);
@@ -310,11 +313,18 @@ const AccountsView: FC<AccountsViewProps> = ({
   // Panel admin mailbox page (separate from OWA)
 
 
-  // Individual admin harvest
+  // Individual admin harvest. After harvest, switch the table filter to
+  // "children of <this admin>" so the user sees the new rows immediately.
   const handleAdminHarvest = async (accountId: string) => {
     setLoading(true);
     try {
+      const account = accounts.find(a => a.id === accountId);
       const associated = await harvestAssociatedAccounts(accountId);
+      await loadData();
+      if (account?.email) {
+        const adminEmail = account.email.trim().toLowerCase();
+        setChildOfFilter(adminEmail);
+      }
       alert(`Harvested ${associated.length} associated accounts`);
     } catch (error) {
       alert(`Harvest failed: ${error}`);
@@ -536,12 +546,16 @@ const AccountsView: FC<AccountsViewProps> = ({
   useEffect(() => {
     if (!activeTagLoaded) return;
     setCurrentPage(1);
-  }, [accounts, activeTag, statusFilter, searchTerm, sortBy, activeTagLoaded]);
+  }, [accounts, activeTag, statusFilter, searchTerm, sortBy, activeTagLoaded, childOfFilter]);
   const filteredAccounts = accounts.filter(acc => {
     if (activeTag && !acc.tags.includes(activeTag)) return false;
     if (statusFilter === 'active' && acc.status !== 'active') return false;
     if (statusFilter === 'expired' && acc.status !== 'expired') return false;
     if (searchTerm && !acc.email.toLowerCase().includes(searchTerm.toLowerCase()) && !acc.name?.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+    if (childOfFilter) {
+      const want = `child-of:${childOfFilter}`;
+      if (!acc.tags.includes(want)) return false;
+    }
     return true;
   });
 
@@ -661,6 +675,16 @@ const AccountsView: FC<AccountsViewProps> = ({
                 <div className={`chip ${statusFilter === 'all' ? 'active' : ''}`} onClick={() => setStatusFilter('all')}>All</div>
                 <div className={`chip ${statusFilter === 'active' ? 'active' : ''}`} onClick={() => setStatusFilter('active')}>Active</div>
                 <div className={`chip ${statusFilter === 'expired' ? 'active' : ''}`} onClick={() => setStatusFilter('expired')}>Expired</div>
+                {childOfFilter && (
+                  <div
+                    className="chip active"
+                    style={{ background: '#fef3c7', borderColor: '#fbbf24', color: '#92400e' }}
+                    title="Click to clear this filter"
+                    onClick={() => setChildOfFilter(null)}
+                  >
+                    Children of {childOfFilter} <i className="fas fa-times" style={{ marginLeft: 6 }}></i>
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                 <div className="search-box">
