@@ -816,7 +816,30 @@ const AccountsView: FC<AccountsViewProps> = ({
                   </div>
                   <div className="act-account-info">
                     <div className="act-email">{account.email}</div>
-                    <div className="act-name">{account.name || '-'}</div>
+                    <div
+                      className="act-name"
+                      title={
+                        account.lastRefresh
+                          ? `Last refresh: ${new Date(account.lastRefresh).toLocaleString()}`
+                          : 'Never refreshed'
+                      }
+                    >
+                      {account.name || '-'}
+                      {account.lastRefresh && (
+                        <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: 11 }}>
+                          · refreshed {(() => {
+                            const diff = Date.now() - new Date(account.lastRefresh).getTime();
+                            const min = Math.floor(diff / 60000);
+                            if (min < 1) return 'just now';
+                            if (min < 60) return `${min}m ago`;
+                            const hr = Math.floor(min / 60);
+                            if (hr < 24) return `${hr}h ago`;
+                            const d = Math.floor(hr / 24);
+                            return `${d}d ago`;
+                          })()}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="act-status">

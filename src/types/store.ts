@@ -35,6 +35,12 @@ export interface UIAccount {
   lastRefresh?: string;
   /** Last token/API error message (e.g. after health check). */
   lastError?: string;
+  /**
+   * Set true when the most recent refresh failed with `invalid_grant`
+   * (Microsoft revoked the refresh token). The UI surfaces a "Sign in
+   * again" CTA that re-runs the device-code flow.
+   */
+  requiresReauth?: boolean;
   notes?: string;
 }
 

@@ -56,6 +56,12 @@ export interface ElectronAPI {
         success: number;
         expired: number;
         failed: number;
+        accounts: Array<{
+          accountId: string;
+          email?: string;
+          outcome: 'success' | 'expired' | 'failed';
+          error?: string;
+        }>;
         errors: Array<{ accountId: string; error: string }>;
       } | null;
     }>;
@@ -67,6 +73,12 @@ export interface ElectronAPI {
         success: number;
         expired: number;
         failed: number;
+        accounts: Array<{
+          accountId: string;
+          email?: string;
+          outcome: 'success' | 'expired' | 'failed';
+          error?: string;
+        }>;
         errors: Array<{ accountId: string; error: string }>;
       };
     }>;

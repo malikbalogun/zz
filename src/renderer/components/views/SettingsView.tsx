@@ -891,6 +891,8 @@ const RefreshStatusPanel = () => {
   const [status, setStatus] = useState<RefreshStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string>('');
+  /** Per-account list shown after a Run now (or available from lastResult). */
+  const [showDetails, setShowDetails] = useState(false);
 
   const reload = async () => {
     try {
@@ -911,6 +913,7 @@ const RefreshStatusPanel = () => {
   const handleRunNow = async () => {
     setBusy(true);
     setMsg('Refreshing all token accounts…');
+    setShowDetails(true);
     try {
       const r = await window.electron.tokens.refreshNow();
       const { success, expired, failed } = r.result;
@@ -973,6 +976,82 @@ const RefreshStatusPanel = () => {
       {msg && (
         <div style={{ marginTop: 8, fontSize: 12, color: msg.startsWith('Refresh failed') ? '#dc2626' : '#374151' }}>
           {msg}
+        </div>
+      )}
+      {status?.lastResult && status.lastResult.accounts && status.lastResult.accounts.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <button
+            type="button"
+            className="action-btn secondary"
+            style={{ padding: '4px 10px', fontSize: 12 }}
+            onClick={() => setShowDetails(v => !v)}
+          >
+            <i
+              className={`fas ${showDetails ? 'fa-chevron-down' : 'fa-chevron-right'}`}
+              style={{ marginRight: 6 }}
+            />
+            {showDetails ? 'Hide' : 'Show'} per-account result ({status.lastResult.accounts.length})
+          </button>
+          {showDetails && (
+            <div
+              style={{
+                marginTop: 8,
+                maxHeight: 240,
+                overflowY: 'auto',
+                border: '1px solid #e5e7eb',
+                borderRadius: 6,
+                background: 'white',
+              }}
+            >
+              {status.lastResult.accounts.map(row => {
+                const dotColor =
+                  row.outcome === 'success'
+                    ? '#10b981'
+                    : row.outcome === 'expired'
+                      ? '#f59e0b'
+                      : '#ef4444';
+                return (
+                  <div
+                    key={row.accountId}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '6px 10px',
+                      borderBottom: '1px solid #f3f4f6',
+                      fontSize: 12,
+                      gap: 8,
+                    }}
+                    title={row.error || row.outcome}
+                  >
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 4,
+                        background: dotColor,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1, color: '#374151' }}>{row.email || row.accountId}</span>
+                    <span
+                      style={{
+                        textTransform: 'capitalize',
+                        color: dotColor,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {row.outcome}
+                    </span>
+                    {row.error && (
+                      <span style={{ color: '#9ca3af', fontSize: 11 }} title={row.error}>
+                        {row.error.length > 50 ? row.error.slice(0, 50) + '…' : row.error}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

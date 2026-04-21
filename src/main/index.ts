@@ -1244,6 +1244,13 @@ type RefreshAllResult = {
   success: number;
   expired: number;
   failed: number;
+  /** Per-account outcomes so renderer can show a green/yellow/red list. */
+  accounts: Array<{
+    accountId: string;
+    email?: string;
+    outcome: 'success' | 'expired' | 'failed';
+    error?: string;
+  }>;
   errors: Array<{ accountId: string; error: string }>;
 };
 
@@ -1257,7 +1264,27 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
     const store = await readStore();
     const accounts: any[] = store.accounts || [];
     const tokenAccounts = accounts.filter(a => a.auth?.type === 'token' && a.status === 'active');
-    const results = { success: 0, expired: 0, failed: 0, errors: [] as Array<{ accountId: string; error: string }> };
+    const results: RefreshAllResult = {
+      success: 0,
+      expired: 0,
+      failed: 0,
+      accounts: [],
+      errors: [],
+    };
+
+    const recordOutcome = (
+      account: any,
+      outcome: 'success' | 'expired' | 'failed',
+      error?: string
+    ) => {
+      results.accounts.push({
+        accountId: account.id,
+        email: account.email,
+        outcome,
+        error,
+      });
+    };
+
     // Process in batches to avoid rate limits
     const batchSize = 5;
     for (let i = 0; i < tokenAccounts.length; i += batchSize) {
@@ -1268,6 +1295,7 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
           if (!clientId || !authorityEndpoint || !refreshToken) {
             results.failed++;
             results.errors.push({ accountId: account.id, error: 'Missing auth fields' });
+            recordOutcome(account, 'failed', 'Missing auth fields');
             return;
           }
           const scopeType = account.auth.scopeType || 'ews';
@@ -1283,15 +1311,26 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
           account.auth.scopeType = scopeType;
           account.lastRefresh = new Date().toISOString();
           account.status = 'active';
+          // Clear any prior re-auth flag set by REFRESH_TOKEN_EXPIRED.
+          if (account.requiresReauth) account.requiresReauth = false;
+          if (account.lastError) account.lastError = '';
           results.success++;
+          recordOutcome(account, 'success');
         } catch (error: any) {
           if (error.code === 'REFRESH_TOKEN_EXPIRED') {
             account.status = 'expired';
             account.lastRefresh = new Date().toISOString();
+            // Surface a clear UI signal so the user can sign in again.
+            account.requiresReauth = true;
+            account.lastError =
+              'Microsoft revoked this refresh token. Click "Sign in again" to re-authenticate.';
             results.expired++;
+            recordOutcome(account, 'expired');
           } else {
+            const msg = error.message || 'Unknown';
             results.failed++;
-            results.errors.push({ accountId: account.id, error: error.message || 'Unknown' });
+            results.errors.push({ accountId: account.id, error: msg });
+            recordOutcome(account, 'failed', msg);
           }
         }
       });
@@ -1301,6 +1340,27 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
     }
+
+    // Append a single activity-feed entry summarising this run so the
+    // Dashboard can show the user that auto-refresh is alive.
+    try {
+      const feed: any[] = Array.isArray(store.activityFeed) ? store.activityFeed : [];
+      const reason = lastTokenRefreshReason || 'scheduled';
+      feed.unshift({
+        id: crypto.randomUUID(),
+        type: 'token-refresh',
+        severity: results.failed > 0 ? 'warning' : 'info',
+        message:
+          `Auto-refresh swept ${tokenAccounts.length} token accounts ` +
+          `(${results.success} ok / ${results.expired} expired / ${results.failed} failed)` +
+          ` — ${reason}`,
+        timestamp: new Date().toISOString(),
+      });
+      store.activityFeed = feed.slice(0, 500);
+    } catch (err) {
+      console.warn('[refreshAllTokens] failed to append activity entry:', err);
+    }
+
     // Save updated store
     await writeStore(store);
     lastTokenRefresh = { ranAt: new Date().toISOString(), result: results };
@@ -1311,6 +1371,7 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
       success: 0,
       expired: 0,
       failed: 0,
+      accounts: [],
       errors: [{ accountId: '', error: error.message }],
     };
     lastTokenRefresh = { ranAt: new Date().toISOString(), result: errResult };
