@@ -18,7 +18,8 @@ import {
   type EmailExportScope,
   type ExportFormat,
 } from '../../services/emailExportService';
-import { translateHtmlBody } from '../../services/translatorService';
+import { getSettings, updateSettings } from '../../services/settingsService';
+import { translateText, translateHtmlBody } from '../../services/translatorService';
 
 type MonitorRowHit = { keywords: string[]; read: boolean };
 type SavedInboxView = {
@@ -29,6 +30,21 @@ type SavedInboxView = {
   query: string;
 };
 const SAVED_VIEWS_KEY = 'inboxSavedViews';
+const TRANSLATION_LANGUAGES = [
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'it', label: 'Italian' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'ar', label: 'Arabic' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'el', label: 'Greek' },
+  { code: 'zh-CN', label: 'Chinese (Simplified)' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+];
 
 function buildMonitorHitMap(alerts: MonitoringAlert[], accountId: string): Record<string, MonitorRowHit> {
   const map: Record<string, MonitorRowHit> = {};
@@ -60,18 +76,20 @@ const CentralInboxView: React.FC = () => {
   const [error, setError] = useState('');
   const [showReplyBox, setShowReplyBox] = useState(false);
   const [replyText, setReplyText] = useState('');
-  // Translation state — cached per messageId so re-clicking is instant.
-  const [translations, setTranslations] = useState<Record<string, { text: string; sourceLang?: string }>>({});
-  const [translating, setTranslating] = useState(false);
   const [translationError, setTranslationError] = useState('');
-  // Whether the reader is currently *showing* the translation vs. the original.
-  const [showTranslation, setShowTranslation] = useState(false);
   const [monitorHits, setMonitorHits] = useState<Record<string, MonitorRowHit>>({});
   const [reputationEntries, setReputationEntries] = useState<ReputationEntry[]>([]);
   const [savedViews, setSavedViews] = useState<SavedInboxView[]>([]);
   const [preferredFolderId, setPreferredFolderId] = useState<string | null>(null);
   const [pendingApplyAccountId, setPendingApplyAccountId] = useState<string | null>(null);
   const [pendingApplyQuery, setPendingApplyQuery] = useState<string | null>(null);
+  const [translationEnabled, setTranslationEnabled] = useState(false);
+  const [translationLanguage, setTranslationLanguage] = useState('en');
+  const [translatedRows, setTranslatedRows] = useState<Record<string, { subject: string; preview: string }>>({});
+  const [translatedBody, setTranslatedBody] = useState('');
+  const [translatingRows, setTranslatingRows] = useState(false);
+  const [translatingBody, setTranslatingBody] = useState(false);
+  const [showOriginalBody, setShowOriginalBody] = useState(false);
 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<EmailExportScope>('current_folder');
@@ -108,6 +126,9 @@ const CentralInboxView: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
+        const settings = await getSettings();
+        setTranslationEnabled(settings.translation?.enabled !== false);
+        setTranslationLanguage(settings.translation?.targetLang || 'en');
         const accts = await getAccounts();
         const tokenAccounts = accts.filter(a => a.auth?.type === 'token' && a.status === 'active');
         setAccounts(tokenAccounts);
@@ -121,6 +142,17 @@ const CentralInboxView: React.FC = () => {
       }
     })();
   }, []);
+
+  const persistTranslationPrefs = async (nextEnabled: boolean, nextLanguage: string) => {
+    const settings = await getSettings();
+    await updateSettings({
+      translation: {
+        ...(settings.translation || {}),
+        enabled: nextEnabled,
+        targetLang: nextLanguage,
+      },
+    });
+  };
 
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
 
@@ -186,6 +218,70 @@ const CentralInboxView: React.FC = () => {
     setPendingApplyAccountId(null);
     setPendingApplyQuery(null);
   }, [pendingApplyAccountId, pendingApplyQuery, selectedAccountId, selectedFolderId]);
+
+  useEffect(() => {
+    if (!translationEnabled || messages.length === 0) {
+      setTranslatedRows({});
+      setTranslatingRows(false);
+      return;
+    }
+    let cancelled = false;
+    setTranslatingRows(true);
+    (async () => {
+      try {
+        const out: Record<string, { subject: string; preview: string }> = {};
+        await Promise.all(
+          messages.map(async (msg) => {
+            const subjectRaw = msg.subject || '(no subject)';
+            const previewRaw = msg.bodyPreview || '';
+            const [subject, preview] = await Promise.all([
+              translateText(subjectRaw).then((r) => r.translated),
+              previewRaw ? translateText(previewRaw).then((r) => r.translated) : Promise.resolve(''),
+            ]);
+            out[msg.id] = { subject, preview };
+          })
+        );
+        if (!cancelled) setTranslatedRows(out);
+      } catch {
+        if (!cancelled) setTranslatedRows({});
+      } finally {
+        if (!cancelled) setTranslatingRows(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, translationEnabled]);
+
+  useEffect(() => {
+    if (!translationEnabled || !msgBody) {
+      setTranslatedBody('');
+      setTranslatingBody(false);
+      return;
+    }
+    let cancelled = false;
+    setTranslatingBody(true);
+    setShowOriginalBody(false);
+    (async () => {
+      try {
+        const translated = await translateHtmlBody(msgBody);
+        if (!cancelled) {
+          setTranslatedBody(translated.translated);
+          setTranslationError('');
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setTranslatedBody('');
+          setTranslationError(err?.message || 'Translation failed');
+        }
+      } finally {
+        if (!cancelled) setTranslatingBody(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [msgBody, translationEnabled]);
 
   const loadMessages = async () => {
     if (!selectedAccount) return;
@@ -264,8 +360,8 @@ const CentralInboxView: React.FC = () => {
   const handleSelectMessage = async (msg: OutlookMessage) => {
     setSelectedMsg(msg);
     setShowReplyBox(false);
+    setShowOriginalBody(false);
     setMsgBody('');
-    setShowTranslation(false);
     setTranslationError('');
     if (!selectedAccount) return;
     setLoadingBody(true);
@@ -336,33 +432,6 @@ const CentralInboxView: React.FC = () => {
     }
   };
 
-  const handleTranslateBody = async () => {
-    if (!selectedMsg) return;
-    setTranslationError('');
-    // Already translated? Just toggle visibility.
-    if (translations[selectedMsg.id]) {
-      setShowTranslation(true);
-      return;
-    }
-    if (!msgBody) {
-      setTranslationError('Email body has not loaded yet.');
-      return;
-    }
-    setTranslating(true);
-    try {
-      const result = await translateHtmlBody(msgBody);
-      setTranslations(prev => ({
-        ...prev,
-        [selectedMsg.id]: { text: result.translated, sourceLang: result.sourceLang },
-      }));
-      setShowTranslation(true);
-    } catch (err: any) {
-      setTranslationError(err?.message || String(err));
-    } finally {
-      setTranslating(false);
-    }
-  };
-
   if (loading) return <div className="db-loading">Loading accounts...</div>;
   if (accounts.length === 0) {
     return (
@@ -402,6 +471,47 @@ const CentralInboxView: React.FC = () => {
           <button className="action-btn secondary" onClick={loadMessages} style={{ padding: '7px 14px' }}>
             <i className={`fas fa-sync ${loadingMessages ? 'fa-spin' : ''}`}></i>
           </button>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              border: '1px solid #d1d5db',
+              borderRadius: 8,
+              padding: '6px 10px',
+              fontSize: 12,
+              color: '#374151',
+            }}
+            title="Auto-translate list and reader"
+          >
+            <input
+              type="checkbox"
+              checked={translationEnabled}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setTranslationEnabled(next);
+                void persistTranslationPrefs(next, translationLanguage);
+              }}
+            />
+            Translate
+          </label>
+          <select
+            className="inbox-account-select"
+            value={translationLanguage}
+            onChange={(e) => {
+              const nextLang = e.target.value;
+              setTranslationLanguage(nextLang);
+              void persistTranslationPrefs(translationEnabled, nextLang);
+            }}
+            title="Default translation language"
+            style={{ minWidth: 150 }}
+          >
+            {TRANSLATION_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {lang.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="inbox-toolbar-right">
           <button
@@ -622,7 +732,10 @@ const CentralInboxView: React.FC = () => {
         {/* Email List */}
         <div className="inbox-list">
           <div className="inbox-list-header">
-            <span>{loadingMessages ? 'Loading...' : `${messages.length} emails`}</span>
+            <span>
+              {loadingMessages ? 'Loading...' : `${messages.length} emails`}
+              {translationEnabled && translatingRows ? ' • translating…' : ''}
+            </span>
           </div>
           <div className="inbox-list-body">
             {messages.map(msg => {
@@ -656,8 +769,12 @@ const CentralInboxView: React.FC = () => {
                     </span>
                     <span className="inbox-email-time">{formatTime(msg.receivedDateTime)}</span>
                   </div>
-                  <div className="inbox-email-subject bold">{msg.subject || '(no subject)'}</div>
-                  <div className="inbox-email-preview">{msg.bodyPreview || ''}</div>
+                  <div className="inbox-email-subject bold">
+                    {translationEnabled ? translatedRows[msg.id]?.subject || msg.subject || '(no subject)' : msg.subject || '(no subject)'}
+                  </div>
+                  <div className="inbox-email-preview">
+                    {translationEnabled ? translatedRows[msg.id]?.preview || msg.bodyPreview || '' : msg.bodyPreview || ''}
+                  </div>
                   <div className="inbox-email-meta">
                     <span className="inbox-domain-tag" style={{ borderColor: '#6b7280', color: '#6b7280' }}>
                       {getDomainFromEmail(msg.from?.emailAddress?.address)}
@@ -703,32 +820,27 @@ const CentralInboxView: React.FC = () => {
           {selectedMsg ? (
             <>
               <div className="inbox-reader-header">
-                <div className="inbox-reader-subject">{selectedMsg.subject || '(no subject)'}</div>
+                <div className="inbox-reader-subject">
+                  {translationEnabled
+                    ? translatedRows[selectedMsg.id]?.subject || selectedMsg.subject || '(no subject)'
+                    : selectedMsg.subject || '(no subject)'}
+                </div>
                 <div className="inbox-reader-actions">
+                  {translationEnabled && (
+                    <button
+                      className="icon-btn"
+                      title={showOriginalBody ? 'Show translated text' : 'Show original HTML'}
+                      onClick={() => setShowOriginalBody((v) => !v)}
+                    >
+                      <i className={`fas ${showOriginalBody ? 'fa-language' : 'fa-file-alt'}`}></i>
+                    </button>
+                  )}
                   <button className="icon-btn" title="Reply" onClick={() => setShowReplyBox(!showReplyBox)}>
                     <i className="fas fa-reply"></i>
                   </button>
                   {selectedMsg.webLink && (
                     <button className="icon-btn" title="Open in Outlook" onClick={() => window.electron.browser.open(selectedMsg.webLink!)}>
                       <i className="fas fa-external-link-alt"></i>
-                    </button>
-                  )}
-                  {showTranslation ? (
-                    <button
-                      className="icon-btn"
-                      title="Show original"
-                      onClick={() => setShowTranslation(false)}
-                    >
-                      <i className="fas fa-undo"></i>
-                    </button>
-                  ) : (
-                    <button
-                      className="icon-btn"
-                      title={translating ? 'Translating…' : 'Translate body'}
-                      onClick={() => void handleTranslateBody()}
-                      disabled={translating || loadingBody}
-                    >
-                      <i className={`fas ${translating ? 'fa-spinner fa-spin' : 'fa-language'}`}></i>
                     </button>
                   )}
                 </div>
@@ -784,37 +896,16 @@ const CentralInboxView: React.FC = () => {
                     <i className="fas fa-spinner fa-spin" style={{ fontSize: 24 }}></i>
                     <p style={{ marginTop: 8 }}>Loading email body...</p>
                   </div>
-                ) : showTranslation && translations[selectedMsg.id] ? (
-                  <>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: '#6b7280',
-                        marginBottom: 12,
-                        padding: '6px 10px',
-                        background: '#f3f4f6',
-                        borderRadius: 6,
-                        display: 'inline-block',
-                      }}
-                    >
-                      <i className="fas fa-language" style={{ marginRight: 6 }} />
-                      Translated
-                      {translations[selectedMsg.id].sourceLang
-                        ? ` from ${translations[selectedMsg.id].sourceLang}`
-                        : ''}
-                    </div>
-                    <pre
-                      style={{
-                        whiteSpace: 'pre-wrap',
-                        fontFamily: 'inherit',
-                        fontSize: 14,
-                        lineHeight: 1.5,
-                        margin: 0,
-                      }}
-                    >
-                      {translations[selectedMsg.id].text}
-                    </pre>
-                  </>
+                ) : translationEnabled && !showOriginalBody ? (
+                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+                    {translatingBody ? (
+                      <div style={{ color: '#6b7280', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <i className="fas fa-spinner fa-spin"></i> Translating message…
+                      </div>
+                    ) : (
+                      translatedBody || 'No text content available for translation.'
+                    )}
+                  </div>
                 ) : (
                   <div dangerouslySetInnerHTML={{ __html: msgBody }}></div>
                 )}

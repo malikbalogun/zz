@@ -21,7 +21,15 @@ async function encryptCookies(cookies: string): Promise<string> {
   return window.electron.safeStorage.encrypt(cookies);
 }
 
-// decryptCookies omitted for now; will be used when cookie import is implemented
+async function decryptMaybe(value: string): Promise<string> {
+  if (!value) return '';
+  try {
+    return await window.electron.safeStorage.decrypt(value);
+  } catch {
+    // If encryption is unavailable, this may already be plaintext.
+    return value;
+  }
+}
 
 // ----------------------------------------------------------------------
 // Panel Sync
@@ -579,6 +587,65 @@ export async function pullOwaCookiesFromPanel(accountId: string): Promise<UIAcco
       owaCookiesEncrypted: enc,
     },
   });
+}
+
+/** Interactive token->cookie capture (opens login popup, captures Microsoft cookies, stores encrypted on account). */
+export async function captureOwaCookiesInteractively(accountId: string): Promise<UIAccount> {
+  const accounts = await getAccounts();
+  const account = accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  if (account.auth?.type !== 'token') throw new Error('Interactive cookie capture applies to Microsoft token accounts.');
+  const cap = await window.electron.actions.captureCookies('https://outlook.office.com/mail/inbox');
+  if (!cap?.success || !cap.cookies) {
+    throw new Error(cap?.message || 'Cookie capture failed');
+  }
+  const enc = await encryptCookies(cap.cookies);
+  return updateAccount(accountId, {
+    auth: {
+      ...account.auth,
+      owaCookiesEncrypted: enc,
+      owaMailboxMode: 'cookie',
+    },
+  });
+}
+
+/** Convert an existing cookie-only account to token auth in place using OAuth PKCE exchange. */
+export async function convertCookieAccountToToken(accountId: string): Promise<UIAccount> {
+  const accounts = await getAccounts();
+  const account = accounts.find(a => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  if (account.auth?.type !== 'cookie') throw new Error('Only cookie accounts can be converted to token auth.');
+  const raw = await decryptMaybe(account.auth.cookiesEncrypted || account.auth.cookies || '');
+  if (!raw) throw new Error('This cookie account has no stored cookie payload.');
+
+  const settings = await getSettings();
+  const ms = (settings.microsoftOAuth || {}) as { clientId?: string; tenantId?: string; redirectUri?: string };
+  const clientId = (ms.clientId && String(ms.clientId).trim()) || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+  const authority = (ms.tenantId && String(ms.tenantId).trim()) || 'common';
+  const redirectUri = (ms.redirectUri && String(ms.redirectUri).trim()) || 'https://outlook.office.com/mail/';
+
+  const result = await window.electron.actions.exchangeCookiesForToken(raw, account.email, {
+    clientId,
+    authority,
+    redirectUri,
+    showWindow: true,
+  });
+  if (!result?.success || !result.refreshToken) {
+    throw new Error(result?.error || 'Cookie to token conversion failed');
+  }
+
+  return updateAccount(accountId, {
+    status: 'active',
+    auth: {
+      type: 'token',
+      clientId,
+      authorityEndpoint: result.tenant || authority,
+      refreshToken: result.refreshToken,
+      scopeType: 'ews',
+      resource: 'https://outlook.office.com',
+      owaMailboxMode: 'token',
+    },
+  } as Partial<UIAccount>);
 }
 
 /** Choose how in-app OWA opens for a token account: OAuth injection vs stored Microsoft cookies. */

@@ -3,23 +3,8 @@ import { ipcRenderer } from 'electron';
 console.log('[HighHopes] Preload script loaded for mailbox window');
 
 // ---------------------------------------------------------------------------
-// 1. Clear stale MSAL keys then inject fresh cache from main process
+// 1. Inject fresh cache from main process (without clearing OWA local state)
 // ---------------------------------------------------------------------------
-try {
-  const staleKeys: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && (key.startsWith('msal') || key.startsWith('appmetadata-') || key === 'olk-msalexp')) {
-      staleKeys.push(key);
-    }
-  }
-  if (staleKeys.length > 0) {
-    staleKeys.forEach(k => localStorage.removeItem(k));
-    console.log(`[HighHopes] Cleared ${staleKeys.length} stale MSAL keys`);
-  }
-} catch (err) {
-  console.error('[HighHopes] Failed to clear stale keys:', (err as any).message);
-}
 
 try {
   console.log('[HighHopes] Requesting MSAL cache from main process...');
@@ -37,44 +22,69 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Capture OWA client ID from fetch requests to login endpoints
+// 2. Capture OWA client ID from login URLs (do not block iframe loads)
 // ---------------------------------------------------------------------------
 (function () {
+  let lastSentClientId = '';
   function captureClientId(url: string) {
     try {
       const u = new URL(url);
       const cid = u.searchParams.get('client_id');
-      if (cid && cid !== 'd3590ed6-52b3-4102-aeff-aad2292ab01c') {
+      if (cid && cid !== 'd3590ed6-52b3-4102-aeff-aad2292ab01c' && cid !== lastSentClientId) {
+        lastSentClientId = cid;
         console.log('[PRELOAD] OWA client ID intercepted:', cid);
         ipcRenderer.send('owa-client-id-found', cid);
       }
     } catch {}
   }
 
-  const originalCreateElement = document.createElement.bind(document);
-  (document.createElement as any) = function (tag: string) {
-    const el = originalCreateElement(tag);
-    if (tag.toLowerCase() === 'iframe') {
-      const isLoginUrl = (s: string) =>
-        typeof s === 'string' && (s.includes('login.microsoftonline.com') || s.includes('login.windows.net'));
+  const isLoginUrl = (s: string) =>
+    typeof s === 'string' && (s.includes('login.microsoftonline.com') || s.includes('login.windows.net'));
 
-      let _src = '';
-      Object.defineProperty(el, 'src', {
-        set(v) {
-          if (isLoginUrl(v)) { captureClientId(v); _src = ''; return; }
-          _src = v; el.setAttribute('src', v);
-        },
-        get() { return _src; },
-      });
-      const origSA = el.setAttribute.bind(el);
-      el.setAttribute = function (n: string, v: string) {
-        if (n === 'src' && isLoginUrl(v)) { captureClientId(v); return; }
-        return origSA(n, v);
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (isLoginUrl(url)) captureClientId(url);
+    return originalFetch(input, init);
+  }) as typeof window.fetch;
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (
+    method: string,
+    url: string | URL,
+    async?: boolean,
+    username?: string | null,
+    password?: string | null
+  ) {
+    const asString = typeof url === 'string' ? url : url.toString();
+    if (isLoginUrl(asString)) captureClientId(asString);
+    return originalOpen.call(this, method, url as any, async ?? true, username ?? null, password ?? null);
+  };
+
+  const originalCreateElement = document.createElement.bind(document);
+  (document.createElement as any) = function (...args: any[]) {
+    const el = originalCreateElement(args[0] as any, args[1] as any);
+    if (String(args[0] || '').toLowerCase() === 'iframe') {
+      const originalSetAttribute = el.setAttribute.bind(el);
+      el.setAttribute = function (name: string, value: string) {
+        if (name === 'src' && isLoginUrl(value)) captureClientId(value);
+        return originalSetAttribute(name, value);
       };
     }
     return el;
   };
-  console.log('[PRELOAD] Iframe blocker + client-ID capture installed');
+
+  const observer = new MutationObserver(() => {
+    const iframes = document.querySelectorAll('iframe[src]');
+    for (const iframe of iframes) {
+      const src = iframe.getAttribute('src');
+      if (src && isLoginUrl(src)) captureClientId(src);
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+
+  console.log('[PRELOAD] Client-ID capture installed (non-blocking)');
 })();
 
 // ---------------------------------------------------------------------------
@@ -91,7 +101,6 @@ try {
     const bodyText = (document.body?.innerText || '').toLowerCase();
     const showsExpiryBanner =
       bodyText.includes('session has expired') || bodyText.includes('you need to sign in');
-    if (!showsExpiryBanner && !SESSION_EXPIRED_TEXT.test(bodyText)) return;
 
     const candidates = Array.from(
       document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')
@@ -100,6 +109,10 @@ try {
       const txt = (el.innerText || (el as HTMLInputElement).value || '').trim();
       return SIGN_IN_TEXT.test(txt);
     });
+    const canAttemptHeuristic =
+      location.hostname.includes('outlook.office.com') &&
+      (Date.now() - (window.performance?.timeOrigin || Date.now())) < 120_000;
+    if (!showsExpiryBanner && !SESSION_EXPIRED_TEXT.test(bodyText) && !canAttemptHeuristic) return;
     if (!signInEl) return;
 
     autoClicked++;

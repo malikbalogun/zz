@@ -25,6 +25,7 @@ const outlookSessionAuth = new WeakMap<Session, { accessToken: string; email: st
 /** Last successful in-memory OWA token refresh (avoids redundant refresh + focus storms). */
 const owaLastSuccessfulRefresh = new Map<string, number>();
 const owaRefreshLocks = new Set<string>();
+const lastOwaClientIdByAccount = new Map<string, string>();
 
 /** Open Outlook windows per account (accountId -> BrowserWindow) to prevent duplicate windows. */
 const outlookWindows = new Map<string, BrowserWindow>();
@@ -273,6 +274,15 @@ function extractClientIdFromUrl(urlStr: string): string | null {
   } catch {
     return null;
   }
+}
+
+function shouldRegenerateMsalForClientId(accountId: string, clientId: string): boolean {
+  const previousClientId = lastOwaClientIdByAccount.get(accountId);
+  if (previousClientId === clientId) {
+    return false;
+  }
+  lastOwaClientIdByAccount.set(accountId, clientId);
+  return true;
 }
 
 function decryptStoredCookiePayload(encB64: string): string {
@@ -1146,10 +1156,34 @@ async function checkSessionValidity(): Promise<void> {
     console.log(`[Session] Checking ${accounts.length} accounts, ${panels.length} panels`);
 
     for (const account of accounts) {
+      if (account?.auth?.type === 'token') {
+        const clientId = account.auth.v2Token?.clientId || account.auth.clientId;
+        const authorityEndpoint = account.auth.v2Token?.authorityEndpoint || account.auth.authorityEndpoint;
+        const refreshToken = account.auth.v2Token?.refreshToken || account.auth.refreshToken;
+        const scopeType = account.auth.v2Token?.scopeType || account.auth.scopeType || 'ews';
+        const resource =
+          account.auth.v2Token?.resource ||
+          account.auth.resource ||
+          (scopeType === 'graph' ? 'https://graph.microsoft.com' : 'https://outlook.office.com');
+        if (!clientId || !authorityEndpoint || !refreshToken) {
+          account.status = 'expired';
+          continue;
+        }
+        try {
+          await refreshMicrosoftToken(clientId, authorityEndpoint, refreshToken, scopeType, resource);
+          account.status = 'active';
+        } catch (err: any) {
+          account.status = err?.code === 'REFRESH_TOKEN_EXPIRED' ? 'expired' : account.status || 'error';
+        }
+        continue;
+      }
+
       const panel = panels.find(p => p.id === account.panelId);
       if (!panel || !panel.token) {
-        console.log(`[Session] Account ${account.email} - no panel or token, marking expired`);
-        account.status = 'expired';
+        if (account?.auth?.type === 'credential') {
+          console.log(`[Session] Account ${account.email} - no panel token for credential auth, marking expired`);
+          account.status = 'expired';
+        }
         continue;
       }
       // Lightweight HEAD request to panel API to verify token
@@ -1291,23 +1325,32 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
       const batch = tokenAccounts.slice(i, i + batchSize);
       const promises = batch.map(async (account) => {
         try {
-          const { clientId, authorityEndpoint, refreshToken } = account.auth;
+          const tokenSource = account.auth.v2Token || account.auth;
+          const clientId = tokenSource.clientId;
+          const authorityEndpoint = tokenSource.authorityEndpoint;
+          const refreshToken = tokenSource.refreshToken;
           if (!clientId || !authorityEndpoint || !refreshToken) {
             results.failed++;
             results.errors.push({ accountId: account.id, error: 'Missing auth fields' });
             recordOutcome(account, 'failed', 'Missing auth fields');
             return;
           }
-          const scopeType = account.auth.scopeType || 'ews';
-          const resource = account.auth.resource;
+          const scopeType = tokenSource.scopeType || account.auth.scopeType || 'ews';
+          const resource =
+            tokenSource.resource ||
+            account.auth.resource ||
+            (scopeType === 'graph' ? 'https://graph.microsoft.com' : 'https://outlook.office.com');
           const result = await refreshMicrosoftToken(
             clientId,
             authorityEndpoint,
             refreshToken,
             scopeType,
-            resource || '00000002-0000-0ff1-ce00-000000000000'
+            resource
           );
           account.auth.refreshToken = result.refreshToken;
+          if (account.auth.v2Token) {
+            account.auth.v2Token.refreshToken = result.refreshToken;
+          }
           account.auth.scopeType = scopeType;
           account.lastRefresh = new Date().toISOString();
           account.status = 'active';
@@ -2082,6 +2125,55 @@ function setupIpcHandlers() {
       const account = accounts.find(a => a.id === accountId);
       if (!account) throw new Error('Account not found');
       const panel = panels.find(p => p.id === account.panelId);
+      if (!panel && account?.auth?.type === 'token') {
+        const tokenSource = account.auth.v2Token || account.auth;
+        const clientId = tokenSource.clientId;
+        const authorityEndpoint = tokenSource.authorityEndpoint;
+        const refreshToken = tokenSource.refreshToken;
+        if (!clientId || !authorityEndpoint || !refreshToken) {
+          throw new Error('Token account is missing auth fields');
+        }
+        const graph = await refreshMicrosoftToken(
+          clientId,
+          authorityEndpoint,
+          refreshToken,
+          'graph',
+          'https://graph.microsoft.com'
+        );
+        if (graph.refreshToken && graph.refreshToken !== refreshToken) {
+          account.auth.refreshToken = graph.refreshToken;
+          if (account.auth.v2Token) account.auth.v2Token.refreshToken = graph.refreshToken;
+          await writeStore(store);
+        }
+        const response = await fetch(
+          'https://graph.microsoft.com/v1.0/users?$select=mail,userPrincipalName,displayName&$top=100',
+          {
+            headers: { Authorization: `Bearer ${graph.accessToken}` },
+            signal: timeoutSignal(15000),
+          } as any
+        );
+        if (!response.ok) {
+          throw new Error(`Graph org discovery failed: HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const users = Array.isArray(data?.value) ? data.value : [];
+        return users
+          .map((u: any) => ({
+            email: String(u.mail || u.userPrincipalName || '').trim(),
+            panelId: undefined,
+            status: 'active',
+            auth: {
+              ...account.auth,
+              scopeType: 'ews',
+              resource: 'https://outlook.office.com',
+              owaMailboxMode: 'token',
+            },
+          }))
+          .filter(
+            (u: any) =>
+              u.email.length > 0 && u.email.toLowerCase() !== String(account.email || '').toLowerCase()
+          );
+      }
       if (!panel) throw new Error('Panel not found');
       if (!panel.token) throw new Error('Panel not authenticated');
 
@@ -2291,13 +2383,12 @@ function setupIpcHandlers() {
       if (useCookiesPath) {
         const paste = getMicrosoftCookiePasteFromAccount(acc);
         if (!paste) {
-          throw new Error(
-            'OWA cookie mode needs stored Microsoft session cookies. On Accounts, use "Pull OWA cookies from panel" (your panel must implement GET /api/mailbox/{email}/export-cookies), or add cookies to this account, or switch OWA mode back to OAuth tokens.'
-          );
+          appendOutlookDebug('[OutlookCookie] No stored cookies found; falling back to OAuth token mode');
+        } else {
+          await openOwaWithCookieSession(accountId, acc, paste, mode);
+          appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
+          return { success: true as const, session: 'cookie' as const };
         }
-        await openOwaWithCookieSession(accountId, acc, paste, mode);
-        appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
-        return { success: true as const, session: 'cookie' as const };
       }
 
       const bundle = await loadOwaTokenBundle(accountId);
@@ -2310,6 +2401,7 @@ function setupIpcHandlers() {
       const outlookSession = session.fromPartition(partitionName);
 
       applyOwaTokenBundleToRunningSession(accountId, bundle, outlookSession);
+      lastOwaClientIdByAccount.set(accountId, clientIdOverride);
       owaLastSuccessfulRefresh.set(accountId, Date.now());
 
       try {
@@ -2484,6 +2576,7 @@ function setupIpcHandlers() {
             /* ignore */
           }
           msalCacheMap.delete(accountId);
+          lastOwaClientIdByAccount.delete(accountId);
           outlookTokenStore.delete(accountId);
           owaLastSuccessfulRefresh.delete(accountId);
           outlookWindows.delete(windowKey);
@@ -2663,7 +2756,7 @@ function setupIpcHandlers() {
       outlookWindow.webContents.on('did-redirect-navigation', (_event, url) => {
         appendOutlookDebug(`[Outlook] Redirect: ${url}`);
         const cid = extractClientIdFromUrl(url);
-        if (cid) {
+        if (cid && shouldRegenerateMsalForClientId(accountId, cid)) {
           void regenerateMsalCacheForClientId(accountId, cid).then((ok) => {
             if (ok) void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
           });
@@ -2672,7 +2765,11 @@ function setupIpcHandlers() {
       outlookWindow.webContents.on('did-navigate', (_event, url) => {
         appendOutlookDebug(`[Outlook] Navigate: ${url}`);
       });
-      outlookWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      outlookWindow.webContents.on('console-message', (event: any) => {
+        const level = event?.level ?? 0;
+        const message = event?.message ?? '';
+        const line = event?.lineNumber ?? 0;
+        const sourceId = event?.sourceId ?? '';
         appendOutlookDebug(`[OWA console:${level}] ${message} (${sourceId}:${line})`);
       });
 
@@ -2743,6 +2840,25 @@ function setupIpcHandlers() {
     } catch (error: any) {
       console.error('Failed to open Outlook UI:', error);
       appendOutlookDebug(`[Outlook] Open failed: ${error?.message || String(error)}`);
+      try {
+        const rawError = String(error?.message || error || '');
+        const tokenFailure =
+          error?.code === 'REFRESH_TOKEN_EXPIRED' ||
+          /invalid[_\s-]?grant|refresh token/i.test(rawError);
+        if (tokenFailure) {
+          const storeData = await readStore();
+          const accountsList = (storeData.accounts || []) as any[];
+          const acc = accountsList.find((a: any) => a.id === accountId);
+          const paste = acc ? getMicrosoftCookiePasteFromAccount(acc) : null;
+          if (paste && acc?.email) {
+            appendOutlookDebug('[Outlook] Token open failed; retrying with stored cookie session');
+            await openOwaWithCookieSession(accountId, acc, paste, mode);
+            return { success: true as const, session: 'cookie-fallback' as const };
+          }
+        }
+      } catch {
+        // ignore fallback failure and continue with normal error path
+      }
       const raw =
         error?.code === 'REFRESH_TOKEN_EXPIRED'
           ? 'Token refresh failed (invalid_grant). The token may have expired or have the wrong scope. Re-authenticate with EWS scope (https://outlook.office.com/EWS.AccessAsUser.All).'
@@ -4115,6 +4231,10 @@ function setupIpcHandlers() {
     appendOutlookDebug(`[MSAL] owa-client-id-found from preload: ${clientId}`);
     const accountId = windowToAccountMap.get(event.sender.id);
     if (accountId) {
+      if (!shouldRegenerateMsalForClientId(accountId, clientId)) {
+        appendOutlookDebug(`[MSAL] Duplicate clientId ignored: ${clientId}`);
+        return;
+      }
       const ok = await regenerateMsalCacheForClientId(accountId, clientId);
       if (ok) {
         appendOutlookDebug(`[MSAL] Cache regenerated from preload IPC for clientId=${clientId}`);
@@ -4184,12 +4304,21 @@ app.whenReady().then(async () => {
   try {
     await ensureStateFile();
     console.log('[Main] State file ensured');
-    await seedDevAccountFromLocalFile();
+    if (isDev && process.env.ENABLE_LOCAL_DEV_SEED === '1') {
+      await seedDevAccountFromLocalFile();
+    } else if (isDev) {
+      console.log('[DevSeed] Skipped (set ENABLE_LOCAL_DEV_SEED=1 to enable)');
+    }
     setupIpcHandlers();
     console.log('[Main] IPC handlers setup');
-    startTokenRefreshScheduler().catch(err =>
-      console.error('[Main] Failed to start token refresh scheduler:', err)
-    );
+    const disableTokenScheduler = process.env.DISABLE_TOKEN_REFRESH_SCHEDULER === '1';
+    if (disableTokenScheduler) {
+      console.log('[Main] Token refresh scheduler disabled via DISABLE_TOKEN_REFRESH_SCHEDULER=1');
+    } else {
+      startTokenRefreshScheduler().catch(err =>
+        console.error('[Main] Failed to start token refresh scheduler:', err)
+      );
+    }
 
     // 1. Read saved state
     const state = await readState();
@@ -4197,7 +4326,13 @@ app.whenReady().then(async () => {
 
     // 2. Run session validity check for all accounts
     console.log('[Main] Running session validity check...');
-    await checkSessionValidity();
+    const disableSessionCheck = process.env.DISABLE_SESSION_VALIDITY_CHECK === '1';
+    if (disableSessionCheck) {
+      console.log('[Main] Session validity check disabled via DISABLE_SESSION_VALIDITY_CHECK=1');
+    } else {
+      await checkSessionValidity();
+      console.log('[Main] Session validity check complete');
+    }
 
     // 3. Determine if monitoring was paused during downtime
     const now = new Date();

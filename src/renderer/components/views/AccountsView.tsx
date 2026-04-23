@@ -6,6 +6,8 @@ import {
   harvestAssociatedAccounts,
   pullOwaCookiesFromPanel,
   setOwaMailboxMode,
+  captureOwaCookiesInteractively,
+  convertCookieAccountToToken,
 } from '../../services/accountSyncService';
 import { getAccounts, deleteAccount, replacePanelTag, mergeDuplicateAccounts } from '../../services/accountService';
 import { getSystemTags, getUserTags } from '../../services/tagService';
@@ -346,6 +348,32 @@ const AccountsView: FC<AccountsViewProps> = ({
       await loadData();
     } catch (error) {
       alert(`Could not update OWA mode: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCaptureOwaCookiesInteractive = async (accountId: string) => {
+    setLoading(true);
+    try {
+      await captureOwaCookiesInteractively(accountId);
+      alert('Interactive OWA cookies captured and saved. This account now opens in cookie mode.');
+      await loadData();
+    } catch (error) {
+      alert(`Interactive cookie capture failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConvertCookieAccountToToken = async (accountId: string) => {
+    setLoading(true);
+    try {
+      await convertCookieAccountToToken(accountId);
+      alert('Cookie account converted to token auth.');
+      await loadData();
+    } catch (error) {
+      alert(`Cookie->token conversion failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -984,6 +1012,16 @@ const AccountsView: FC<AccountsViewProps> = ({
                             onClick={() => {
                               setOpenDropdownId(null);
                               setDropdownPosition(null);
+                              void handleCaptureOwaCookiesInteractive(account.id);
+                            }}
+                          >
+                            <i className="fas fa-cookie-bite"></i> Capture OWA cookies (interactive)
+                          </div>
+                          <div
+                            className="act-dropdown-item"
+                            onClick={() => {
+                              setOpenDropdownId(null);
+                              setDropdownPosition(null);
                               void handleSetOwaMode(account.id, 'token');
                             }}
                           >
@@ -1002,6 +1040,18 @@ const AccountsView: FC<AccountsViewProps> = ({
                             {account.auth?.owaMailboxMode === 'cookie' ? ' (current)' : ''}
                           </div>
                         </>
+                      )}
+                      {account.auth?.type === 'cookie' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleConvertCookieAccountToToken(account.id);
+                          }}
+                        >
+                          <i className="fas fa-exchange-alt"></i> Convert cookie account to token
+                        </div>
                       )}
                       {account.tags.includes('admin') && (
                         <>
