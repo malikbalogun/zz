@@ -262,6 +262,19 @@ const EmailComposerView: React.FC = () => {
   const [showTokens, setShowTokens] = useState(false);
   /** "Preview rendering" modal showing the first N personalized previews. */
   const [showPersonalizationPreview, setShowPersonalizationPreview] = useState(false);
+  /** Per-recipient delivery results from the most recent send. */
+  type DeliveryRow = {
+    sender: string;
+    recipient: string;
+    /** "BCC batch (N)" when multiple recipients shared one BCC send. */
+    mode: 'direct' | 'bcc';
+    status: 'success' | 'failed';
+    error?: string;
+  };
+  const [deliveryRows, setDeliveryRows] = useState<DeliveryRow[]>([]);
+  const [deliveryFilter, setDeliveryFilter] = useState<'all' | 'success' | 'failed'>('all');
+  /** "Send test to me" \u2014 sends one personalized copy to each selected sender's own mailbox. */
+  const [testSending, setTestSending] = useState(false);
   const subjectRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const sendersRef = useRef<HTMLDivElement>(null);
@@ -533,6 +546,80 @@ const EmailComposerView: React.FC = () => {
     });
   };
 
+  /**
+   * "Send test to me": send one personalized copy to each selected sender's
+   * own mailbox so the user sees exactly what arrives in Outlook before
+   * blasting the real recipient list. Picks the first selected recipient
+   * to drive personalization (or a fake placeholder when none selected).
+   */
+  const handleTestSend = useCallback(async () => {
+    setSendMessage(null);
+    const senders = accounts.filter(a => selectedSenderEmails.has(a.email));
+    if (!senders.length) {
+      setSendMessage({ type: 'err', text: 'Select at least one From mailbox to test-send to.' });
+      return;
+    }
+    if (!subject.trim() && !emailBody.trim()) {
+      setSendMessage({ type: 'err', text: 'Subject and body are both empty.' });
+      return;
+    }
+    const sampleRecipient = (() => {
+      const picked = eligibleContacts.find(c => selected.has(c.id));
+      if (picked) return { email: picked.email, name: picked.name };
+      return { email: senders[0].email, name: senders[0].name };
+    })();
+    const svc = getOutlookService();
+    const att = attachments.map(a => ({
+      name: a.name,
+      contentType: a.contentType,
+      contentBytesBase64: a.base64,
+      isInline: a.isInline,
+      contentId: a.contentId,
+    }));
+    const sendBodyTemplate = bodyType === 'markdown' ? markdownToHtml(emailBody) : emailBody;
+    const sendBodyIsHtml = bodyType !== 'plain';
+    const renderedSubject = '[TEST] ' + applyPersonalization(subject.trim(), sampleRecipient);
+    const renderedBody = applyPersonalization(sendBodyTemplate, sampleRecipient);
+
+    setTestSending(true);
+    try {
+      const results = await Promise.allSettled(
+        senders.map(s =>
+          svc.sendNewMessage(s, {
+            subject: renderedSubject,
+            body: renderedBody,
+            bodyIsHtml: sendBodyIsHtml,
+            toRecipients: [s.email],
+            attachments: att.length ? att : undefined,
+            saveToSentItems: true,
+          })
+        )
+      );
+      const failed = results.filter(r => r.status === 'rejected');
+      if (failed.length === 0) {
+        setSendMessage({
+          type: 'ok',
+          text: `Test sent to ${senders.length} mailbox(es). Check ${senders.map(s => s.email).slice(0, 3).join(', ')}${senders.length > 3 ? '…' : ''}`,
+        });
+      } else {
+        const firstErr = (failed[0] as PromiseRejectedResult).reason;
+        setSendMessage({
+          type: 'err',
+          text: `Test send: ${results.length - failed.length} ok / ${failed.length} failed. First error: ${
+            firstErr instanceof Error ? firstErr.message : String(firstErr)
+          }`,
+        });
+      }
+    } catch (e) {
+      setSendMessage({
+        type: 'err',
+        text: `Test send failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    } finally {
+      setTestSending(false);
+    }
+  }, [accounts, selectedSenderEmails, subject, emailBody, bodyType, attachments, eligibleContacts, selected]);
+
   const handleSend = useCallback(async () => {
     setSendMessage(null);
     const senders = accounts.filter(a => selectedSenderEmails.has(a.email));
@@ -563,8 +650,16 @@ const EmailComposerView: React.FC = () => {
     const parallel = Math.min(5, Math.max(1, maxParallelSenders));
 
     setSending(true);
+    setDeliveryRows([]);
     let sent = 0;
     const sendErrors: string[] = [];
+    const rowsCollected: DeliveryRow[] = [];
+    const recordSuccess = (sender: string, recipient: string, mode: 'direct' | 'bcc') => {
+      rowsCollected.push({ sender, recipient, mode, status: 'success' });
+    };
+    const recordFailure = (sender: string, recipient: string, mode: 'direct' | 'bcc', error: string) => {
+      rowsCollected.push({ sender, recipient, mode, status: 'failed', error });
+    };
 
     const sendBodyTemplate = bodyType === 'markdown' ? markdownToHtml(emailBody) : emailBody;
     const sendBodyIsHtml = bodyType === 'plain' ? false : true;
@@ -616,9 +711,14 @@ const EmailComposerView: React.FC = () => {
               wave.map(({ acc, chunk }) => sendOne(acc, [acc.email], chunk))
             );
             results.forEach((r, j) => {
-              if (r.status === 'fulfilled') sent += wave[j].chunk.length;
-              else
-                sendErrors.push(`${wave[j].acc.email}: ${(r.reason as Error)?.message || r.reason}`);
+              if (r.status === 'fulfilled') {
+                sent += wave[j].chunk.length;
+                for (const recip of wave[j].chunk) recordSuccess(wave[j].acc.email, recip, 'bcc');
+              } else {
+                const errMsg = (r.reason as Error)?.message || String(r.reason);
+                sendErrors.push(`${wave[j].acc.email}: ${errMsg}`);
+                for (const recip of wave[j].chunk) recordFailure(wave[j].acc.email, recip, 'bcc', errMsg);
+              }
             });
             if (w + parallel < rows.length && delayMs) await sleep(delayMs);
           }
@@ -628,8 +728,11 @@ const EmailComposerView: React.FC = () => {
             try {
               await sendOne(acc, [acc.email], chunk);
               sent += chunk.length;
+              for (const recip of chunk) recordSuccess(acc.email, recip, 'bcc');
             } catch (e) {
-              sendErrors.push(`${acc.email}: ${e instanceof Error ? e.message : String(e)}`);
+              const errMsg = e instanceof Error ? e.message : String(e);
+              sendErrors.push(`${acc.email}: ${errMsg}`);
+              for (const recip of chunk) recordFailure(acc.email, recip, 'bcc', errMsg);
             }
             if (ri < rows.length - 1 && delayMs) await sleep(delayMs);
           }
@@ -651,9 +754,15 @@ const EmailComposerView: React.FC = () => {
               )
             );
             results.forEach((r, j) => {
-              if (r.status === 'fulfilled') sent += 1;
-              else
-                sendErrors.push(`${wave[j].acc.email}→${wave[j].email}: ${(r.reason as Error)?.message || r.reason}`);
+              const { acc, email } = wave[j];
+              if (r.status === 'fulfilled') {
+                sent += 1;
+                recordSuccess(acc.email, email, 'direct');
+              } else {
+                const errMsg = (r.reason as Error)?.message || String(r.reason);
+                sendErrors.push(`${acc.email}→${email}: ${errMsg}`);
+                recordFailure(acc.email, email, 'direct', errMsg);
+              }
             });
             if (w + parallel < rows.length && delayMs) await sleep(delayMs);
           }
@@ -664,14 +773,19 @@ const EmailComposerView: React.FC = () => {
               try {
                 await sendOne(acc, [email], undefined, recipByEmail.get(email.toLowerCase()));
                 sent += 1;
+                recordSuccess(acc.email, email, 'direct');
               } catch (e) {
-                sendErrors.push(`${acc.email}→${email}: ${e instanceof Error ? e.message : String(e)}`);
+                const errMsg = e instanceof Error ? e.message : String(e);
+                sendErrors.push(`${acc.email}→${email}: ${errMsg}`);
+                recordFailure(acc.email, email, 'direct', errMsg);
               }
             }
             if (i + batchSize < rows.length && delayMs) await sleep(delayMs);
           }
         }
       }
+
+      setDeliveryRows(rowsCollected);
 
       if (sendErrors.length) {
         setSendMessage({
@@ -1296,21 +1410,90 @@ const EmailComposerView: React.FC = () => {
             )}
           </div>
 
-          <div className="composer-send-settings">
-            <div className="composer-send-setting">
-              <label>Batch Size</label>
-              <input type="number" value={batchSize} onChange={e => setBatchSize(Number(e.target.value))} min={1} max={100} />
-            </div>
-            <div className="composer-send-setting">
-              <label>Delay (sec)</label>
-              <input type="number" value={batchDelay} onChange={e => setBatchDelay(Number(e.target.value))} min={0} max={300} />
-            </div>
-            <div className="composer-send-setting">
-              <label>Mode</label>
+          <div
+            style={{
+              marginTop: 14,
+              padding: 12,
+              border: '1px solid #e5e7eb',
+              borderRadius: 8,
+              background: '#fafafa',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>
+                <i className="fas fa-tachometer-alt" style={{ marginRight: 6, color: '#6b7280' }} />
+                Send pacing
+              </span>
               <span className="composer-mode-badge">
                 {sendMode === 'bcc' ? 'BCC' : 'Direct'} · {selectedSenderEmails.size} sender(s)
               </span>
             </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              {([
+                { id: 'fast', label: 'Fast', batch: 25, delay: 5 },
+                { id: 'balanced', label: 'Balanced', batch: 10, delay: 30 },
+                { id: 'safe', label: 'Safe', batch: 5, delay: 60 },
+              ] as const).map(p => {
+                const active = batchSize === p.batch && batchDelay === p.delay;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      setBatchSize(p.batch);
+                      setBatchDelay(p.delay);
+                    }}
+                    style={{
+                      padding: '4px 12px',
+                      fontSize: 12,
+                      borderRadius: 4,
+                      border: `1px solid ${active ? '#3b82f6' : '#d1d5db'}`,
+                      background: active ? '#dbeafe' : 'white',
+                      color: active ? '#1e3a8a' : '#374151',
+                      cursor: 'pointer',
+                      fontWeight: active ? 600 : 400,
+                    }}
+                  >
+                    {p.label}
+                    <span style={{ marginLeft: 6, fontSize: 10, color: active ? '#1e3a8a' : '#9ca3af' }}>
+                      {p.batch}/{p.delay}s
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label style={{ fontSize: 12, color: '#374151' }}>
+                Batch size{' '}
+                <input
+                  type="number"
+                  value={batchSize}
+                  onChange={e => setBatchSize(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+                  min={1}
+                  max={100}
+                  style={{ width: 70 }}
+                />
+              </label>
+              <label style={{ fontSize: 12, color: '#374151' }}>
+                Delay between batches{' '}
+                <input
+                  type="number"
+                  value={batchDelay}
+                  onChange={e => setBatchDelay(Math.max(0, Math.min(300, Number(e.target.value) || 0)))}
+                  min={0}
+                  max={300}
+                  style={{ width: 70 }}
+                />{' '}
+                sec
+              </label>
+              <span style={{ fontSize: 11, color: '#6b7280' }}>
+                ≈ {batchDelay > 0 ? Math.round((batchSize * 60) / batchDelay) : '∞'} emails / minute
+              </span>
+            </div>
+            <p style={{ fontSize: 11, color: '#6b7280', marginTop: 8, lineHeight: 1.4 }}>
+              Slow + small batches reduce the chance of Microsoft throttling and improve deliverability.
+              Picking <em>Safe</em> is recommended for first sends from a new mailbox or large recipient lists.
+            </p>
           </div>
 
           {validationIssues.length > 0 && (
@@ -1366,6 +1549,16 @@ const EmailComposerView: React.FC = () => {
               title={blockingIssueCount > 0 ? 'Resolve the chips above first' : undefined}
             >
               <i className="fas fa-paper-plane"></i> {sending ? 'Sending…' : `Send to ${selectedEligibleCount} Recipients`}
+            </button>
+            <button
+              type="button"
+              className="action-btn secondary"
+              style={{ padding: '12px 20px' }}
+              onClick={() => void handleTestSend()}
+              disabled={testSending || sending || selectedSenderEmails.size === 0}
+              title="Send one personalized copy to each selected sender's own mailbox so you can verify how it looks in Outlook before sending to recipients."
+            >
+              <i className={`fas ${testSending ? 'fa-spinner fa-spin' : 'fa-vial'}`}></i> {testSending ? 'Testing\u2026' : 'Send test to me'}
             </button>
             <button type="button" className="action-btn secondary" style={{ padding: '12px 20px' }} onClick={() => setShowPreview(p => !p)}>
               <i className="fas fa-eye"></i> {showPreview ? 'Hide preview' : 'Preview'}
@@ -1443,6 +1636,137 @@ const EmailComposerView: React.FC = () => {
                       Close
                     </button>
                   </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {deliveryRows.length > 0 && (() => {
+            const filteredRows = deliveryRows.filter(r =>
+              deliveryFilter === 'all' ? true : r.status === deliveryFilter
+            );
+            const ok = deliveryRows.filter(r => r.status === 'success').length;
+            const failed = deliveryRows.length - ok;
+            const csv = [
+              'sender,recipient,mode,status,error',
+              ...deliveryRows.map(r =>
+                [r.sender, r.recipient, r.mode, r.status, (r.error || '').replace(/"/g, '""')]
+                  .map(field => `"${String(field).replace(/"/g, '""')}"`)
+                  .join(',')
+              ),
+            ].join('\n');
+            const downloadCsv = () => {
+              const blob = new Blob([csv], { type: 'text/csv' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `send-results-${new Date().toISOString().slice(0, 10)}.csv`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            };
+            const copyCsv = () => {
+              void navigator.clipboard?.writeText(csv);
+            };
+            return (
+              <div
+                style={{
+                  marginTop: 16,
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 8,
+                  background: 'white',
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '10px 12px',
+                    background: '#f9fafb',
+                    borderBottom: '1px solid #e5e7eb',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    <i className="fas fa-clipboard-list" style={{ marginRight: 6, color: '#6b7280' }} />
+                    Delivery results: {ok} ok / {failed} failed
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {(['all', 'success', 'failed'] as const).map(f => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => setDeliveryFilter(f)}
+                        style={{
+                          fontSize: 11,
+                          padding: '3px 10px',
+                          border: `1px solid ${deliveryFilter === f ? '#3b82f6' : '#d1d5db'}`,
+                          background: deliveryFilter === f ? '#dbeafe' : 'white',
+                          color: deliveryFilter === f ? '#1e3a8a' : '#374151',
+                          borderRadius: 4,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                    <button type="button" className="action-btn secondary" style={{ fontSize: 11, padding: '3px 10px' }} onClick={copyCsv}>
+                      <i className="fas fa-copy" style={{ marginRight: 4 }} /> Copy CSV
+                    </button>
+                    <button type="button" className="action-btn secondary" style={{ fontSize: 11, padding: '3px 10px' }} onClick={downloadCsv}>
+                      <i className="fas fa-download" style={{ marginRight: 4 }} /> Download CSV
+                    </button>
+                  </div>
+                </div>
+                <div style={{ maxHeight: 280, overflowY: 'auto' }}>
+                  <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                    <thead style={{ position: 'sticky', top: 0, background: '#f3f4f6' }}>
+                      <tr>
+                        <th style={{ textAlign: 'left', padding: '6px 10px', fontWeight: 600, color: '#374151' }}>Sender</th>
+                        <th style={{ textAlign: 'left', padding: '6px 10px', fontWeight: 600, color: '#374151' }}>Recipient</th>
+                        <th style={{ textAlign: 'left', padding: '6px 10px', fontWeight: 600, color: '#374151', width: 70 }}>Mode</th>
+                        <th style={{ textAlign: 'left', padding: '6px 10px', fontWeight: 600, color: '#374151', width: 90 }}>Status</th>
+                        <th style={{ textAlign: 'left', padding: '6px 10px', fontWeight: 600, color: '#374151' }}>Error</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.map((r, i) => (
+                        <tr key={i} style={{ borderTop: '1px solid #f3f4f6' }}>
+                          <td style={{ padding: '6px 10px', color: '#374151' }}>{r.sender}</td>
+                          <td style={{ padding: '6px 10px', color: '#374151' }}>{r.recipient}</td>
+                          <td style={{ padding: '6px 10px', color: '#6b7280', textTransform: 'uppercase', fontSize: 10 }}>{r.mode}</td>
+                          <td style={{ padding: '6px 10px' }}>
+                            <span
+                              style={{
+                                padding: '2px 8px',
+                                borderRadius: 3,
+                                fontSize: 10,
+                                fontWeight: 600,
+                                background: r.status === 'success' ? '#d1fae5' : '#fee2e2',
+                                color: r.status === 'success' ? '#065f46' : '#991b1b',
+                              }}
+                            >
+                              {r.status}
+                            </span>
+                          </td>
+                          <td style={{ padding: '6px 10px', color: '#9ca3af', fontSize: 11 }} title={r.error}>
+                            {r.error ? (r.error.length > 80 ? r.error.slice(0, 80) + '\u2026' : r.error) : ''}
+                          </td>
+                        </tr>
+                      ))}
+                      {filteredRows.length === 0 && (
+                        <tr>
+                          <td colSpan={5} style={{ padding: 14, textAlign: 'center', color: '#9ca3af' }}>
+                            No rows match this filter.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             );
