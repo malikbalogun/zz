@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import './index.css';
 import { getSettings, updateSettings } from './services/settingsService';
 import { startBackgroundScheduler, stopBackgroundScheduler } from './services/backgroundScheduler';
@@ -10,30 +10,33 @@ import { setOutlookMockMode } from './services/outlookService';
 
 import watcherLogo from './assets/watcherlogo.png';
 
-// Import view components
-import DashboardView from './components/views/DashboardView';
-import PanelsView from './components/views/PanelsView';
-import AccountsView from './components/views/AccountsView';
+// Lazy-load each top-level view so Vite/Rollup splits them into their own
+// chunks. Cuts the main entry chunk from ~550 kB to a much smaller core
+// (only the active view + its deps load up-front; the rest stream in on
+// first navigation). The Suspense boundary in renderView() shows a tiny
+// loader while a view chunk is fetched.
+const DashboardView = lazy(() => import('./components/views/DashboardView'));
+const PanelsView = lazy(() => import('./components/views/PanelsView'));
+const AccountsView = lazy(() => import('./components/views/AccountsView'));
+const MonitoringView = lazy(() => import('./components/views/MonitoringView'));
+const SettingsView = lazy(() => import('./components/views/SettingsView'));
+const CentralInboxView = lazy(() => import('./components/views/CentralInboxView'));
+const ContactsView = lazy(() => import('./components/views/ContactsView'));
+const EmailComposerView = lazy(() => import('./components/views/EmailComposerView'));
+const AIAnalysisView = lazy(() => import('./components/views/AIAnalysisView'));
+const SecurityView = lazy(() => import('./components/views/SecurityView'));
+const AutoReplyView = lazy(() => import('./components/views/AutoReplyView'));
+const TelegramConfigView = lazy(() => import('./components/views/TelegramConfigView'));
+const TaskManagerView = lazy(() => import('./components/views/TaskManagerView'));
+const AnalyticsView = lazy(() => import('./components/views/AnalyticsView'));
+const TemplateManagerView = lazy(() => import('./components/views/TemplateManagerView'));
+const DomainIntelView = lazy(() => import('./components/views/DomainIntelView'));
+const AuditLogView = lazy(() => import('./components/views/AuditLogView'));
+const WebhooksView = lazy(() => import('./components/views/WebhooksView'));
+const AccountHealthView = lazy(() => import('./components/views/AccountHealthView'));
+const ReputationView = lazy(() => import('./components/views/ReputationView'));
+
 import type { AddAccountInitialTab } from './components/AddAccountModal';
-import MonitoringView from './components/views/MonitoringView';
-
-import SettingsView from './components/views/SettingsView';
-import CentralInboxView from './components/views/CentralInboxView';
-import ContactsView from './components/views/ContactsView';
-import EmailComposerView from './components/views/EmailComposerView';
-import AIAnalysisView from './components/views/AIAnalysisView';
-import SecurityView from './components/views/SecurityView';
-import AutoReplyView from './components/views/AutoReplyView';
-import TelegramConfigView from './components/views/TelegramConfigView';
-
-import TaskManagerView from './components/views/TaskManagerView';
-import AnalyticsView from './components/views/AnalyticsView';
-import TemplateManagerView from './components/views/TemplateManagerView';
-import DomainIntelView from './components/views/DomainIntelView';
-import AuditLogView from './components/views/AuditLogView';
-import WebhooksView from './components/views/WebhooksView';
-import AccountHealthView from './components/views/AccountHealthView';
-import ReputationView from './components/views/ReputationView';
 
 // View types
 type View = 'dashboard' | 'panels' | 'accounts' | 'monitoring' | 'settings' | 'inbox' | 'contacts' | 'composer' | 'ai-analysis' | 'security' | 'auto-reply' | 'telegram' | 'tasks' | 'analytics' | 'templates' | 'domain-intel' | 'audit' | 'webhooks' | 'health' | 'reputation';
@@ -409,7 +412,16 @@ const App = () => {
           </div>
         </div>
         <div className="content">
-          {renderView()}
+          <Suspense
+            fallback={
+              <div className="loading" style={{ padding: 24, color: '#9ca3af' }}>
+                <i className="fas fa-spinner fa-spin" style={{ marginRight: 8 }} />
+                Loading view…
+              </div>
+            }
+          >
+            {renderView()}
+          </Suspense>
         </div>
       </div>
     </div>
