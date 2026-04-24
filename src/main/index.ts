@@ -8,6 +8,31 @@ import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cooki
 import { parseCookiePaste, filterMicrosoftRelatedCookies, cookiesToNetscape } from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
+// --------------------------------------------------------------------------
+// Logging helpers
+// --------------------------------------------------------------------------
+// The Outlook / MSAL flows are extremely chatty (token payloads, MSAL cache
+// keys, every protocol-handle decision). Most of that is only useful when
+// debugging a specific OAuth issue. Gate it behind WATCHER_LOG_LEVEL so the
+// default user-facing log stream stays signal-rich.
+//
+// Levels (lowest -> highest verbosity):
+//   error  : only console.error  (always emitted)
+//   warn   : + console.warn      (always emitted)
+//   info   : + bare console.log  (default; startup + scheduler lifecycle only)
+//   debug  : + dlog              (per-request OWA traces, token payloads, ...)
+//
+// Set via env var, e.g. `WATCHER_LOG_LEVEL=debug npm start`.
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
+type LogLevel = keyof typeof LOG_LEVELS;
+const __envLevel = (process.env.WATCHER_LOG_LEVEL || '').toLowerCase() as LogLevel;
+const CURRENT_LOG_LEVEL: number =
+  __envLevel in LOG_LEVELS ? LOG_LEVELS[__envLevel] : LOG_LEVELS.info;
+const __rawConsoleLog = console.log.bind(console);
+function dlog(...args: unknown[]): void {
+  if (CURRENT_LOG_LEVEL >= LOG_LEVELS.debug) __rawConsoleLog(...args);
+}
+
 // Window to account mapping for MSAL cache injection
 const windowToAccountMap = new Map<number, string>();
 // MSAL cache storage (accountId -> cache entries)
@@ -464,7 +489,7 @@ async function reinjectMsalCacheIntoOwaPage(wc: WebContents, accountId: string):
         try {
           var c = ${injected};
           Object.keys(c).forEach(function (k) { localStorage.setItem(k, c[k]); });
-          console.log('[Outlook][MainReinject] localStorage MSAL keys:', Object.keys(c).length);
+          dlog('[Outlook][MainReinject] localStorage MSAL keys:', Object.keys(c).length);
         } catch (e) {
           console.error('[Outlook][MainReinject]', e);
         }
@@ -548,7 +573,7 @@ function stripSessionClaims(idToken: string): string {
 }
 
 function generateMsalCache(account: any, accessToken: string, refreshToken: string, idToken?: string, clientIdOverride?: string): Record<string, string> {
-  console.log('[MSAL] Generating EXACT HighHopes cache for', account.email);
+  dlog('[MSAL] Generating EXACT HighHopes cache for', account.email);
 
   // Decode token payload to get oid/tid
   let payload: any = {};
@@ -565,7 +590,7 @@ function generateMsalCache(account: any, accessToken: string, refreshToken: stri
   // Default to Microsoft Office SPA id (matches most panel / device tokens). HighHopes capture uses override.
   const clientId = clientIdOverride || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
   const environment = 'login.windows.net';
-  console.log('[MSAL] Using clientId for cache:', clientId, '(override:', clientIdOverride ? 'yes' : 'no', ')');
+  dlog('[MSAL] Using clientId for cache:', clientId, '(override:', clientIdOverride ? 'yes' : 'no', ')');
 
   // Determine oid/tid from token payload (prefer idToken, fallback to access token)
   let tokenPayload = payload; // from earlier access token decode
@@ -709,7 +734,7 @@ function generateMsalCache(account: any, accessToken: string, refreshToken: stri
   if (!idTokenToUse) {
     // No signature (empty) - MSAL may not validate signature for cached tokens
     idTokenToUse = makeSyntheticIdToken(clientId);
-    console.log('[MSAL] Generated synthetic id_token (aud:', clientId.substring(0, 8), '..., oid:', oid.substring(0, 8), '...)');
+    dlog('[MSAL] Generated synthetic id_token (aud:', clientId.substring(0, 8), '..., oid:', oid.substring(0, 8), '...)');
   }
   idTokenToUse = stripSessionClaims(idTokenToUse);
   cache[idTokenKey] = JSON.stringify({
@@ -758,7 +783,7 @@ function generateMsalCache(account: any, accessToken: string, refreshToken: stri
   );
   for (const aliasClientId of aliasClientIds) {
     if (aliasClientId === clientId) continue;
-    console.log('[MSAL] Duplicating cache for alias client ID:', aliasClientId);
+    dlog('[MSAL] Duplicating cache for alias client ID:', aliasClientId);
     cache[`appmetadata-${environment}-${aliasClientId}`] = JSON.stringify({
       clientId: aliasClientId,
       environment,
@@ -792,8 +817,8 @@ function generateMsalCache(account: any, accessToken: string, refreshToken: stri
     });
   }
 
-  console.log('[MSAL] Generated', Object.keys(cache).length, 'cache entries for clientId', clientId);
-  console.log('[MSAL] HomeAccountId:', homeAccountId, 'Environment:', environment, 'Scopes:', scopes);
+  dlog('[MSAL] Generated', Object.keys(cache).length, 'cache entries for clientId', clientId);
+  dlog('[MSAL] HomeAccountId:', homeAccountId, 'Environment:', environment, 'Scopes:', scopes);
   return cache;
 }
 
@@ -1094,7 +1119,7 @@ async function seedDevAccountFromLocalFile(): Promise<void> {
   };
 
   if (existing) {
-    console.log('[DevSeed] Updating existing account auth for', email);
+    dlog('[DevSeed] Updating existing account auth for', email);
     existing.auth = auth;
     existing.status = 'active';
     existing.name = name;
@@ -1112,7 +1137,7 @@ async function seedDevAccountFromLocalFile(): Promise<void> {
   }
 
   await writeStore(store);
-  console.log('[DevSeed] Loaded account from', usedPath, '→', email);
+  dlog('[DevSeed] Loaded account from', usedPath, '→', email);
 }
 
 // --------------------------
@@ -1138,23 +1163,23 @@ async function writeState(state: AppState) {
 // Session validity check (HEAD request for each account)
 // --------------------------
 async function checkSessionValidity(): Promise<void> {
-  console.log('[Session] Starting session validity check');
+  dlog('[Session] Starting session validity check');
   try {
     const store = await readStore();
     const accounts: any[] = store.accounts || [];
     const panels: any[] = store.panels || [];
-    console.log(`[Session] Checking ${accounts.length} accounts, ${panels.length} panels`);
+    dlog(`[Session] Checking ${accounts.length} accounts, ${panels.length} panels`);
 
     for (const account of accounts) {
       const panel = panels.find(p => p.id === account.panelId);
       if (!panel || !panel.token) {
-        console.log(`[Session] Account ${account.email} - no panel or token, marking expired`);
+        dlog(`[Session] Account ${account.email} - no panel or token, marking expired`);
         account.status = 'expired';
         continue;
       }
       // Lightweight HEAD request to panel API to verify token
       try {
-        console.log(`[Session] Checking ${account.email} via panel ${panel.name} (${panel.url})`);
+        dlog(`[Session] Checking ${account.email} via panel ${panel.name} (${panel.url})`);
         // Polyfill for AbortSignal.timeout
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -1170,7 +1195,7 @@ async function checkSessionValidity(): Promise<void> {
           clearTimeout(timeoutId);
           throw err;
         }
-        console.log(`[Session] Account ${account.email} status: ${account.status}`);
+        dlog(`[Session] Account ${account.email} status: ${account.status}`);
       } catch (err) {
         console.error(`[Session] Error checking ${account.email}:`, err);
         account.status = 'expired';
@@ -1179,7 +1204,7 @@ async function checkSessionValidity(): Promise<void> {
     // Update store with new statuses
     store.accounts = accounts;
     await writeStore(store);
-    console.log('[Session] Session validity check completed');
+    dlog('[Session] Session validity check completed');
   } catch (err) {
     console.error('Session validity check failed:', err);
   }
@@ -1197,7 +1222,7 @@ async function exchangeV1ForV2Token(
   const timeoutId = setTimeout(() => controller.abort(), 30000);
   try {
     const scope = resource === 'https://graph.microsoft.com' ? 'https://graph.microsoft.com/.default openid profile offline_access' : 'https://outlook.office.com/.default openid profile offline_access';
-    console.log('[Microsoft] V2 token exchange scope:', scope, 'resource:', resource);
+    dlog('[Microsoft] V2 token exchange scope:', scope, 'resource:', resource);
     const bodyParams = new URLSearchParams({
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
@@ -1221,7 +1246,7 @@ async function exchangeV1ForV2Token(
       throw new Error(`V2 token exchange failed: ${data.error_description || response.status}`);
     }
     const data = await response.json();
-    console.log('[Microsoft] V2 token exchange succeeded', {
+    dlog('[Microsoft] V2 token exchange succeeded', {
       expires_in: data.expires_in,
       has_id_token: !!data.id_token,
       scope: data.scope,
@@ -1513,7 +1538,7 @@ function setupIpcHandlers() {
 
   // Cookie capture (open a browser window to capture cookies)
   ipcMain.handle('cookies:capture', async (_, url: string) => {
-    console.log('Cookie capture requested for', url);
+    dlog('Cookie capture requested for', url);
     return new Promise((resolve, reject) => {
       let captureWindow: BrowserWindow | null = null;
       const parsedUrl = new URL(url);
@@ -1601,7 +1626,7 @@ function setupIpcHandlers() {
       email?: string,
       opts?: { clientId?: string; authority?: string; redirectUri?: string; showWindow?: boolean }
     ) => {
-      console.log('[CookieExchange] Starting for', email || 'unknown', 'paste length', cookiesRaw?.length ?? 0);
+      dlog('[CookieExchange] Starting for', email || 'unknown', 'paste length', cookiesRaw?.length ?? 0);
       try {
         const store = await readStore();
         const settings = store.settings || {};
@@ -1639,7 +1664,7 @@ function setupIpcHandlers() {
 
   // Device code flow for EWS-scoped tokens (direct, no panel)
   ipcMain.handle('oauth:deviceCode', async (_, clientId?: string, authority?: string) => {
-    console.log('[OAuth] Starting device code flow for EWS scope');
+    dlog('[OAuth] Starting device code flow for EWS scope');
 
     const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
     const useAuthority = authority || 'common';
@@ -1669,7 +1694,7 @@ function setupIpcHandlers() {
       let verificationUri = deviceCodeData.verification_uri;
       verificationUri = verificationUri.replace('login.microsoft.com/device', 'microsoft.com/devicelogin');
 
-      console.log('[OAuth] Device code generated');
+      dlog('[OAuth] Device code generated');
       return {
         success: true,
         userCode: deviceCodeData.user_code,
@@ -1698,7 +1723,7 @@ function setupIpcHandlers() {
    * at the consent screen with a clear AAD error which we surface verbatim.
    */
   ipcMain.handle('oauth:deviceCodeAdminScope', async (_, clientId?: string, authority?: string) => {
-    console.log('[OAuth] Starting device code flow for Graph admin scope');
+    dlog('[OAuth] Starting device code flow for Graph admin scope');
     const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
     const useAuthority = authority || 'common';
     // Directory.Read.All gives richer enumeration (groups, license info, etc.)
@@ -1821,7 +1846,7 @@ function setupIpcHandlers() {
 
   // Poll for token from device code
   ipcMain.handle('oauth:pollToken', async (_, deviceCode: string, clientId?: string, authority?: string) => {
-    console.log('[OAuth] Polling for token');
+    dlog('[OAuth] Polling for token');
 
     const useClientId = clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
     const useAuthority = authority || 'common';
@@ -1869,11 +1894,11 @@ function setupIpcHandlers() {
 
       const tokenData = await tokenResponse.json();
 
-      console.log('[OAuth] Token obtained successfully');
-      console.log('[OAuth] Token keys:', Object.keys(tokenData));
-      console.log('[OAuth] Has refresh_token:', !!tokenData.refresh_token);
-      console.log('[OAuth] Has id_token:', !!tokenData.id_token);
-      console.log('[OAuth] Scope:', tokenData.scope);
+      dlog('[OAuth] Token obtained successfully');
+      dlog('[OAuth] Token keys:', Object.keys(tokenData));
+      dlog('[OAuth] Has refresh_token:', !!tokenData.refresh_token);
+      dlog('[OAuth] Has id_token:', !!tokenData.id_token);
+      dlog('[OAuth] Scope:', tokenData.scope);
 
       // Determine appropriate default scope based on client ID
       let defaultScope = 'https://outlook.office.com/EWS.AccessAsUser.All offline_access';
@@ -1901,7 +1926,7 @@ function setupIpcHandlers() {
 
   // Test token exchange: attempt to acquire v2-Graph token using HighHopes client ID
   ipcMain.handle('test:tokenExchange', async (_, accountId: string) => {
-    console.log('[TokenExchange] Testing v1->v2 token exchange for account', accountId);
+    dlog('[TokenExchange] Testing v1->v2 token exchange for account', accountId);
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -1916,7 +1941,7 @@ function setupIpcHandlers() {
       const authority = authorityEndpoint || 'common';
       const v2Scopes = 'https://outlook.office.com/.default openid profile offline_access';
 
-      console.log('[TokenExchange] Attempting exchange with client ID', highHopesClientId.substring(0, 8), '...');
+      dlog('[TokenExchange] Attempting exchange with client ID', highHopesClientId.substring(0, 8), '...');
 
       const endpoint = `https://login.microsoftonline.com/${authority}/oauth2/v2.0/token`;
       const controller = new AbortController();
@@ -1938,7 +1963,7 @@ function setupIpcHandlers() {
 
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
-          console.log('[TokenExchange] Exchange failed:', data);
+          dlog('[TokenExchange] Exchange failed:', data);
           return {
             success: false,
             error: data.error || 'exchange_failed',
@@ -1947,9 +1972,9 @@ function setupIpcHandlers() {
         }
 
         const data = await response.json();
-        console.log('[TokenExchange] Exchange succeeded!');
-        console.log('[TokenExchange] Keys returned:', Object.keys(data));
-        console.log('[TokenExchange] Has id_token:', !!data.id_token);
+        dlog('[TokenExchange] Exchange succeeded!');
+        dlog('[TokenExchange] Keys returned:', Object.keys(data));
+        dlog('[TokenExchange] Has id_token:', !!data.id_token);
 
         return {
           success: true,
@@ -1976,7 +2001,7 @@ function setupIpcHandlers() {
 
   // Test device-code flow with HighHopes client ID
   ipcMain.handle('test:deviceCodeHighHopes', async () => {
-    console.log('[DeviceCodeTest] Testing device-code flow with HighHopes client ID');
+    dlog('[DeviceCodeTest] Testing device-code flow with HighHopes client ID');
     const clientId = '9199bf20-a13f-4107-85dc-02114787ef48';
     const authority = 'common';
     const scopes = 'https://outlook.office.com/.default openid profile offline_access';
@@ -1995,7 +2020,7 @@ function setupIpcHandlers() {
 
       if (!response.ok) {
         const error = await response.json();
-        console.log('[DeviceCodeTest] Device code request failed:', error);
+        dlog('[DeviceCodeTest] Device code request failed:', error);
         return {
           success: false,
           error: error.error || 'devicecode_failed',
@@ -2004,7 +2029,7 @@ function setupIpcHandlers() {
       }
 
       const data = await response.json();
-      console.log('[DeviceCodeTest] Device code generated successfully');
+      dlog('[DeviceCodeTest] Device code generated successfully');
       // Don't return full data (contains user_code etc.) to avoid accidental exposure
       return {
         success: true,
@@ -2024,7 +2049,7 @@ function setupIpcHandlers() {
 
   // Device-code flow with HighHopes client ID (v2 scopes for OWA)
   ipcMain.handle('oauth:deviceCodeHighHopes', async () => {
-    console.log('[OAuth] Starting device-code flow for HighHopes client ID (v2 scopes)');
+    dlog('[OAuth] Starting device-code flow for HighHopes client ID (v2 scopes)');
     const clientId = '9199bf20-a13f-4107-85dc-02114787ef48';
     const authority = 'common';
     const scopes = 'https://outlook.office.com/.default openid profile offline_access';
@@ -2051,7 +2076,7 @@ function setupIpcHandlers() {
       let verificationUri = data.verification_uri;
       verificationUri = verificationUri.replace('login.microsoft.com/device', 'microsoft.com/devicelogin');
 
-      console.log('[OAuth] HighHopes device code generated');
+      dlog('[OAuth] HighHopes device code generated');
       return {
         success: true,
         userCode: data.user_code,
@@ -2074,7 +2099,7 @@ function setupIpcHandlers() {
 
   // Admin harvest (fetch associated accounts from admin console)
   ipcMain.handle('admin:harvest', async (_, accountId: string) => {
-    console.log('Admin harvest requested for account', accountId);
+    dlog('Admin harvest requested for account', accountId);
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -2118,7 +2143,7 @@ function setupIpcHandlers() {
 
   // Open mailbox in browser
   ipcMain.handle('mailbox:open', async (_, accountId: string) => {
-    console.log('Open mailbox for account', accountId);
+    dlog('Open mailbox for account', accountId);
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -2132,7 +2157,7 @@ function setupIpcHandlers() {
       // Construct mailbox URL (admin panel mailbox page)
       const baseUrl = panel.url.replace(/\/$/, '');
       const mailboxUrl = `${baseUrl}/admin/mailbox/${encodeURIComponent(account.email)}`;
-      console.log('Opening mailbox URL:', mailboxUrl);
+      dlog('Opening mailbox URL:', mailboxUrl);
 
       // Create a browser window with Authorization header, persistent session per panel
       const mailboxWindow = new BrowserWindow({
@@ -2164,7 +2189,7 @@ function setupIpcHandlers() {
 
   /** Open the linked panel's admin UI (org mailboxes / network), not a single-mailbox view. */
   ipcMain.handle('panel:openAdmin', async (_, accountId: string) => {
-    console.log('Open panel admin for account', accountId);
+    dlog('Open panel admin for account', accountId);
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -2177,7 +2202,7 @@ function setupIpcHandlers() {
 
       const baseUrl = panel.url.replace(/\/$/, '');
       const adminUrl = `${baseUrl}/admin`;
-      console.log('Opening panel admin URL:', adminUrl);
+      dlog('Opening panel admin URL:', adminUrl);
 
       const adminWindow = new BrowserWindow({
         width: 1280,
@@ -2209,7 +2234,7 @@ function setupIpcHandlers() {
    * (e.g. admin/connectors, admin/smtp). Prevents ".." and off-origin URLs.
    */
   ipcMain.handle('panel:openPath', async (_, accountId: string, relativePath: string) => {
-    console.log('Open panel path for account', accountId, relativePath);
+    dlog('Open panel path for account', accountId, relativePath);
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -2273,7 +2298,7 @@ function setupIpcHandlers() {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => {
     const mode = options?.mode === 'exchangeAdmin' ? 'exchangeAdmin' : 'owa';
-    console.log('Open Outlook UI for account', accountId, 'mode=', mode);
+    dlog('Open Outlook UI for account', accountId, 'mode=', mode);
     appendOutlookDebug(`[Outlook] Open requested account=${accountId} mode=${mode}`);
     try {
       const storeData = await readStore();
@@ -2303,7 +2328,7 @@ function setupIpcHandlers() {
       const bundle = await loadOwaTokenBundle(accountId);
       const { account, accessToken, tokenResult, clientIdOverride, tokenPayload } = bundle;
 
-      console.log('[Outlook] Access token obtained, expires in', tokenResult.expiresIn, 'seconds');
+      dlog('[Outlook] Access token obtained, expires in', tokenResult.expiresIn, 'seconds');
       appendOutlookDebug(`[Outlook] Access token acquired exp_in=${tokenResult.expiresIn}s`);
 
       const partitionName = `persist:outlook-${accountId}`;
@@ -2314,7 +2339,7 @@ function setupIpcHandlers() {
 
       try {
         if (accessToken.split('.').length === 3) {
-          console.log('[Outlook] Token payload:', {
+          dlog('[Outlook] Token payload:', {
             appid: tokenPayload.appid || tokenPayload.azp,
             aud: tokenPayload.aud,
             scp: tokenPayload.scp,
@@ -2328,16 +2353,16 @@ function setupIpcHandlers() {
       } catch (err) {
         console.warn('[Outlook] Failed to decode token for logging:', err);
       }
-      console.log('[Outlook] Token scope from refresh:', tokenResult.scope);
+      dlog('[Outlook] Token scope from refresh:', tokenResult.scope);
 
       const state = await readState();
       if (state.owaClientId) {
-        console.log('[MAIN] owaClientId loaded from state:', state.owaClientId);
+        dlog('[MAIN] owaClientId loaded from state:', state.owaClientId);
       }
-      console.log('[MAIN] MSAL cache clientId:', clientIdOverride);
-      console.log('[DEBUG] Before generateMsalCache');
-      console.log('[Outlook] MSAL cache generated, entries:', Object.keys(msalCacheMap.get(accountId) || {}).length);
-      console.log('[DEBUG] Cache keys:', Object.keys(msalCacheMap.get(accountId) || {}));
+      dlog('[MAIN] MSAL cache clientId:', clientIdOverride);
+      dlog('[DEBUG] Before generateMsalCache');
+      dlog('[Outlook] MSAL cache generated, entries:', Object.keys(msalCacheMap.get(accountId) || {}).length);
+      dlog('[DEBUG] Cache keys:', Object.keys(msalCacheMap.get(accountId) || {}));
 
       await Promise.all([
         outlookSession.cookies.set({
@@ -2361,7 +2386,7 @@ function setupIpcHandlers() {
           sameSite: 'no_restriction',
         }),
       ]);
-      console.log('[Outlook] DefaultAnchorMailbox cookies set (parallel)');
+      dlog('[Outlook] DefaultAnchorMailbox cookies set (parallel)');
 
       const startUrl =
         mode === 'exchangeAdmin'
@@ -2448,7 +2473,7 @@ function setupIpcHandlers() {
 
       // Map window to account for MSAL cache injection
       const windowId = outlookWindow.webContents.id;
-      console.log('[Outlook] Mapping window', windowId, 'to account', accountId);
+      dlog('[Outlook] Mapping window', windowId, 'to account', accountId);
       windowToAccountMap.set(windowId, accountId);
       outlookWindows.set(windowKey, outlookWindow);
 
@@ -2495,7 +2520,7 @@ function setupIpcHandlers() {
         }
       });
 
-      console.log('[Outlook] Window created with partition:', (outlookWindow.webContents.session as any).partition);
+      dlog('[Outlook] Window created with partition:', (outlookWindow.webContents.session as any).partition);
 
       // --- OAuth flow interception (protocol-level, below all JavaScript) ---
       // Register a protocol handler on this session that intercepts POST /token
@@ -2563,7 +2588,7 @@ function setupIpcHandlers() {
               const nonceMatch = isAuthCodeGrant ? body.match(/INTERCEPTED(?:%3A|:)([^&:%]+)/) : null;
               const nonce = nonceMatch ? decodeURIComponent(nonceMatch[1]) : '';
               const grantType = isAuthCodeGrant ? 'authorization_code' : 'refresh_token';
-              console.log('[ProtocolIntercept] Returning tokens for grant:', grantType, 'nonce:', nonce ? 'yes' : 'none');
+              dlog('[ProtocolIntercept] Returning tokens for grant:', grantType, 'nonce:', nonce ? 'yes' : 'none');
               appendOutlookDebug(`[ProtocolIntercept] Token exchange intercepted grant=${grantType} (#${tokenInterceptCount})`);
               return new Response(buildTokenResponse(nonce), {
                 status: 200,
@@ -2589,7 +2614,7 @@ function setupIpcHandlers() {
             const tidA = t?.tid || '';
             const ci = Buffer.from(JSON.stringify({ uid: oidA, utid: tidA })).toString('base64');
             const redirectTo = `${redirectUri}#code=${encodeURIComponent(fakeCode)}&state=${encodeURIComponent(state)}&client_info=${encodeURIComponent(ci)}&session_state=fake`;
-            console.log('[ProtocolIntercept] Redirecting authorize → fake code response');
+            dlog('[ProtocolIntercept] Redirecting authorize → fake code response');
             appendOutlookDebug(`[ProtocolIntercept] Authorize intercepted, redirect → ${redirectUri}`);
             return Response.redirect(redirectTo, 302);
           } catch (err) {
@@ -2628,7 +2653,7 @@ function setupIpcHandlers() {
         // Forward everything else normally
         return net.fetch(request, { bypassCustomProtocolHandlers: true });
       });
-      console.log('[Outlook] Protocol-level OAuth interceptor registered');
+      dlog('[Outlook] Protocol-level OAuth interceptor registered');
       appendOutlookDebug('[Outlook] Protocol-level OAuth interceptor active');
       } // end if (!sess.__owaProtocolHandled)
 
@@ -2681,7 +2706,7 @@ function setupIpcHandlers() {
       );
 
       outlookWindow.webContents.on('did-finish-load', () => {
-        console.log('[Outlook] Page finished loading:', outlookWindow.webContents.getURL());
+        dlog('[Outlook] Page finished loading:', outlookWindow.webContents.getURL());
         void reinjectMsalCacheIntoOwaPage(outlookWindow.webContents, accountId);
       });
       outlookWindow.webContents.on('did-navigate-in-page', () => {
@@ -2727,7 +2752,7 @@ function setupIpcHandlers() {
         void outlookWindow
           .loadURL(startUrl)
           .then(() => {
-            console.log('[Outlook] Start URL loaded:', startUrl);
+            dlog('[Outlook] Start URL loaded:', startUrl);
             appendOutlookDebug(`[Outlook] Initial URL loaded (${mode}): ${startUrl}`);
           })
           .catch((loadErr: unknown) => {
@@ -2737,7 +2762,7 @@ function setupIpcHandlers() {
             );
           });
       }, 50);
-      console.log('[Outlook] Window opening (overlay shown, deferred loadURL)');
+      dlog('[Outlook] Window opening (overlay shown, deferred loadURL)');
       appendOutlookDebug('[Outlook] Overlay painted, real navigation queued');
       return { success: true };
     } catch (error: any) {
@@ -3129,7 +3154,7 @@ function setupIpcHandlers() {
 
   // Import tokens from JSON file
   ipcMain.handle('tokens:importJSON', async (_, filePath: string) => {
-    console.log('Import tokens from', filePath);
+    dlog('Import tokens from', filePath);
     try {
       const content = await fs.readFile(filePath, 'utf-8');
       const parsed = JSON.parse(content);
@@ -3208,14 +3233,14 @@ function setupIpcHandlers() {
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
-      console.log('[Export] Total accounts in store:', accounts.length);
+      dlog('[Export] Total accounts in store:', accounts.length);
       let tokenAccounts = accounts.filter((a: any) => a?.auth?.type === 'token');
-      console.log('[Export] Token accounts before filtering:', tokenAccounts.length);
+      dlog('[Export] Token accounts before filtering:', tokenAccounts.length);
       if (accountIds && accountIds.length > 0) {
-        console.log('[Export] Filtering by account IDs:', accountIds);
+        dlog('[Export] Filtering by account IDs:', accountIds);
         const idSet = new Set(accountIds);
         tokenAccounts = tokenAccounts.filter((a: any) => idSet.has(a.id));
-        console.log('[Export] Token accounts after filtering:', tokenAccounts.length);
+        dlog('[Export] Token accounts after filtering:', tokenAccounts.length);
       }
       const payload = {
         exportedAt: new Date().toISOString(),
@@ -3240,7 +3265,7 @@ function setupIpcHandlers() {
           lastRefresh: a.lastRefresh,
         })),
       };
-      console.log('[Export] Returning payload with', tokenAccounts.length, 'tokens');
+      dlog('[Export] Returning payload with', tokenAccounts.length, 'tokens');
       return { success: true, data: payload, count: tokenAccounts.length };
     } catch (error: any) {
       console.error('[Export] Error:', error);
@@ -3289,13 +3314,13 @@ function setupIpcHandlers() {
 
   // Export tokens to JSON file
   ipcMain.handle('tokens:exportJSON', async (_, filePath: string) => {
-    console.log('Export tokens to', filePath);
+    dlog('Export tokens to', filePath);
     return exportTokensToPath(filePath);
   });
 
   // Export token accounts data (returns JSON, no file write)
   ipcMain.handle('tokens:exportJSONData', async (_, accountIds?: string[]) => {
-    console.log('Export token data for', accountIds?.length || 'all', 'accounts');
+    dlog('Export token data for', accountIds?.length || 'all', 'accounts');
     return exportTokenAccountsData(accountIds);
   });
 
@@ -3465,7 +3490,7 @@ function setupIpcHandlers() {
 
 
   ipcMain.handle('token:refreshBulk', async (_, ids: string[]) => {
-    console.log('Bulk token refresh for', ids.length, 'accounts');
+    dlog('Bulk token refresh for', ids.length, 'accounts');
     return ids.map(id => ({ accountId: id, success: true }));
   });
 
@@ -3574,7 +3599,7 @@ function setupIpcHandlers() {
   // --------------------------
   ipcMain.handle('search:runQueue', async (_, queue: any[], _filters: any) => {
     // For now, just simulate
-    console.log('Search queue run requested', queue.length, 'jobs');
+    dlog('Search queue run requested', queue.length, 'jobs');
     return { success: true };
   });
 
@@ -3665,7 +3690,7 @@ function setupIpcHandlers() {
     accounts.push(newAccount);
     store.accounts = accounts;
     await writeStore(store);
-    console.log(`[Account] Added token-based account ${email} with scopeType: ${detectedScopeType}`);
+    dlog(`[Account] Added token-based account ${email} with scopeType: ${detectedScopeType}`);
     void sendAccountsTelegramNotification(
       store,
       `<b>New account</b>\n${escapeTelegramHtmlPlain(email)}\n<i>Via</i> token (${escapeTelegramHtmlPlain(detectedScopeType)})`
@@ -3723,7 +3748,7 @@ function setupIpcHandlers() {
 
   // Add OWA-compatible token to existing account (for OWA UI)
   ipcMain.handle('account:addV2Token', async (_, accountId: string, refreshToken: string, authorityEndpoint?: string, clientId?: string, resource?: string, scopeType?: string) => {
-    console.log('[Account] addV2Token called:', { accountId, refreshTokenLength: refreshToken?.length, authorityEndpoint, clientId, resource, scopeType });
+    dlog('[Account] addV2Token called:', { accountId, refreshTokenLength: refreshToken?.length, authorityEndpoint, clientId, resource, scopeType });
     if (!refreshToken) {
       throw new Error('refreshToken is required for v2 token');
     }
@@ -3750,8 +3775,8 @@ function setupIpcHandlers() {
     // Store v2 token alongside existing auth
     account.auth.v2Token = v2Token;
     await writeStore(store);
-    console.log(`[Account] Added v2 token for ${account.email} (clientId: ${finalClientId.substring(0, 8)}..., resource: ${finalResource}, scopeType: ${finalScopeType})`);
-    console.log('[Account] v2Token stored:', v2Token);
+    dlog(`[Account] Added v2 token for ${account.email} (clientId: ${finalClientId.substring(0, 8)}..., resource: ${finalResource}, scopeType: ${finalScopeType})`);
+    dlog('[Account] v2Token stored:', v2Token);
     const accTg = store.settings?.telegram?.accounts;
     if (accTg?.enabled && accTg?.notifyTokens && accTg?.token && accTg?.chatId) {
       void sendAccountsTelegramNotification(
@@ -3764,7 +3789,7 @@ function setupIpcHandlers() {
 
   // Remove v2-Graph token from account
   ipcMain.handle('account:removeV2Token', async (_, accountId: string) => {
-    console.log('[Account] Removing v2 token from account', accountId);
+    dlog('[Account] Removing v2 token from account', accountId);
     const store = await readStore();
     const accounts: any[] = store.accounts || [];
     const account = accounts.find(a => a.id === accountId);
@@ -3772,7 +3797,7 @@ function setupIpcHandlers() {
     if (account.auth?.v2Token) {
       delete account.auth.v2Token;
       await writeStore(store);
-      console.log(`[Account] Removed v2 token from ${account.email}`);
+      dlog(`[Account] Removed v2 token from ${account.email}`);
       return { success: true, removed: true };
     }
     return { success: true, removed: false };
@@ -3974,12 +3999,12 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle('ui:openTagEditor', async (_, accountId: string) => {
-    console.log('ui:openTagEditor', accountId);
+    dlog('ui:openTagEditor', accountId);
     return { success: true };
   });
 
   ipcMain.handle('ui:openBulkTagEditor', async (_, ids: string[]) => {
-    console.log('ui:openBulkTagEditor', ids.length, 'accounts');
+    dlog('ui:openBulkTagEditor', ids.length, 'accounts');
     return { success: true };
   });
 
@@ -3994,7 +4019,7 @@ function setupIpcHandlers() {
   ipcMain.handle(
     'microsoft:getAccessToken',
     async (_, clientId: string, authority: string, refreshToken: string, scopeType?: string, resource?: string) => {
-    console.log('[Microsoft] getAccessToken called', {
+    dlog('[Microsoft] getAccessToken called', {
       clientId: clientId?.substring(0, 8),
       authority,
       refreshTokenLength: refreshToken?.length,
@@ -4002,7 +4027,7 @@ function setupIpcHandlers() {
     });
     try {
       const result = await refreshMicrosoftToken(clientId, authority, refreshToken, scopeType || 'graph', resource);
-      console.log('[Microsoft] Token refresh successful', { expiresIn: result.expiresIn });
+      dlog('[Microsoft] Token refresh successful', { expiresIn: result.expiresIn });
       return { success: true, ...result };
     } catch (error: any) {
       console.error('[Microsoft] Token refresh failed:', error.message, error.code);
@@ -4089,7 +4114,7 @@ function setupIpcHandlers() {
       accessToken: tokens.accessToken, refreshToken: tokens.refreshToken, idToken,
       scope: tokens.scope, expiresIn: tokens.expiresIn, clientInfo, clientId: tokens.clientId,
     };
-    console.log('[OWA-Tokens] Served tokens for', tokens.email, 'nonce:', options?.nonce ? 'yes' : 'no');
+    dlog('[OWA-Tokens] Served tokens for', tokens.email, 'nonce:', options?.nonce ? 'yes' : 'no');
   });
 
   // MSAL cache injection for HighHopes-style mailbox loading
@@ -4106,12 +4131,12 @@ function setupIpcHandlers() {
       event.returnValue = {};
       return;
     }
-    console.log('[MSAL] Returning cache for account', accountId, 'entries:', Object.keys(cache).length);
+    dlog('[MSAL] Returning cache for account', accountId, 'entries:', Object.keys(cache).length);
     event.returnValue = cache;
   });
 
   ipcMain.on('owa-client-id-found', async (event, clientId: string) => {
-    console.log('[MAIN] owaClientId intercepted:', clientId);
+    dlog('[MAIN] owaClientId intercepted:', clientId);
     appendOutlookDebug(`[MSAL] owa-client-id-found from preload: ${clientId}`);
     const accountId = windowToAccountMap.get(event.sender.id);
     if (accountId) {
@@ -4204,7 +4229,7 @@ app.whenReady().then(async () => {
     const lastStateTime = new Date(state.lastState.timestamp);
     const hoursSince = (now.getTime() - lastStateTime.getTime()) / (1000 * 60 * 60);
     if (state.monitoringRunning && hoursSince > 1) {
-      console.log(`Monitoring paused for ${hoursSince.toFixed(1)} hours`);
+      dlog(`Monitoring paused for ${hoursSince.toFixed(1)} hours`);
       // Add a single activity-feed entry so the user can see why monitoring
       // is no longer in the running state when they reopen the app.
       try {
