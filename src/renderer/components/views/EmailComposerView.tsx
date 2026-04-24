@@ -97,6 +97,12 @@ const EmailComposerView: React.FC = () => {
   const [sending, setSending] = useState(false);
   const [sendMessage, setSendMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Collapses the recipients rail to a thin strip so the editor takes the full width. */
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const sendersRef = useRef<HTMLDivElement>(null);
+  const recipientsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     (async () => {
@@ -171,6 +177,48 @@ const EmailComposerView: React.FC = () => {
     () => buildPreviewSrcDoc(emailBody, bodyType),
     [emailBody, bodyType]
   );
+
+  /** Pre-flight checks. Each issue gets a clickable chip that scrolls to the
+   *  offending control instead of forcing the user to guess after a failed Send. */
+  const validationIssues = useMemo(() => {
+    const issues: Array<{ id: string; label: string; severity: 'error' | 'warning'; ref?: React.RefObject<HTMLElement | null>; }> = [];
+    if (selectedSenderEmails.size === 0) {
+      issues.push({ id: 'no-sender', label: 'Pick at least one From mailbox', severity: 'error', ref: sendersRef });
+    }
+    if (!subject.trim()) {
+      issues.push({ id: 'no-subject', label: 'Subject is empty', severity: 'error', ref: subjectRef as unknown as React.RefObject<HTMLElement | null> });
+    }
+    if (selectedEligibleCount === 0) {
+      issues.push({ id: 'no-recipients', label: 'No eligible recipients selected', severity: 'error', ref: recipientsRef });
+    }
+    if (!emailBody.trim()) {
+      issues.push({ id: 'no-body', label: 'Body is empty', severity: 'error', ref: bodyRef as unknown as React.RefObject<HTMLElement | null> });
+    }
+    // Warn if any selected sender requires re-auth — Microsoft would
+    // reject those sends. Better to flag now than fail mid-batch.
+    const reauthSenders = accounts.filter(
+      a => selectedSenderEmails.has(a.email) && (a as any).requiresReauth
+    );
+    if (reauthSenders.length) {
+      issues.push({
+        id: 'reauth',
+        label: `${reauthSenders.length} sender(s) need re-auth: ${reauthSenders.map(a => a.email).join(', ')}`,
+        severity: 'warning',
+        ref: sendersRef,
+      });
+    }
+    return issues;
+  }, [accounts, selectedSenderEmails, subject, selectedEligibleCount, emailBody]);
+
+  const scrollIssueIntoView = (ref?: React.RefObject<HTMLElement | null>) => {
+    if (!ref?.current) return;
+    ref.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if ('focus' in ref.current && typeof (ref.current as HTMLElement).focus === 'function') {
+      (ref.current as HTMLElement).focus({ preventScroll: true });
+    }
+  };
+
+  const blockingIssueCount = validationIssues.filter(i => i.severity === 'error').length;
 
   const onPickFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -422,12 +470,45 @@ const EmailComposerView: React.FC = () => {
       </div>
 
       <div className="composer-layout">
-        <div className="composer-recipients-panel">
+        <div
+          className="composer-recipients-panel"
+          ref={recipientsRef}
+          style={railCollapsed ? { width: 56, minWidth: 56 } : undefined}
+        >
           <div className="composer-panel-header">
-            <span className="composer-panel-title">
-              <i className="fas fa-users"></i> Recipients
-            </span>
+            {!railCollapsed && (
+              <span className="composer-panel-title">
+                <i className="fas fa-users"></i> Recipients
+              </span>
+            )}
+            <button
+              type="button"
+              className="icon-btn small"
+              title={railCollapsed ? 'Expand recipients panel' : 'Collapse recipients panel'}
+              aria-label={railCollapsed ? 'Expand recipients panel' : 'Collapse recipients panel'}
+              onClick={() => setRailCollapsed(v => !v)}
+              style={{ marginLeft: 'auto' }}
+            >
+              <i className={`fas fa-chevron-${railCollapsed ? 'right' : 'left'}`}></i>
+            </button>
           </div>
+          {railCollapsed && (
+            <div
+              style={{
+                writingMode: 'vertical-rl',
+                transform: 'rotate(180deg)',
+                color: '#6b7280',
+                fontSize: 12,
+                padding: '8px 4px',
+                whiteSpace: 'nowrap',
+                textAlign: 'center',
+              }}
+            >
+              {selectedEligibleCount} of {eligibleContacts.length} selected
+            </div>
+          )}
+          {!railCollapsed && (
+          <>
           <div className="composer-send-mode">
             <button
               type="button"
@@ -525,6 +606,8 @@ const EmailComposerView: React.FC = () => {
               Select Eligible
             </button>
           </div>
+          </>
+          )}
         </div>
 
         <div className="composer-editor-panel">
@@ -557,7 +640,7 @@ const EmailComposerView: React.FC = () => {
             </div>
           )}
 
-          <div className="composer-field">
+          <div className="composer-field" ref={sendersRef}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <label className="composer-field-label" style={{ margin: 0 }}>
                 From (multi-mailbox)
@@ -584,12 +667,34 @@ const EmailComposerView: React.FC = () => {
               {accounts.length === 0 && (
                 <div style={{ color: '#9ca3af' }}>No token accounts — add one in Accounts</div>
               )}
-              {accounts.map(a => (
-                <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={selectedSenderEmails.has(a.email)} onChange={() => toggleSenderEmail(a.email)} />
-                  <span>{a.email}</span>
-                </label>
-              ))}
+              {accounts.map(a => {
+                const needsReauth = (a as any).requiresReauth === true;
+                return (
+                  <label
+                    key={a.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', cursor: 'pointer' }}
+                    title={needsReauth ? 'This account needs to sign in again before it can send.' : undefined}
+                  >
+                    <input type="checkbox" checked={selectedSenderEmails.has(a.email)} onChange={() => toggleSenderEmail(a.email)} />
+                    <span style={{ flex: 1 }}>{a.email}</span>
+                    {needsReauth && (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          padding: '2px 6px',
+                          background: '#fef3c7',
+                          color: '#92400e',
+                          border: '1px solid #fbbf24',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <i className="fas fa-sign-in-alt" style={{ marginRight: 4 }} />
+                        re-auth
+                      </span>
+                    )}
+                  </label>
+                );
+              })}
             </div>
           </div>
 
@@ -632,6 +737,7 @@ const EmailComposerView: React.FC = () => {
           <div className="composer-field">
             <label className="composer-field-label">Subject</label>
             <input
+              ref={subjectRef}
               type="text"
               className="composer-field-input"
               placeholder="Email subject..."
@@ -658,6 +764,7 @@ const EmailComposerView: React.FC = () => {
 
           <div style={{ display: showPreview ? 'grid' : 'block', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
             <textarea
+              ref={bodyRef}
               className="composer-body-textarea"
               placeholder="Write your email content here..."
               value={emailBody}
@@ -728,13 +835,57 @@ const EmailComposerView: React.FC = () => {
             </div>
           </div>
 
+          {validationIssues.length > 0 && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 10,
+                border: '1px solid #e5e7eb',
+                borderRadius: 8,
+                background: '#fafafa',
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 6,
+                alignItems: 'center',
+              }}
+            >
+              <span style={{ fontSize: 12, color: '#374151', fontWeight: 600, marginRight: 4 }}>
+                {blockingIssueCount > 0 ? 'Fix to send:' : 'Heads up:'}
+              </span>
+              {validationIssues.map(issue => (
+                <button
+                  key={issue.id}
+                  type="button"
+                  onClick={() => scrollIssueIntoView(issue.ref)}
+                  style={{
+                    fontSize: 11,
+                    padding: '3px 9px',
+                    borderRadius: 4,
+                    border: `1px solid ${issue.severity === 'error' ? '#fca5a5' : '#fbbf24'}`,
+                    background: issue.severity === 'error' ? '#fee2e2' : '#fef3c7',
+                    color: issue.severity === 'error' ? '#991b1b' : '#92400e',
+                    cursor: 'pointer',
+                  }}
+                  title={issue.ref ? 'Click to jump to the offending control' : undefined}
+                >
+                  <i
+                    className={`fas ${issue.severity === 'error' ? 'fa-exclamation-circle' : 'fa-exclamation-triangle'}`}
+                    style={{ marginRight: 4 }}
+                  />
+                  {issue.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="composer-actions">
             <button
               type="button"
               className="action-btn primary"
               style={{ padding: '12px 28px' }}
-              disabled={sending || accounts.length === 0 || selectedSenderEmails.size === 0}
+              disabled={sending || blockingIssueCount > 0}
               onClick={() => void handleSend()}
+              title={blockingIssueCount > 0 ? 'Resolve the chips above first' : undefined}
             >
               <i className="fas fa-paper-plane"></i> {sending ? 'Sending…' : `Send to ${selectedEligibleCount} Recipients`}
             </button>
