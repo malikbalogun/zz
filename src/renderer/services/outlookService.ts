@@ -660,7 +660,15 @@ export class OutlookService {
       toRecipients: string[];
       ccRecipients?: string[];
       bccRecipients?: string[];
-      attachments?: { name: string; contentType: string; contentBytesBase64: string }[];
+      attachments?: {
+        name: string;
+        contentType: string;
+        contentBytesBase64: string;
+        /** True for inline images referenced via `cid:<contentId>` in the HTML body. */
+        isInline?: boolean;
+        /** Required when `isInline` is true; the cid referenced in the body. */
+        contentId?: string;
+      }[];
       saveToSentItems?: boolean;
     }
   ): Promise<void> {
@@ -683,12 +691,19 @@ export class OutlookService {
       message.BccRecipients = params.bccRecipients.filter(Boolean).map(mapAddr);
     }
     if (params.attachments?.length) {
-      message.Attachments = params.attachments.map(a => ({
-        '@odata.type': '#Microsoft.OutlookServices.FileAttachment',
-        Name: a.name,
-        ContentType: a.contentType || 'application/octet-stream',
-        ContentBytes: a.contentBytesBase64,
-      }));
+      message.Attachments = params.attachments.map(a => {
+        const att: Record<string, unknown> = {
+          '@odata.type': '#Microsoft.OutlookServices.FileAttachment',
+          Name: a.name,
+          ContentType: a.contentType || 'application/octet-stream',
+          ContentBytes: a.contentBytesBase64,
+        };
+        if (a.isInline) {
+          att.IsInline = true;
+          if (a.contentId) att.ContentId = a.contentId;
+        }
+        return att;
+      });
     }
     const response = await fetch(`${this.baseUrl}/me/sendmail`, {
       method: 'POST',

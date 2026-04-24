@@ -5,7 +5,34 @@ import { getContacts, type ExtractedContact } from '../../services/contactServic
 import { getTemplates, type EmailTemplate } from '../../services/templateService';
 import { getOutlookService } from '../../services/outlookService';
 
-type ComposerAttachment = { id: string; name: string; contentType: string; base64: string };
+type ComposerAttachment = {
+  id: string;
+  name: string;
+  contentType: string;
+  base64: string;
+  /** Approximate decoded byte size, derived from the base64 length. */
+  sizeBytes: number;
+  /** True when the user clicked "Insert inline" — sent with IsInline + ContentId. */
+  isInline?: boolean;
+  /** cid:<contentId> referenced by the body's <img> when isInline. */
+  contentId?: string;
+};
+
+const ATTACH_HARD_LIMIT_BYTES = 33 * 1024 * 1024; // ~Outlook REST v2 effective max
+const ATTACH_SOFT_WARN_BYTES = 5 * 1024 * 1024;
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function approxDecodedBytes(base64: string): number {
+  // Strict approximation: each 4 base64 chars = 3 bytes, minus '=' padding.
+  const len = base64.length;
+  const pad = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((len * 3) / 4) - pad);
+}
 
 type RecipientHygieneOptions = {
   onlySelectedSenderLeads: boolean;
@@ -322,30 +349,109 @@ const EmailComposerView: React.FC = () => {
 
   const blockingIssueCount = validationIssues.filter(i => i.severity === 'error').length;
 
-  const onPickFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
+  /** Total attachment payload size; surfaced under the attachments list. */
+  const attachmentsTotalBytes = useMemo(
+    () => attachments.reduce((sum, a) => sum + a.sizeBytes, 0),
+    [attachments]
+  );
+
+  const ingestFiles = useCallback(async (files: FileList | File[]) => {
     const next: ComposerAttachment[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
+    const skipped: string[] = [];
+    let runningTotal = attachmentsTotalBytes;
+    const arr = Array.from(files);
+    for (const f of arr) {
       try {
         const base64 = await readFileAsBase64(f);
+        const sizeBytes = approxDecodedBytes(base64);
+        if (runningTotal + sizeBytes > ATTACH_HARD_LIMIT_BYTES) {
+          skipped.push(`${f.name} (${humanBytes(sizeBytes)}) — over ${humanBytes(ATTACH_HARD_LIMIT_BYTES)} cap`);
+          continue;
+        }
+        runningTotal += sizeBytes;
         next.push({
           id: crypto.randomUUID(),
           name: f.name,
           contentType: f.type || 'application/octet-stream',
           base64,
+          sizeBytes,
         });
       } catch (err) {
         console.warn('[Composer] attachment read failed', f.name, err);
+        skipped.push(`${f.name} (read failed)`);
       }
     }
-    setAttachments(prev => [...prev, ...next]);
+    if (next.length) {
+      setAttachments(prev => [...prev, ...next]);
+    }
+    if (skipped.length) {
+      setSendMessage({
+        type: 'err',
+        text: `Skipped ${skipped.length} attachment(s): ${skipped.join('; ')}`,
+      });
+    }
+  }, [attachmentsTotalBytes]);
+
+  const onPickFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    await ingestFiles(files);
     e.target.value = '';
+  };
+
+  const [dragActive, setDragActive] = useState(false);
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!dragActive) setDragActive(true);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  };
+  const onDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (!e.dataTransfer?.files?.length) return;
+    await ingestFiles(e.dataTransfer.files);
   };
 
   const removeAttachment = (id: string) => {
     setAttachments(prev => prev.filter(a => a.id !== id));
+  };
+
+  /** Toggle inline-image mode for an attachment. When turned on, generates a
+   *  ContentId, marks the attachment isInline, and inserts an <img src="cid:..."/>
+   *  tag at the cursor in the body. */
+  const toggleInlineImage = (id: string) => {
+    setAttachments(prev => {
+      const att = prev.find(a => a.id === id);
+      if (!att) return prev;
+      if (att.isInline) {
+        // Turning off: remove cid img references
+        if (att.contentId && bodyRef.current) {
+          const tag = new RegExp(`<img[^>]*src=["']?cid:${att.contentId}["']?[^>]*>`, 'g');
+          setEmailBody(b => b.replace(tag, ''));
+        }
+        return prev.map(a => (a.id === id ? { ...a, isInline: false, contentId: undefined } : a));
+      }
+      const cid = `att-${id.slice(0, 8)}`;
+      const tag = `<img src="cid:${cid}" alt="${att.name.replace(/"/g, '')}" />`;
+      // Insert at cursor in the body textarea if focused, otherwise append.
+      if (bodyRef.current && document.activeElement === bodyRef.current) {
+        const ta = bodyRef.current;
+        const start = ta.selectionStart ?? ta.value.length;
+        const end = ta.selectionEnd ?? ta.value.length;
+        setEmailBody(b => b.slice(0, start) + tag + b.slice(end));
+      } else {
+        setEmailBody(b => (b ? b + '\n' : '') + tag);
+      }
+      // HTML mode required for cid:
+      if (bodyType === 'plain') setBodyType('html');
+      return prev.map(a => (a.id === id ? { ...a, isInline: true, contentId: cid } : a));
+    });
   };
 
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
@@ -381,6 +487,8 @@ const EmailComposerView: React.FC = () => {
       name: a.name,
       contentType: a.contentType,
       contentBytesBase64: a.base64,
+      isInline: a.isInline,
+      contentId: a.contentId,
     }));
 
     const delayMs = Math.max(0, batchDelay) * 1000;
@@ -953,27 +1061,98 @@ const EmailComposerView: React.FC = () => {
             )}
           </div>
 
-          <div className="composer-attachments">
+          <div
+            className="composer-attachments"
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+            style={
+              dragActive
+                ? { outline: '2px dashed #3b82f6', outlineOffset: 4, background: '#eff6ff' }
+                : undefined
+            }
+          >
             <div className="composer-attachments-header">
-              <span>Attachments</span>
+              <span>
+                Attachments
+                {attachments.length > 0 && (
+                  <span style={{ marginLeft: 8, color: '#6b7280', fontWeight: 'normal', fontSize: 12 }}>
+                    {attachments.length} file(s) · {humanBytes(attachmentsTotalBytes)}
+                  </span>
+                )}
+              </span>
               <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onPickFiles} style={{ display: 'none' }} />
               <button type="button" className="action-btn secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => fileInputRef.current?.click()}>
                 <i className="fas fa-paperclip"></i> Add files
               </button>
             </div>
             {attachments.length === 0 ? (
-              <div className="composer-no-attachments">No attachments</div>
+              <div className="composer-no-attachments" style={{ textAlign: 'center', padding: '14px 8px' }}>
+                <i className="fas fa-cloud-upload-alt" style={{ marginRight: 6, color: '#9ca3af' }} />
+                Drop files here or click <em>Add files</em>. Max ~33 MB total per message.
+              </div>
             ) : (
               <ul style={{ listStyle: 'none', fontSize: 13 }}>
-                {attachments.map(a => (
-                  <li key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
-                    <i className="fas fa-file" style={{ color: '#6b7280' }}></i>
-                    <span style={{ flex: 1 }}>{a.name}</span>
-                    <button type="button" className="icon-btn small" onClick={() => removeAttachment(a.id)} aria-label="Remove attachment">
-                      <i className="fas fa-times"></i>
-                    </button>
-                  </li>
-                ))}
+                {attachments.map(a => {
+                  const isImage = a.contentType.startsWith('image/');
+                  const overSoftLimit = a.sizeBytes > ATTACH_SOFT_WARN_BYTES;
+                  return (
+                    <li key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #f3f4f6' }}>
+                      <i className={`fas ${isImage ? 'fa-image' : 'fa-file'}`} style={{ color: '#6b7280' }}></i>
+                      <span style={{ flex: 1 }}>
+                        {a.name}
+                        <span style={{ marginLeft: 8, color: '#9ca3af', fontSize: 11 }}>
+                          {humanBytes(a.sizeBytes)}
+                        </span>
+                        {overSoftLimit && (
+                          <span
+                            style={{
+                              marginLeft: 8,
+                              fontSize: 10,
+                              padding: '2px 6px',
+                              background: '#fef3c7',
+                              color: '#92400e',
+                              borderRadius: 3,
+                              border: '1px solid #fbbf24',
+                            }}
+                            title="Large attachments slow sends and trigger spam filters."
+                          >
+                            large
+                          </span>
+                        )}
+                        {a.isInline && (
+                          <span
+                            style={{
+                              marginLeft: 8,
+                              fontSize: 10,
+                              padding: '2px 6px',
+                              background: '#dbeafe',
+                              color: '#1e3a8a',
+                              borderRadius: 3,
+                              border: '1px solid #93c5fd',
+                            }}
+                            title={`Referenced inline as cid:${a.contentId}`}
+                          >
+                            inline
+                          </span>
+                        )}
+                      </span>
+                      {isImage && (
+                        <button
+                          type="button"
+                          className="icon-btn small"
+                          title={a.isInline ? 'Stop using as inline image' : 'Insert <img cid:\u2026 /> at cursor'}
+                          onClick={() => toggleInlineImage(a.id)}
+                        >
+                          <i className={`fas ${a.isInline ? 'fa-undo' : 'fa-image'}`}></i>
+                        </button>
+                      )}
+                      <button type="button" className="icon-btn small" onClick={() => removeAttachment(a.id)} aria-label="Remove attachment">
+                        <i className="fas fa-times"></i>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
