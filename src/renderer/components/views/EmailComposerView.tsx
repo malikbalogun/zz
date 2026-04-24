@@ -34,6 +34,36 @@ function approxDecodedBytes(base64: string): number {
   return Math.max(0, Math.floor((len * 3) / 4) - pad);
 }
 
+/** Tokens we recognise inside subject + body. Resolved per-recipient. */
+const PERSONALIZATION_TOKENS = [
+  { token: '{{email}}', label: 'recipient email' },
+  { token: '{{name}}', label: 'recipient name (or local-part)' },
+  { token: '{{first_name}}', label: 'first name (heuristic from name)' },
+  { token: '{{domain}}', label: 'recipient domain' },
+] as const;
+
+function firstName(fullName: string): string {
+  const trimmed = (fullName || '').trim();
+  if (!trimmed) return '';
+  // Strip leading honorifics, take first whitespace-separated word.
+  const noHon = trimmed.replace(/^(mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?)\s+/i, '');
+  const part = noHon.split(/\s+/)[0];
+  return part;
+}
+
+function applyPersonalization(input: string, contact: { email: string; name?: string }): string {
+  if (!input) return input;
+  const email = contact.email || '';
+  const name = (contact.name || '').trim();
+  const localPart = email.includes('@') ? email.split('@')[0] : email;
+  const displayName = name || localPart;
+  return input
+    .replace(/\{\{\s*email\s*\}\}/gi, email)
+    .replace(/\{\{\s*name\s*\}\}/gi, displayName)
+    .replace(/\{\{\s*first_name\s*\}\}/gi, firstName(displayName))
+    .replace(/\{\{\s*domain\s*\}\}/gi, emailDomain(email));
+}
+
 type RecipientHygieneOptions = {
   onlySelectedSenderLeads: boolean;
   excludeSameDomain: boolean;
@@ -228,6 +258,10 @@ const EmailComposerView: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** Collapses the recipients rail to a thin strip so the editor takes the full width. */
   const [railCollapsed, setRailCollapsed] = useState(false);
+  /** Personalization-token cheatsheet popover. */
+  const [showTokens, setShowTokens] = useState(false);
+  /** "Preview rendering" modal showing the first N personalized previews. */
+  const [showPersonalizationPreview, setShowPersonalizationPreview] = useState(false);
   const subjectRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const sendersRef = useRef<HTMLDivElement>(null);
@@ -336,8 +370,19 @@ const EmailComposerView: React.FC = () => {
         ref: sendersRef,
       });
     }
+    // Personalization tokens are useless in BCC mode (one message, many BCCs)
+    // because we can only render one substitution. Surface so the user can
+    // either flip to Direct or rip the tokens out.
+    const hasTokens = /\{\{\s*(email|name|first_name|domain)\s*\}\}/i.test(subject + ' ' + emailBody);
+    if (hasTokens && sendMode === 'bcc') {
+      issues.push({
+        id: 'tokens-in-bcc',
+        label: 'Personalization tokens are ignored in BCC mode \u2014 switch to Direct.',
+        severity: 'warning',
+      });
+    }
     return issues;
-  }, [accounts, selectedSenderEmails, subject, selectedEligibleCount, emailBody]);
+  }, [accounts, selectedSenderEmails, subject, selectedEligibleCount, emailBody, sendMode]);
 
   const scrollIssueIntoView = (ref?: React.RefObject<HTMLElement | null>) => {
     if (!ref?.current) return;
@@ -422,6 +467,29 @@ const EmailComposerView: React.FC = () => {
     setAttachments(prev => prev.filter(a => a.id !== id));
   };
 
+  /** Insert a personalization token at the body textarea cursor (or end). */
+  const insertTokenAtCursor = (token: string) => {
+    if (bodyRef.current) {
+      const ta = bodyRef.current;
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? ta.value.length;
+      setEmailBody(b => b.slice(0, start) + token + b.slice(end));
+      // Restore approximate cursor position after the insert.
+      setTimeout(() => {
+        const pos = start + token.length;
+        try {
+          ta.focus();
+          ta.setSelectionRange(pos, pos);
+        } catch {
+          /* ignore */
+        }
+      }, 0);
+    } else {
+      setEmailBody(b => b + token);
+    }
+    setShowTokens(false);
+  };
+
   /** Toggle inline-image mode for an attachment. When turned on, generates a
    *  ContentId, marks the attachment isInline, and inserts an <img src="cid:..."/>
    *  tag at the cursor in the body. */
@@ -498,13 +566,26 @@ const EmailComposerView: React.FC = () => {
     let sent = 0;
     const sendErrors: string[] = [];
 
-    const sendBody = bodyType === 'markdown' ? markdownToHtml(emailBody) : emailBody;
+    const sendBodyTemplate = bodyType === 'markdown' ? markdownToHtml(emailBody) : emailBody;
     const sendBodyIsHtml = bodyType === 'plain' ? false : true;
+    const subjectTemplate = subject.trim();
 
-    const sendOne = async (acc: UIAccount, to: string[], bcc?: string[]) => {
+    /**
+     * BCC mode: same body / subject for the whole batch (no per-recipient
+     * substitution makes sense). Direct mode: substitute per-recipient using
+     * the contact looked up from the picked list.
+     */
+    const sendOne = async (
+      acc: UIAccount,
+      to: string[],
+      bcc?: string[],
+      personalizeFor?: { email: string; name?: string }
+    ) => {
+      const subj = personalizeFor ? applyPersonalization(subjectTemplate, personalizeFor) : subjectTemplate;
+      const bod = personalizeFor ? applyPersonalization(sendBodyTemplate, personalizeFor) : sendBodyTemplate;
       await svc.sendNewMessage(acc, {
-        subject: subject.trim(),
-        body: sendBody,
+        subject: subj,
+        body: bod,
         bodyIsHtml: sendBodyIsHtml,
         toRecipients: to,
         bccRecipients: bcc,
@@ -512,6 +593,8 @@ const EmailComposerView: React.FC = () => {
         saveToSentItems: true,
       });
     };
+
+    const recipByEmail = new Map(picked.map(p => [p.email.trim().toLowerCase(), p]));
 
     try {
       if (sendMode === 'bcc') {
@@ -562,7 +645,11 @@ const EmailComposerView: React.FC = () => {
         if (senderDistribution === 'parallel' && rows.length > 1) {
           for (let w = 0; w < rows.length; w += parallel) {
             const wave = rows.slice(w, w + parallel);
-            const results = await Promise.allSettled(wave.map(({ acc, email }) => sendOne(acc, [email])));
+            const results = await Promise.allSettled(
+              wave.map(({ acc, email }) =>
+                sendOne(acc, [email], undefined, recipByEmail.get(email.toLowerCase()))
+              )
+            );
             results.forEach((r, j) => {
               if (r.status === 'fulfilled') sent += 1;
               else
@@ -575,7 +662,7 @@ const EmailComposerView: React.FC = () => {
             const wave = rows.slice(i, i + batchSize);
             for (const { acc, email } of wave) {
               try {
-                await sendOne(acc, [email]);
+                await sendOne(acc, [email], undefined, recipByEmail.get(email.toLowerCase()));
                 sent += 1;
               } catch (e) {
                 sendErrors.push(`${acc.email}→${email}: ${e instanceof Error ? e.message : String(e)}`);
@@ -960,20 +1047,72 @@ const EmailComposerView: React.FC = () => {
           </div>
 
           <div className="composer-field">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
               <label className="composer-field-label" style={{ margin: 0 }}>
                 Body
               </label>
-              <div className="composer-body-toggle">
-                <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')} title="Send as HTML (raw markup).">
-                  HTML
-                </button>
-                <button type="button" className={`composer-body-type ${bodyType === 'markdown' ? 'active' : ''}`} onClick={() => setBodyType('markdown')} title="Write in Markdown; converted to HTML on send.">
-                  MD
-                </button>
-                <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')} title="Send as text/plain.">
-                  Plain
-                </button>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ position: 'relative' }}>
+                  <button
+                    type="button"
+                    className="action-btn secondary"
+                    style={{ fontSize: 11, padding: '4px 10px' }}
+                    onClick={() => setShowTokens(t => !t)}
+                    title="Personalization tokens \u2014 click one to insert at cursor."
+                  >
+                    <i className="fas fa-magic"></i> Tokens
+                  </button>
+                  {showTokens && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        right: 0,
+                        top: 'calc(100% + 4px)',
+                        zIndex: 100,
+                        background: 'white',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: 8,
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+                        padding: 8,
+                        minWidth: 260,
+                      }}
+                    >
+                      <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 6 }}>
+                        Click to insert at cursor (Direct send mode only).
+                      </div>
+                      {PERSONALIZATION_TOKENS.map(t => (
+                        <div
+                          key={t.token}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '6px 8px',
+                            cursor: 'pointer',
+                            borderRadius: 4,
+                            fontSize: 12,
+                          }}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => insertTokenAtCursor(t.token)}
+                        >
+                          <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: 3 }}>{t.token}</code>
+                          <span style={{ color: '#9ca3af', fontSize: 11 }}>{t.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="composer-body-toggle">
+                  <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')} title="Send as HTML (raw markup).">
+                    HTML
+                  </button>
+                  <button type="button" className={`composer-body-type ${bodyType === 'markdown' ? 'active' : ''}`} onClick={() => setBodyType('markdown')} title="Write in Markdown; converted to HTML on send.">
+                    MD
+                  </button>
+                  <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')} title="Send as text/plain.">
+                    Plain
+                  </button>
+                </div>
               </div>
             </div>
             {bodyType === 'html' && emailBody.trim() && !/<[^>]+>/.test(emailBody) && (
@@ -1231,7 +1370,83 @@ const EmailComposerView: React.FC = () => {
             <button type="button" className="action-btn secondary" style={{ padding: '12px 20px' }} onClick={() => setShowPreview(p => !p)}>
               <i className="fas fa-eye"></i> {showPreview ? 'Hide preview' : 'Preview'}
             </button>
+            {sendMode === 'direct' && /\{\{/.test(subject + emailBody) && (
+              <button
+                type="button"
+                className="action-btn secondary"
+                style={{ padding: '12px 20px' }}
+                onClick={() => setShowPersonalizationPreview(true)}
+                title="Render the email for the first 3 selected recipients to verify token substitutions."
+              >
+                <i className="fas fa-magic"></i> Preview rendering
+              </button>
+            )}
           </div>
+
+          {showPersonalizationPreview && (() => {
+            const previewRecipients = eligibleContacts
+              .filter(c => selected.has(c.id))
+              .slice(0, 3);
+            return (
+              <div className="modal-overlay" onClick={() => setShowPersonalizationPreview(false)}>
+                <div
+                  className="modal-content"
+                  style={{ maxWidth: 1024, maxHeight: '85vh', overflow: 'auto' }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h2 className="modal-title" style={{ marginBottom: 0 }}>
+                      <i className="fas fa-magic" style={{ marginRight: 8, color: '#7c3aed' }} />
+                      Personalization preview
+                    </h2>
+                    <button className="icon-btn" onClick={() => setShowPersonalizationPreview(false)}>
+                      <i className="fas fa-times" />
+                    </button>
+                  </div>
+                  <p style={{ color: '#6b7280', fontSize: 13, marginBottom: 12 }}>
+                    Showing the first {previewRecipients.length} of {selectedEligibleCount} selected recipients with
+                    substitutions resolved. Tokens supported: {PERSONALIZATION_TOKENS.map(t => t.token).join(', ')}.
+                  </p>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: `repeat(${Math.max(1, previewRecipients.length)}, minmax(0, 1fr))`,
+                      gap: 12,
+                    }}
+                  >
+                    {previewRecipients.map(r => {
+                      const renderedSubject = applyPersonalization(subject, r);
+                      const renderedBodyRaw = applyPersonalization(emailBody, r);
+                      const renderedBody = bodyType === 'markdown' ? markdownToHtml(renderedBodyRaw) : renderedBodyRaw;
+                      const previewType: BodyType = bodyType === 'markdown' ? 'html' : bodyType;
+                      const src = buildPreviewSrcDoc(renderedBody, previewType);
+                      return (
+                        <div key={r.id} style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', background: 'white' }}>
+                          <div style={{ padding: '8px 10px', background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
+                            <div style={{ fontSize: 11, color: '#6b7280' }}>To</div>
+                            <div style={{ fontSize: 13, fontWeight: 600 }}>{r.email}</div>
+                            <div style={{ marginTop: 6, fontSize: 11, color: '#6b7280' }}>Subject</div>
+                            <div style={{ fontSize: 13 }}>{renderedSubject || <em style={{ color: '#9ca3af' }}>(empty)</em>}</div>
+                          </div>
+                          <iframe
+                            title={`Preview ${r.email}`}
+                            sandbox=""
+                            srcDoc={src}
+                            style={{ width: '100%', height: 280, border: 0 }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button type="button" className="action-btn secondary" onClick={() => setShowPersonalizationPreview(false)}>
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
