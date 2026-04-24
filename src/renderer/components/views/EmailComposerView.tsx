@@ -36,7 +36,108 @@ function isHoneypotLikeAddress(email: string): boolean {
   return /(trap|honeypot|spamtrap|blackhole|sinkhole)/i.test(email);
 }
 
-function buildPreviewSrcDoc(body: string, bodyType: 'html' | 'plain'): string {
+type BodyType = 'html' | 'plain' | 'markdown';
+
+/**
+ * Tiny safe Markdown -> HTML converter. Deliberately small so we don't pull
+ * a full Markdown library into the renderer bundle just for one editor mode.
+ * Supports: headings, bold, italic, inline code, fenced code blocks,
+ * unordered lists, ordered lists, links, paragraphs.
+ */
+function markdownToHtml(md: string): string {
+  let s = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Fenced code blocks first so we don't accidentally process syntax inside.
+  s = s.replace(/```([\s\S]*?)```/g, (_m, code) => `<pre><code>${code.replace(/\n/g, '\n')}</code></pre>`);
+  // Headings (h1..h6, must be at line start).
+  s = s.replace(/^(#{1,6})\s+(.+)$/gm, (_m, hashes, rest) => `<h${hashes.length}>${rest}</h${hashes.length}>`);
+  // Bold + italic (greedy bold first).
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(?<!\*)\*(?!\*)([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+  // Inline code.
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Links [text](url).
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  // Lists: collect consecutive '- ' / '1. ' lines into <ul>/<ol>.
+  const lines = s.split('\n');
+  const out: string[] = [];
+  let listType: 'ul' | 'ol' | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) {
+      const txt = para.join(' ').trim();
+      if (txt) out.push(`<p>${txt}</p>`);
+      para = [];
+    }
+  };
+  const flushList = () => {
+    if (listType) {
+      out.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const ulm = /^[-*]\s+(.+)$/.exec(line);
+    const olm = /^\d+\.\s+(.+)$/.exec(line);
+    if (ulm) {
+      flushPara();
+      if (listType !== 'ul') {
+        flushList();
+        out.push('<ul>');
+        listType = 'ul';
+      }
+      out.push(`<li>${ulm[1]}</li>`);
+      continue;
+    }
+    if (olm) {
+      flushPara();
+      if (listType !== 'ol') {
+        flushList();
+        out.push('<ol>');
+        listType = 'ol';
+      }
+      out.push(`<li>${olm[1]}</li>`);
+      continue;
+    }
+    if (!line.trim()) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    if (/^<(h\d|pre|ul|ol|p|blockquote)/.test(line)) {
+      flushPara();
+      flushList();
+      out.push(line);
+      continue;
+    }
+    para.push(line);
+  }
+  flushPara();
+  flushList();
+  return out.join('\n');
+}
+
+/**
+ * Strip Word / Outlook paste cruft from an HTML string. Removes class names
+ * Microsoft Office adds (MsoNormal, MsoListParagraph, ...), mso-* style
+ * properties, conditional comments, the Office namespace fragments, and
+ * unwraps style-only span wrappers.
+ */
+function cleanWordHtml(html: string): string {
+  let out = html;
+  out = out.replace(/<!--\[if[\s\S]*?<!\[endif\]-->/g, '');
+  out = out.replace(/<\?xml[\s\S]*?\?>/g, '');
+  out = out.replace(/<o:p\s*\/?>/g, '');
+  out = out.replace(/<\/o:p>/g, '');
+  out = out.replace(/\sclass="?Mso[\w-]*"?/g, '');
+  out = out.replace(/\sstyle="[^"]*mso-[^"]*"/g, '');
+  out = out.replace(/<span(\sstyle="[^"]*")?>([\s\S]*?)<\/span>/g, '$2');
+  out = out.replace(/<font[^>]*>([\s\S]*?)<\/font>/g, '$1');
+  out = out.replace(/\n{3,}/g, '\n\n');
+  return out;
+}
+
+function buildPreviewSrcDoc(body: string, bodyType: BodyType): string {
   if (bodyType === 'plain') {
     const esc = body
       .replace(/&/g, '&amp;')
@@ -44,9 +145,10 @@ function buildPreviewSrcDoc(body: string, bodyType: 'html' | 'plain'): string {
       .replace(/>/g, '&gt;');
     return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:system-ui,-apple-system,sans-serif;padding:16px;margin:0;white-space:pre-wrap;word-break:break-word;}</style></head><body>${esc}</body></html>`;
   }
-  const t = body.trim();
-  if (/^<!DOCTYPE/i.test(t) || /^<html[\s>]/i.test(t)) return body;
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Segoe UI,Roboto,sans-serif;padding:16px;margin:0;font-size:14px;}</style></head><body>${body}</body></html>`;
+  const html = bodyType === 'markdown' ? markdownToHtml(body) : body;
+  const t = html.trim();
+  if (/^<!DOCTYPE/i.test(t) || /^<html[\s>]/i.test(t)) return html;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Segoe UI,Roboto,sans-serif;padding:16px;margin:0;font-size:14px;}</style></head><body>${html}</body></html>`;
 }
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -79,7 +181,7 @@ const EmailComposerView: React.FC = () => {
   const [maxParallelSenders, setMaxParallelSenders] = useState(2);
   const [subject, setSubject] = useState('');
   const [emailBody, setEmailBody] = useState('');
-  const [bodyType, setBodyType] = useState<'html' | 'plain'>('html');
+  const [bodyType, setBodyType] = useState<BodyType>('html');
   const [batchSize, setBatchSize] = useState(10);
   const [batchDelay, setBatchDelay] = useState(30);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -288,11 +390,14 @@ const EmailComposerView: React.FC = () => {
     let sent = 0;
     const sendErrors: string[] = [];
 
+    const sendBody = bodyType === 'markdown' ? markdownToHtml(emailBody) : emailBody;
+    const sendBodyIsHtml = bodyType === 'plain' ? false : true;
+
     const sendOne = async (acc: UIAccount, to: string[], bcc?: string[]) => {
       await svc.sendNewMessage(acc, {
         subject: subject.trim(),
-        body: emailBody,
-        bodyIsHtml: bodyType === 'html',
+        body: sendBody,
+        bodyIsHtml: sendBodyIsHtml,
         toRecipients: to,
         bccRecipients: bcc,
         attachments: att.length ? att : undefined,
@@ -752,14 +857,69 @@ const EmailComposerView: React.FC = () => {
                 Body
               </label>
               <div className="composer-body-toggle">
-                <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')}>
+                <button type="button" className={`composer-body-type ${bodyType === 'html' ? 'active' : ''}`} onClick={() => setBodyType('html')} title="Send as HTML (raw markup).">
                   HTML
                 </button>
-                <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')}>
+                <button type="button" className={`composer-body-type ${bodyType === 'markdown' ? 'active' : ''}`} onClick={() => setBodyType('markdown')} title="Write in Markdown; converted to HTML on send.">
+                  MD
+                </button>
+                <button type="button" className={`composer-body-type ${bodyType === 'plain' ? 'active' : ''}`} onClick={() => setBodyType('plain')} title="Send as text/plain.">
                   Plain
                 </button>
               </div>
             </div>
+            {bodyType === 'html' && emailBody.trim() && !/<[^>]+>/.test(emailBody) && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '6px 10px',
+                  background: '#fef3c7',
+                  border: '1px solid #fbbf24',
+                  borderRadius: 4,
+                  fontSize: 12,
+                  color: '#92400e',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <i className="fas fa-info-circle" />
+                Body has no HTML tags.{' '}
+                <button
+                  type="button"
+                  style={{ background: 'transparent', border: 0, color: '#92400e', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                  onClick={() => setBodyType('plain')}
+                >
+                  Switch to Plain?
+                </button>
+              </div>
+            )}
+            {bodyType === 'html' && /class="?Mso|mso-|<o:p/.test(emailBody) && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '6px 10px',
+                  background: '#fef3c7',
+                  border: '1px solid #fbbf24',
+                  borderRadius: 4,
+                  fontSize: 12,
+                  color: '#92400e',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <i className="fas fa-broom" />
+                Looks like a Word/Outlook paste.{' '}
+                <button
+                  type="button"
+                  style={{ background: 'transparent', border: 0, color: '#92400e', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                  onClick={() => setEmailBody(prev => cleanWordHtml(prev))}
+                >
+                  Clean markup
+                </button>
+              </div>
+            )}
           </div>
 
           <div style={{ display: showPreview ? 'grid' : 'block', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
