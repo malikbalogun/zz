@@ -1,6 +1,7 @@
 import { getSettings } from './settingsService';
 import { getPanels } from './panelService';
 import { syncPanelAccounts } from './accountSyncService';
+import { getReconnectAttemptState } from '../../shared/websocketReconnect';
 
 export type WebSocketStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
 
@@ -175,14 +176,16 @@ class WebSocketManager {
     const conn = this.connections.get(panelId);
     if (!conn) return;
 
-    const wasStable =
-      typeof conn.connectedAt === 'number' && Date.now() - conn.connectedAt >= this.stableConnectionResetMs;
-    const attemptBase = wasStable ? 0 : conn.reconnectAttempts;
+    const { attemptBase, nextAttempt } = getReconnectAttemptState(
+      conn.reconnectAttempts,
+      conn.connectedAt,
+      Date.now(),
+      this.stableConnectionResetMs
+    );
 
     // If closure was abnormal (not intentional) and we haven't exceeded max attempts, schedule reconnect
     if (event.code !== 1000 && attemptBase < this.maxReconnectAttempts) {
       conn.status = 'reconnecting';
-      const nextAttempt = attemptBase + 1;
       const delay = this.baseReconnectDelay * Math.pow(1.5, attemptBase);
       console.log(`Scheduling reconnect for panel ${panelId} in ${delay}ms (attempt ${nextAttempt})`);
       const timer = setTimeout(() => {
