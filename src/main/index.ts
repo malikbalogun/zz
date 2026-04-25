@@ -5,7 +5,14 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies, cookiesToNetscape, type ParsedCookie } from '../shared/cookieFormat';
+import {
+  parseCookiePaste,
+  filterMicrosoftRelatedCookies,
+  cookiesToNetscape,
+  cookiesToBrowserImportJson,
+  cookiesToConsoleScript,
+  type ParsedCookie,
+} from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -3030,6 +3037,8 @@ function setupIpcHandlers() {
       const strongAfter = countStrongMicrosoftSessionCookies(msCookies);
 
       const netscape = cookiesToNetscape(msCookies);
+      const browserImportJson = cookiesToBrowserImportJson(msCookies);
+      const consoleScript = cookiesToConsoleScript(msCookies);
       appendOutlookDebug(
         `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter})`
       );
@@ -3037,9 +3046,12 @@ function setupIpcHandlers() {
         success: true,
         count: msCookies.length,
         strongCount: strongAfter,
+        quality: strongAfter > 0 ? 'strong' : 'weak',
         weak: strongAfter === 0,
         email: account.email,
         netscape,
+        browserImportJson,
+        consoleScript,
       };
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -4040,7 +4052,12 @@ function setupIpcHandlers() {
     'files:saveTextWithDialog',
     async (
       _,
-      opts: { defaultFilename: string; content: string; filters?: { name: string; extensions: string[] }[] }
+      opts: {
+        defaultFilename: string;
+        content: string;
+        filters?: { name: string; extensions: string[] }[];
+        companionFiles?: { filename: string; content: string }[];
+      }
     ) => {
       const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
       const dlgOpts = {
@@ -4055,7 +4072,16 @@ function setupIpcHandlers() {
         return { ok: false as const };
       }
       await fs.writeFile(result.filePath, opts.content, 'utf-8');
-      return { ok: true as const, path: result.filePath };
+      const companionPaths: string[] = [];
+      const parentDir = path.dirname(result.filePath);
+      for (const companion of opts.companionFiles || []) {
+        const filename = String(companion.filename || '').trim();
+        if (!filename) continue;
+        const companionPath = path.join(parentDir, filename);
+        await fs.writeFile(companionPath, companion.content, 'utf-8');
+        companionPaths.push(companionPath);
+      }
+      return { ok: true as const, path: result.filePath, companionPaths };
     }
   );
 

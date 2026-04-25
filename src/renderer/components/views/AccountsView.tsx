@@ -332,12 +332,34 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        const quality = result.quality || 'unknown';
+        const quality = result.quality || (result.weak ? 'weak' : 'strong');
         const weakHint =
           quality === 'weak'
             ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
             : '';
-        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
+        let browserJsonNote = '';
+        if (result.browserImportJsonPath) {
+          browserJsonNote =
+            `\n\nBrowser import JSON saved to: ${result.browserImportJsonPath}` +
+            '\nUse that file with a Chromium cookie importer/EditThisCookie to restore the full session, including HttpOnly cookies.';
+        } else if (result.browserImportJson) {
+          try {
+            await navigator.clipboard.writeText(result.browserImportJson);
+            browserJsonNote =
+              '\n\nBrowser import JSON copied to clipboard. Paste it into a Chromium cookie importer/EditThisCookie to restore the full session, including HttpOnly cookies.';
+          } catch {
+            browserJsonNote =
+              '\n\nBrowser import JSON was generated but could not be copied automatically.';
+          }
+        }
+        const consoleNote = result.consoleScriptPath
+          ? `\n\nDevTools console helper saved to: ${result.consoleScriptPath}\nIt only restores non-HttpOnly cookies on the current matching Microsoft domain.`
+          : result.consoleScript
+            ? '\n\nA DevTools console helper was also generated, but it only restores non-HttpOnly cookies on the current matching Microsoft domain.'
+            : '';
+        alert(
+          `Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}${browserJsonNote}${consoleNote}`
+        );
       }
     } catch (error) {
       alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);

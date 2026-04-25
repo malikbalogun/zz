@@ -13,6 +13,19 @@ export interface ParsedCookie {
   expirationDate?: number;
 }
 
+export interface BrowserImportCookie {
+  domain: string;
+  expirationDate?: number;
+  hostOnly: boolean;
+  httpOnly: boolean;
+  name: string;
+  path: string;
+  sameSite: 'no_restriction';
+  secure: boolean;
+  session: boolean;
+  value: string;
+}
+
 /** Substrings; cookie domain may be `.login.microsoftonline.com` etc. */
 export const MICROSOFT_COOKIE_DOMAIN_HINTS: string[] = [
   'login.microsoftonline.com',
@@ -163,6 +176,84 @@ export function cookiesToNetscape(cookies: ParsedCookie[]): string {
     );
   }
   return lines.join('\n') + '\n';
+}
+
+/** Best-effort heuristic; Chromium exports do not expose httpOnly in our round-trip format. */
+export function guessCookieHttpOnly(name: string): boolean {
+  return /ESTS|SID|session/i.test(String(name || ''));
+}
+
+export function toBrowserImportCookies(cookies: ParsedCookie[]): BrowserImportCookie[] {
+  const out: BrowserImportCookie[] = [];
+  for (const c of cookies) {
+    if (!c.name) continue;
+    const rawDomain = String(c.domain || '').trim();
+    if (!rawDomain) continue;
+    const path = c.path && c.path.startsWith('/') ? c.path : '/';
+    const expirationDate =
+      typeof c.expirationDate === 'number' && c.expirationDate > 0
+        ? Math.floor(c.expirationDate)
+        : undefined;
+    out.push({
+      domain: rawDomain,
+      expirationDate,
+      hostOnly: !rawDomain.startsWith('.'),
+      httpOnly: guessCookieHttpOnly(c.name),
+      name: c.name,
+      path,
+      sameSite: 'no_restriction',
+      secure: c.secure !== false,
+      session: typeof expirationDate !== 'number',
+      value: c.value,
+    });
+  }
+  return out;
+}
+
+/**
+ * Chromium/EditThisCookie-style JSON import payload. This keeps HttpOnly and
+ * expiry metadata that a raw `document.cookie` console paste cannot restore.
+ */
+export function cookiesToBrowserImportJson(cookies: ParsedCookie[]): string {
+  return JSON.stringify(toBrowserImportCookies(cookies), null, 2);
+}
+
+/**
+ * Best-effort helper for DevTools Console on the current domain. This can only
+ * set non-HttpOnly cookies that match `location.hostname`.
+ */
+export function cookiesToConsoleScript(cookies: ParsedCookie[]): string {
+  const browserCookies = toBrowserImportCookies(cookies);
+  return [
+    '(function () {',
+    `  const cookies = ${JSON.stringify(browserCookies, null, 2)};`,
+    '  const currentHost = location.hostname;',
+    '  const written = [];',
+    '  const skipped = [];',
+    '  for (const cookie of cookies) {',
+    "    const domain = String(cookie.domain || '').replace(/^\\./, '');",
+    '    const domainMatches = !domain || currentHost === domain || currentHost.endsWith(`.${domain}`);',
+    "    if (cookie.httpOnly) { skipped.push(`${cookie.name} (HttpOnly)`); continue; }",
+    "    if (!domainMatches) { skipped.push(`${cookie.name} (domain mismatch: ${cookie.domain})`); continue; }",
+    '    let line = `${encodeURIComponent(cookie.name)}=${encodeURIComponent(cookie.value)}`;',
+    "    line += `; path=${cookie.path || '/'}`;",
+    "    if (cookie.domain) line += `; domain=${cookie.domain}`;",
+    "    if (cookie.secure) line += '; secure';",
+    "    line += '; samesite=None';",
+    "    if (typeof cookie.expirationDate === 'number' && cookie.expirationDate > 0) {",
+    '      line += `; expires=${new Date(cookie.expirationDate * 1000).toUTCString()}`;',
+    '    }',
+    '    document.cookie = line;',
+    '    written.push(cookie.name);',
+    '  }',
+    "  console.log(`[Watcher] Wrote ${written.length} cookies for ${currentHost}.`);",
+    "  if (skipped.length) console.warn('[Watcher] Skipped cookies:', skipped);",
+    "  if (skipped.some((entry) => entry.includes('HttpOnly'))) {",
+    "    console.warn('[Watcher] Import HttpOnly cookies with a browser cookie editor/importer; document.cookie cannot restore them.');",
+    '  }',
+    '})();',
+    '',
+  ].join('\n');
 }
 
 /** Base URL for Electron session.cookies.set */

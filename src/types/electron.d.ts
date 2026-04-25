@@ -14,18 +14,24 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
-     * Export the Microsoft OWA session cookies for a token-typed account as a
-     * Netscape HTTP Cookie File string. The returned string is round-tripable
-     * through the existing cookie-import path.
+     * Export the Microsoft OWA session cookies for a token-typed account in
+     * multiple formats:
+     * - Netscape text for round-tripping back into Watcher/Add Account
+     * - Browser import JSON for Chrome extensions / cookie editors
+     * - Console helper script for best-effort non-HttpOnly seeding
      */
     exportOwaCookies: (
       accountId: string
     ) => Promise<{
       success: boolean;
       count?: number;
-      strongAuthCount?: number;
+      strongCount?: number;
+      weak?: boolean;
+      quality?: 'strong' | 'weak';
       email?: string;
       netscape?: string;
+      browserImportJson?: string;
+      consoleScript?: string;
       error?: string;
     }>;
     /**
@@ -231,6 +237,10 @@ export interface ElectronAPI {
       content: string;
       filters?: { name: string; extensions: string[] }[];
     }) => Promise<{ ok: true; path: string } | { ok: false }>;
+    saveText: (opts: {
+      path: string;
+      content: string;
+    }) => Promise<{ ok: true; path: string } | { ok: false; error?: string }>;
   };
 }
 

