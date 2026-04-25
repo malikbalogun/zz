@@ -11,6 +11,11 @@ export interface ParsedCookie {
   secure?: boolean;
   /** Unix seconds */
   expirationDate?: number;
+  /** Best-effort metadata; carried through when known so downstream
+   *  formatters (Cookie-Editor JSON, browser console snippet) can decide
+   *  whether a cookie can actually be set from page JavaScript. */
+  httpOnly?: boolean;
+  sameSite?: 'no_restriction' | 'lax' | 'strict' | 'unspecified';
 }
 
 /** Substrings; cookie domain may be `.login.microsoftonline.com` etc. */
@@ -49,13 +54,31 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
               ? ((o as { expires: number }).expires > 1e12 ? Math.floor((o as { expires: number }).expires / 1000)
                   : (o as { expires: number }).expires)
               : undefined;
+        const httpOnly =
+          typeof o.httpOnly === 'boolean'
+            ? (o.httpOnly as boolean)
+            : typeof o.HttpOnly === 'boolean'
+              ? (o.HttpOnly as boolean)
+              : undefined;
+        const sameSiteRaw = String(
+          (o as { sameSite?: unknown }).sameSite ?? (o as { SameSite?: unknown }).SameSite ?? ''
+        )
+          .trim()
+          .toLowerCase();
+        let sameSite: ParsedCookie['sameSite'] | undefined;
+        if (sameSiteRaw === 'no_restriction' || sameSiteRaw === 'none') sameSite = 'no_restriction';
+        else if (sameSiteRaw === 'lax') sameSite = 'lax';
+        else if (sameSiteRaw === 'strict') sameSite = 'strict';
+        else if (sameSiteRaw === 'unspecified' || sameSiteRaw === '') sameSite = undefined;
         out.push({
           name,
           value,
           domain: domainRaw != null ? String(domainRaw).trim() : undefined,
           path: pathRaw != null ? String(pathRaw).trim() : '/',
-          secure: !!(o.secure ?? o.Secure ?? o.httpOnly),
+          secure: !!(o.secure ?? o.Secure),
           expirationDate: exp,
+          httpOnly,
+          sameSite,
         });
       }
       return out;
@@ -171,4 +194,164 @@ export function cookieToSetUrl(c: ParsedCookie): string {
   if (!host) return 'https://outlook.office.com/';
   const proto = c.secure === false ? 'http' : 'https';
   return `${proto}://${host}/`;
+}
+
+/**
+ * Pick the best origin to use as the destination tab where these cookies
+ * should be installed before reloading. We prefer outlook.office.com because
+ * `document.cookie` cannot set cookies on a different registrable domain;
+ * fall back to login.microsoftonline.com if no Outlook cookies are present.
+ */
+export function pickPrimaryCookieOrigin(cookies: ParsedCookie[]): string {
+  const hosts = new Set(
+    cookies
+      .map((c) => (c.domain || '').toLowerCase().replace(/^\./, '').trim())
+      .filter(Boolean)
+  );
+  if ([...hosts].some((h) => h.endsWith('outlook.office.com') || h.endsWith('outlook.office365.com'))) {
+    return 'https://outlook.office.com/mail/inbox';
+  }
+  if ([...hosts].some((h) => h.endsWith('outlook.cloud.microsoft'))) {
+    return 'https://outlook.cloud.microsoft/mail/inbox';
+  }
+  if ([...hosts].some((h) => h.endsWith('office.com'))) {
+    return 'https://office.com/';
+  }
+  if ([...hosts].some((h) => h.endsWith('login.microsoftonline.com'))) {
+    return 'https://login.microsoftonline.com/';
+  }
+  return 'https://outlook.office.com/mail/inbox';
+}
+
+/**
+ * Cookie-Editor / EditThisCookie compatible JSON. Both extensions accept the
+ * same array-of-objects shape; this is the most portable format for "import
+ * cookies into a browser tab" workflows.
+ *
+ * The output is a stable, pretty-printed JSON array safe to copy/paste.
+ */
+export interface CookieEditorEntry {
+  domain: string;
+  expirationDate?: number;
+  hostOnly: boolean;
+  httpOnly: boolean;
+  name: string;
+  path: string;
+  sameSite: 'no_restriction' | 'lax' | 'strict' | 'unspecified';
+  secure: boolean;
+  session: boolean;
+  storeId: string;
+  value: string;
+}
+
+export function cookiesToCookieEditorJson(cookies: ParsedCookie[]): string {
+  const entries: CookieEditorEntry[] = [];
+  for (const c of cookies) {
+    if (!c.name) continue;
+    const rawDomain = (c.domain || '').trim();
+    if (!rawDomain) continue;
+    const hostOnly = !rawDomain.startsWith('.');
+    const expirationDate =
+      c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : undefined;
+    entries.push({
+      domain: rawDomain,
+      ...(expirationDate ? { expirationDate } : {}),
+      hostOnly,
+      httpOnly: c.httpOnly ?? false,
+      name: c.name,
+      path: c.path && c.path.startsWith('/') ? c.path : '/',
+      sameSite: c.sameSite ?? 'no_restriction',
+      secure: c.secure !== false,
+      session: !expirationDate,
+      storeId: '0',
+      value: c.value,
+    });
+  }
+  return JSON.stringify(entries, null, 2);
+}
+
+/**
+ * A self-contained snippet you can paste into a normal browser DevTools
+ * console (while on outlook.office.com or login.microsoftonline.com) that
+ * sets every cookie this script can legally touch and then reloads.
+ *
+ * Caveats — these are the same caveats as Cookie-Editor / EditThisCookie:
+ *   - HttpOnly cookies cannot be set from page JavaScript. They are listed
+ *     in a comment for completeness but skipped at runtime.
+ *   - Cookies bound to a different registrable domain than the current page
+ *     are also skipped (Chrome/Firefox enforce this, not us).
+ *   - The snippet runs synchronously and finishes with `location.reload()`.
+ *
+ * Returns a string starting with `// Watcher OWA cookie installer` so the
+ * UI can label it clearly.
+ */
+export function cookiesToBrowserConsoleSnippet(
+  cookies: ParsedCookie[],
+  opts: { email?: string; reload?: boolean } = {}
+): string {
+  const settable: ParsedCookie[] = [];
+  const skippedHttpOnly: string[] = [];
+  for (const c of cookies) {
+    if (!c.name) continue;
+    if (c.httpOnly) {
+      skippedHttpOnly.push(c.name);
+      continue;
+    }
+    if (!(c.domain || '').trim()) continue;
+    settable.push(c);
+  }
+
+  const reload = opts.reload !== false;
+  const emailComment = opts.email ? ` for ${opts.email}` : '';
+  const httpOnlyComment = skippedHttpOnly.length
+    ? `// NOTE: ${skippedHttpOnly.length} HttpOnly cookies cannot be installed from\n` +
+      '//       this snippet (browsers block document.cookie writes for them).\n' +
+      '//       Use the Cookie-Editor / EditThisCookie extension with the JSON\n' +
+      `//       export to install them: ${skippedHttpOnly.slice(0, 8).join(', ')}` +
+      (skippedHttpOnly.length > 8 ? ', ...' : '') +
+      '\n'
+    : '';
+
+  const payload = settable.map((c) => {
+    const domainAttr =
+      (c.domain || '').startsWith('.') ? c.domain : '.' + (c.domain || '').replace(/^\./, '');
+    return {
+      n: c.name,
+      v: c.value,
+      d: domainAttr,
+      p: c.path && c.path.startsWith('/') ? c.path : '/',
+      s: c.secure !== false,
+      e: c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : 0,
+    };
+  });
+
+  const lines: string[] = [];
+  lines.push('// Watcher OWA cookie installer' + emailComment);
+  lines.push('// Paste this into the DevTools console of an https://outlook.office.com tab,');
+  lines.push('// then refresh. HttpOnly cookies cannot be installed this way; if sign-in still');
+  lines.push('// fails, use the Cookie-Editor browser extension with the JSON export instead.');
+  if (httpOnlyComment) lines.push(httpOnlyComment.trimEnd());
+  lines.push('(function () {');
+  lines.push('  var cookies = ' + JSON.stringify(payload) + ';');
+  lines.push('  var installed = 0, skipped = 0;');
+  lines.push('  var pageHost = location.hostname.toLowerCase();');
+  lines.push('  function regDom(h){ h = (h||"").replace(/^\\./, "").toLowerCase(); if(!h) return ""; var p = h.split("."); return p.slice(-2).join("."); }');
+  lines.push('  var pageReg = regDom(pageHost);');
+  lines.push('  for (var i = 0; i < cookies.length; i++) {');
+  lines.push('    var c = cookies[i];');
+  lines.push('    var cookieReg = regDom(c.d);');
+  lines.push('    if (cookieReg && pageReg && cookieReg !== pageReg) { skipped++; continue; }');
+  lines.push('    var parts = [c.n + "=" + c.v, "path=" + (c.p || "/")];');
+  lines.push('    if (c.d) parts.push("domain=" + c.d);');
+  lines.push('    if (c.s) parts.push("secure");');
+  lines.push('    parts.push("samesite=None");');
+  lines.push('    if (c.e) parts.push("expires=" + new Date(c.e * 1000).toUTCString());');
+  lines.push('    try { document.cookie = parts.join("; "); installed++; } catch (e) { skipped++; }');
+  lines.push('  }');
+  lines.push('  console.log("[Watcher] Installed " + installed + " cookies, skipped " + skipped + " (cross-domain or HttpOnly).");');
+  if (reload) {
+    lines.push('  setTimeout(function () { location.reload(); }, 250);');
+  }
+  lines.push('})();');
+  return lines.join('\n') + '\n';
 }

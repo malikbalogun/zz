@@ -5,7 +5,15 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies, cookiesToNetscape, type ParsedCookie } from '../shared/cookieFormat';
+import {
+  parseCookiePaste,
+  filterMicrosoftRelatedCookies,
+  cookiesToNetscape,
+  cookiesToCookieEditorJson,
+  cookiesToBrowserConsoleSnippet,
+  pickPrimaryCookieOrigin,
+  type ParsedCookie,
+} from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -2817,7 +2825,7 @@ function setupIpcHandlers() {
       });
       let autoHealInFlight = false;
       const AUTO_HEAL_COOLDOWN_MS = 30000;
-      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
+      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, _frameProcessId, _frameRoutingId) => {
         try {
           const txt = await outlookWindow.webContents.executeJavaScript(`
             (() => {
@@ -2934,21 +2942,30 @@ function setupIpcHandlers() {
       const partitionName = `persist:outlook-${accountId}`;
       const owaSession = session.fromPartition(partitionName);
 
-      const readMicrosoftCookies = async () => {
+      const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
         const all = await owaSession.cookies.get({});
-        const parsed = all.map((c) => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path || '/',
-          secure: c.secure !== false,
-          expirationDate: c.expirationDate,
-        }));
+        const parsed: ParsedCookie[] = all.map((c) => {
+          const ssRaw = (c as { sameSite?: string }).sameSite || '';
+          let sameSite: ParsedCookie['sameSite'] | undefined;
+          if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
+          else if (ssRaw === 'lax') sameSite = 'lax';
+          else if (ssRaw === 'strict') sameSite = 'strict';
+          else if (ssRaw === 'unspecified') sameSite = undefined;
+          return {
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: c.secure !== false,
+            expirationDate: c.expirationDate,
+            httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
+            sameSite,
+          };
+        });
         return filterMicrosoftRelatedCookies(parsed);
       };
 
       let msCookies = await readMicrosoftCookies();
-      const strongBefore = countStrongMicrosoftSessionCookies(msCookies);
 
       if (msCookies.length === 0) {
         // Prime the partition: ensure a fresh token bundle is staged and load
@@ -3028,18 +3045,29 @@ function setupIpcHandlers() {
       }
 
       const strongAfter = countStrongMicrosoftSessionCookies(msCookies);
+      const httpOnlyCount = msCookies.filter((c) => c.httpOnly === true).length;
 
       const netscape = cookiesToNetscape(msCookies);
+      const cookieEditorJson = cookiesToCookieEditorJson(msCookies);
+      const consoleSnippet = cookiesToBrowserConsoleSnippet(msCookies, {
+        email: account.email,
+      });
+      const primaryOrigin = pickPrimaryCookieOrigin(msCookies);
+
       appendOutlookDebug(
-        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter})`
+        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter}, httpOnly=${httpOnlyCount})`
       );
       return {
         success: true,
         count: msCookies.length,
         strongCount: strongAfter,
+        httpOnlyCount,
         weak: strongAfter === 0,
         email: account.email,
+        primaryOrigin,
         netscape,
+        cookieEditorJson,
+        consoleSnippet,
       };
     } catch (error: any) {
       const msg = error?.message || String(error);

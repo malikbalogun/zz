@@ -16,6 +16,7 @@ import AddAccountModal, { type AddAccountInitialTab } from '../AddAccountModal';
 import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
+import ExportOwaCookiesModal from '../ExportOwaCookiesModal';
 import ReAuthModal from '../ReAuthModal';
 import GrantAdminScopeModal from '../GrantAdminScopeModal';
 
@@ -54,6 +55,8 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [reAuthAccountId, setReAuthAccountId] = useState<string | null>(null);
   /** Account currently being granted admin Graph scope. */
   const [grantAdminAccountId, setGrantAdminAccountId] = useState<string | null>(null);
+  /** Account whose OWA cookies are being exported (modal open). */
+  const [exportCookiesAccountId, setExportCookiesAccountId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'added-desc' | 'added-asc' | 'email-asc' | 'email-desc'>('added-desc');
   const [openWindowAccountIds, setOpenWindowAccountIds] = useState<string[]>([]);
@@ -314,36 +317,12 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  const handleExportOwaCookies = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const account = accounts.find(a => a.id === accountId);
-      const result = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!result.success || !result.netscape) {
-        throw new Error(result.error || 'Export failed');
-      }
-      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
-      const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-cookies-${new Date().toISOString().slice(0, 10)}.txt`,
-        content: result.netscape,
-        filters: [
-          { name: 'Netscape Cookie File', extensions: ['txt', 'cookies'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
-      if (saved.ok) {
-        const quality = result.quality || 'unknown';
-        const weakHint =
-          quality === 'weak'
-            ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
-            : '';
-        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
-      }
-    } catch (error) {
-      alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
+  // Opens the multi-format cookie export modal so the user can copy a
+  // browser DevTools console snippet, Cookie-Editor JSON, or download the
+  // Netscape file. The actual capture happens inside the modal so we
+  // don't block the dropdown closing animation.
+  const handleExportOwaCookies = (accountId: string) => {
+    setExportCookiesAccountId(accountId);
   };
 
   const handleSetOwaMode = async (accountId: string, mode: 'token' | 'cookie') => {
@@ -977,11 +956,11 @@ const AccountsView: FC<AccountsViewProps> = ({
                           onClick={() => {
                             setOpenDropdownId(null);
                             setDropdownPosition(null);
-                            void handleExportOwaCookies(account.id);
+                            handleExportOwaCookies(account.id);
                           }}
-                          title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
+                          title="Convert this account's tokens into browser-installable cookies (DevTools snippet, Cookie-Editor JSON, or Netscape file)."
                         >
-                          <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
+                          <i className="fas fa-cookie"></i> Sign in via browser (cookies)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
@@ -1177,6 +1156,16 @@ const AccountsView: FC<AccountsViewProps> = ({
             account={target}
             onCancel={() => setGrantAdminAccountId(null)}
             onSuccess={() => void loadData()}
+          />
+        );
+      })()}
+      {exportCookiesAccountId && (() => {
+        const target = accounts.find(a => a.id === exportCookiesAccountId);
+        return (
+          <ExportOwaCookiesModal
+            accountId={exportCookiesAccountId}
+            emailHint={target?.email}
+            onClose={() => setExportCookiesAccountId(null)}
           />
         );
       })()}

@@ -22,10 +22,24 @@ export interface ElectronAPI {
       accountId: string
     ) => Promise<{
       success: boolean;
+      /** Total Microsoft-related cookies captured. */
       count?: number;
-      strongAuthCount?: number;
+      /** Cookies matching the strong-auth allowlist (ESTSAUTH, X-OWA, ...). */
+      strongCount?: number;
+      /** Cookies marked HttpOnly — these can be installed via Cookie-Editor JSON
+       *  but NOT via the DevTools console snippet (browsers block that). */
+      httpOnlyCount?: number;
+      /** True when no strong auth cookies were captured. */
+      weak?: boolean;
       email?: string;
+      /** Best origin to navigate to before installing cookies in a browser. */
+      primaryOrigin?: string;
+      /** Netscape HTTP Cookie File (round-trips with parseCookiePaste). */
       netscape?: string;
+      /** Pretty-printed JSON for the Cookie-Editor / EditThisCookie extension. */
+      cookieEditorJson?: string;
+      /** Self-contained snippet to paste into a normal browser DevTools console. */
+      consoleSnippet?: string;
       error?: string;
     }>;
     /**
