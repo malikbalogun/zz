@@ -23,6 +23,7 @@ export interface ElectronAPI {
     ) => Promise<{
       success: boolean;
       count?: number;
+      strongAuthCount?: number;
       email?: string;
       netscape?: string;
       error?: string;

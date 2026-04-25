@@ -69,6 +69,8 @@ const outlookWindows = new Map<string, BrowserWindow>();
  */
 const outlookWindowGeneration = new Map<string, number>();
 
+const SIGNED_OUT_TEXT_RE = /session has expired|you need to sign in/i;
+
 
 type OwaTokenBundle = {
   account: any;
@@ -263,6 +265,32 @@ async function tryRefreshOwaWindowSession(
   }
 }
 
+async function forceRefreshAndReloadOutlookWindow(
+  accountId: string,
+  outlookSession: Session,
+  wc: WebContents,
+  reason: string
+): Promise<void> {
+  if (owaRefreshLocks.has(accountId)) return;
+  owaRefreshLocks.add(accountId);
+  try {
+    const bundle = await loadOwaTokenBundle(accountId);
+    applyOwaTokenBundleToRunningSession(accountId, bundle, outlookSession);
+    await reinjectMsalCacheIntoOwaPage(wc, accountId);
+    owaLastSuccessfulRefresh.set(accountId, Date.now());
+    appendOutlookDebug(`[Outlook] Force refresh succeeded (${reason}); reloading page`);
+    try {
+      wc.reloadIgnoringCache();
+    } catch {
+      // ignore reload failures
+    }
+  } catch (e: any) {
+    appendOutlookDebug(`[Outlook] Force refresh failed (${reason}): ${e?.message || e}`);
+  } finally {
+    owaRefreshLocks.delete(accountId);
+  }
+}
+
 const OWA_BEARER_URL_PATTERNS = [
   '*://outlook.office.com/*',
   '*://outlook.office365.com/*',
@@ -349,6 +377,16 @@ function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
     if (!name) return false;
     return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
   });
+}
+
+function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): number {
+  let n = 0;
+  for (const c of cookies) {
+    const name = String(c.name || '').trim();
+    if (!name) continue;
+    if (STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name))) n++;
+  }
+  return n;
 }
 
 /**
@@ -2778,6 +2816,27 @@ function setupIpcHandlers() {
       outlookWindow.webContents.on('did-navigate', (_event, url) => {
         appendOutlookDebug(`[Outlook] Navigate: ${url}`);
       });
+      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
+        try {
+          const txt = await outlookWindow.webContents.executeJavaScript(`
+            (() => {
+              try { return (document.body && document.body.innerText) ? document.body.innerText.slice(0, 5000) : ""; }
+              catch (_) { return ""; }
+            })()
+          `);
+          if (typeof txt === 'string' && SIGNED_OUT_TEXT_RE.test(txt)) {
+            appendOutlookDebug('[Outlook] Session-expired banner detected in token mode; forcing token refresh + reload');
+            void forceRefreshAndReloadOutlookWindow(
+              accountId,
+              outlookSession,
+              outlookWindow.webContents,
+              'session-expired-banner'
+            );
+          }
+        } catch {
+          // ignore read failures
+        }
+      });
       outlookWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
         appendOutlookDebug(`[OWA console:${level}] ${message} (${sourceId}:${line})`);
       });
@@ -2879,6 +2938,7 @@ function setupIpcHandlers() {
       };
 
       let msCookies = await readMicrosoftCookies();
+      const strongBefore = countStrongMicrosoftSessionCookies(msCookies);
 
       if (msCookies.length === 0) {
         // Prime the partition: ensure a fresh token bundle is staged and load
@@ -2957,13 +3017,17 @@ function setupIpcHandlers() {
         );
       }
 
+      const strongAfter = countStrongMicrosoftSessionCookies(msCookies);
+
       const netscape = cookiesToNetscape(msCookies);
       appendOutlookDebug(
-        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email}`
+        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter})`
       );
       return {
         success: true,
         count: msCookies.length,
+        strongCount: strongAfter,
+        weak: strongAfter === 0,
         email: account.email,
         netscape,
       };
