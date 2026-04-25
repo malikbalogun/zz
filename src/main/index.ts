@@ -2847,8 +2847,9 @@ function setupIpcHandlers() {
           // ignore read failures
         }
       });
-      outlookWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-        appendOutlookDebug(`[OWA console:${level}] ${message} (${sourceId}:${line})`);
+      outlookWindow.webContents.on('console-message', (details) => {
+        const { level, message, lineNumber, sourceId } = details;
+        appendOutlookDebug(`[OWA console:${level}] ${message} (${sourceId}:${lineNumber})`);
       });
 
       outlookWindow.webContents.setUserAgent(

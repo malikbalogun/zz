@@ -20,6 +20,10 @@ class WebSocketManager {
   private connections: Map<string, WebSocketConnection> = new Map();
   private readonly maxReconnectAttempts = 10;
   private readonly baseReconnectDelay = 2000; // ms
+  /** Serialize overlapping `startAll` (e.g. React 19 StrictMode double effect). */
+  private startAllChain: Promise<void> = Promise.resolve();
+  /** Per-panel: serialize overlapping `startForPanel` so a new start never races `stop` from another. */
+  private startPanelChain = new Map<string, Promise<void>>();
 
   /** Always derive /ws/tokens from the panel's https origin + path — never pass a ws: URL here. */
   private buildWsUrlFromHttpPanelUrl(panelUrl: string): string {
@@ -44,6 +48,15 @@ class WebSocketManager {
    * If a connection already exists, it will be replaced.
    */
   async startForPanel(panelId: string, panelUrl: string): Promise<void> {
+    const previous = this.startPanelChain.get(panelId) ?? Promise.resolve();
+    const work = previous
+      .catch(() => {})
+      .then(() => this.startForPanelAfterPrevious(panelId, panelUrl));
+    this.startPanelChain.set(panelId, work);
+    await work;
+  }
+
+  private async startForPanelAfterPrevious(panelId: string, panelUrl: string): Promise<void> {
     // Ensure real‑time WebSocket is enabled in settings
     const settings = await getSettings();
     if (!settings.sync.realTimeWebSocket) {
@@ -108,6 +121,11 @@ class WebSocketManager {
    * Called on app startup and when real‑time WebSocket setting is enabled.
    */
   async startAll(): Promise<void> {
+    this.startAllChain = this.startAllChain.catch(() => {}).then(() => this.runStartAll());
+    return this.startAllChain;
+  }
+
+  private async runStartAll(): Promise<void> {
     const settings = await getSettings();
     if (!settings.sync.realTimeWebSocket) {
       console.log('Real‑time WebSocket disabled globally');

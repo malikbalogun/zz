@@ -245,7 +245,7 @@ export function startMonitoringPolling(intervalMinutes: number = 5) {
   stopMonitoringPolling();
   const intervalMs = intervalMinutes * 60 * 1000;
   pollingInterval = setInterval(async () => {
-    console.log('Monitoring polling started');
+    console.log('Monitoring tick (running due interval)');
     try {
       const rules = await getMonitoringRules();
       const activeRules = rules.filter(r => r.status === 'active');
