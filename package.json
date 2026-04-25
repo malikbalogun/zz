@@ -10,6 +10,7 @@
     "build": "npm run build:ts && npm run build:vite",
     "build:ts": "tsc -b",
     "build:vite": "vite build",
+    "test:websocket": "npm run build:ts && node --test dist/main/main/websocketReconnect.test.js",
     "test:oauth": "npm run build:ts && node --test dist/main/main/microsoftOAuthRefresh.test.js",
     "test:cookie": "npx tsc -b src/main/tsconfig.json && node --test dist/main/main/cookieFormat.test.js",
     "start": "electron .",
