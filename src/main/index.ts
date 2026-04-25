@@ -2710,18 +2710,20 @@ function setupIpcHandlers() {
       outlookSession.protocol.handle('https', async (request) => {
         const u = request.url;
 
-        // 1. Intercept POST /token - return our real tokens
+        // 1. Intercept POST /token only for our own synthetic code exchanges.
+        // Do NOT hijack normal Microsoft refresh-token flows; let those hit
+        // AAD so OWA can establish/renew first-party browser session state.
         if (request.method === 'POST' && u.includes('login.microsoftonline.com') &&
             u.includes('/oauth2/') && u.includes('/token') && tokenInterceptCount < 200) {
           try {
             const body = await request.text();
             const isAuthCodeGrant = body.includes('grant_type=authorization_code');
-            const isRefreshGrant = body.includes('grant_type=refresh_token');
-            if (isAuthCodeGrant || isRefreshGrant) {
+            const isSyntheticCode = body.includes('code=INTERCEPTED') || body.includes('code=INTERCEPTED%3A');
+            if (isAuthCodeGrant && isSyntheticCode) {
               tokenInterceptCount++;
               const nonceMatch = isAuthCodeGrant ? body.match(/INTERCEPTED(?:%3A|:)([^&:%]+)/) : null;
               const nonce = nonceMatch ? decodeURIComponent(nonceMatch[1]) : '';
-              const grantType = isAuthCodeGrant ? 'authorization_code' : 'refresh_token';
+              const grantType = 'authorization_code';
               dlog('[ProtocolIntercept] Returning tokens for grant:', grantType, 'nonce:', nonce ? 'yes' : 'none');
               appendOutlookDebug(`[ProtocolIntercept] Token exchange intercepted grant=${grantType} (#${tokenInterceptCount})`);
               return new Response(buildTokenResponse(nonce), {
@@ -2734,29 +2736,7 @@ function setupIpcHandlers() {
           }
         }
 
-        // 2. Intercept GET /authorize - redirect back with a fake code
-        if (request.method === 'GET' && u.includes('login.microsoftonline.com') &&
-            u.includes('/authorize') && !u.includes('/devicecode')) {
-          try {
-            const au = new URL(u);
-            const redirectUri = au.searchParams.get('redirect_uri') || 'https://outlook.office.com/mail/';
-            const state = au.searchParams.get('state') || '';
-            const nonce = au.searchParams.get('nonce') || '';
-            const fakeCode = `INTERCEPTED:${nonce}:${Date.now()}`;
-            const t = getOwaTok();
-            const oidA = t?.oid || '';
-            const tidA = t?.tid || '';
-            const ci = Buffer.from(JSON.stringify({ uid: oidA, utid: tidA })).toString('base64');
-            const redirectTo = `${redirectUri}#code=${encodeURIComponent(fakeCode)}&state=${encodeURIComponent(state)}&client_info=${encodeURIComponent(ci)}&session_state=fake`;
-            dlog('[ProtocolIntercept] Redirecting authorize → fake code response');
-            appendOutlookDebug(`[ProtocolIntercept] Authorize intercepted, redirect → ${redirectUri}`);
-            return Response.redirect(redirectTo, 302);
-          } catch (err) {
-            console.warn('[ProtocolIntercept] Authorize intercept error:', err);
-          }
-        }
-
-        // 3. For OWA API calls - inject Bearer + anchor headers before forwarding.
+        // 2. For OWA API calls - inject Bearer + anchor headers before forwarding.
         //    protocol.handle bypasses webRequest hooks, so we must add auth here.
         //    request.body is a ReadableStream; we must drain it to a Buffer before re-sending.
         const isOwaApi =
