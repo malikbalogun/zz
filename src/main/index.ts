@@ -174,6 +174,7 @@ async function loadOwaTokenBundle(accountId: string): Promise<OwaTokenBundle> {
 
   const state = await readState();
   const preferredOwaClientId = state.owaClientId || '9199bf20-a13f-4107-85dc-02114787ef48';
+  let effectiveClientIdForCache = useClientId;
   if (useScopeType === 'ews' && preferredOwaClientId && preferredOwaClientId !== useClientId) {
     try {
       const owaClientToken = await refreshMicrosoftToken(
@@ -185,6 +186,7 @@ async function loadOwaTokenBundle(accountId: string): Promise<OwaTokenBundle> {
       );
       appendOutlookDebug(`[Outlook] Redeemed token for OWA client_id=${preferredOwaClientId}`);
       tokenResult = owaClientToken;
+      effectiveClientIdForCache = preferredOwaClientId;
     } catch (error: any) {
       appendOutlookDebug(`[Outlook] OWA-client token redeem failed for ${preferredOwaClientId}: ${error?.message || String(error)}`);
       console.warn('[Outlook] OWA client token redeem failed, continuing with base token:', error?.message || error);
@@ -202,8 +204,16 @@ async function loadOwaTokenBundle(accountId: string): Promise<OwaTokenBundle> {
     console.warn('[Outlook] Failed to decode token:', err);
   }
 
+  // IMPORTANT: Use the client id that actually produced the current access
+  // token bundle. A stale globally-captured OWA client id can mismatch token
+  // audience/appid and cause immediate signed-out banners in OWA.
+  const tokenClientId =
+    (typeof tokenPayload?.appid === 'string' && tokenPayload.appid.trim()) ||
+    (typeof tokenPayload?.azp === 'string' && tokenPayload.azp.trim()) ||
+    '';
   const clientIdOverride =
-    state.owaClientId ||
+    tokenClientId ||
+    effectiveClientIdForCache ||
     account.auth?.v2Token?.clientId ||
     account.auth?.clientId ||
     'd3590ed6-52b3-4102-aeff-aad2292ab01c';
@@ -213,6 +223,11 @@ async function loadOwaTokenBundle(accountId: string): Promise<OwaTokenBundle> {
 
 function applyOwaTokenBundleToRunningSession(accountId: string, bundle: OwaTokenBundle, outlookSession: Session): void {
   const { account, accessToken, tokenResult, clientIdOverride, tokenPayload } = bundle;
+  const tokenClientId =
+    (typeof tokenPayload?.appid === 'string' && tokenPayload.appid.trim()) ||
+    (typeof tokenPayload?.azp === 'string' && tokenPayload.azp.trim()) ||
+    '';
+  const resolvedClientId = tokenClientId || clientIdOverride;
   outlookTokenStore.set(accountId, {
     accessToken,
     refreshToken: tokenResult.refreshToken,
@@ -223,12 +238,12 @@ function applyOwaTokenBundleToRunningSession(accountId: string, bundle: OwaToken
     tid: tokenPayload.tid || '',
     email: account.email,
     name: account.name || account.email,
-    clientId: clientIdOverride,
+    clientId: resolvedClientId,
   });
 
   let msalCache: Record<string, string>;
   try {
-    msalCache = generateMsalCache(account, accessToken, tokenResult.refreshToken, tokenResult.idToken, clientIdOverride);
+    msalCache = generateMsalCache(account, accessToken, tokenResult.refreshToken, tokenResult.idToken, resolvedClientId);
   } catch (err) {
     console.error('[MSAL] Failed to generate cache:', err);
     msalCache = {};
