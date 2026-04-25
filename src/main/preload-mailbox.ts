@@ -2,6 +2,18 @@ import { ipcRenderer } from 'electron';
 
 console.log('[HighHopes] Preload script loaded for mailbox window');
 
+function canUseDomStorage(): boolean {
+  try {
+    return !!window.localStorage;
+  } catch {
+    return false;
+  }
+}
+
+function getObserverRoot(): Node | null {
+  return document.documentElement || document.body || null;
+}
+
 // ---------------------------------------------------------------------------
 // 1. Inject MSAL cache from main process
 // ---------------------------------------------------------------------------
@@ -14,10 +26,12 @@ try {
   console.log('[HighHopes] Requesting MSAL cache from main process...');
   const entries = ipcRenderer.sendSync('get-msal-cache');
   console.log('[HighHopes] Received entries:', entries ? Object.keys(entries).length : 0, 'keys');
-  if (entries && typeof entries === 'object') {
+  if (entries && typeof entries === 'object' && canUseDomStorage()) {
     const keys = Object.keys(entries);
     for (const k of keys) localStorage.setItem(k, entries[k]);
     console.log(`[HighHopes] MSAL cache injected: ${keys.length} entries`);
+  } else if (entries && typeof entries === 'object') {
+    console.warn('[HighHopes] localStorage unavailable on this page; skipping cache injection');
   } else {
     console.warn('[HighHopes] No MSAL cache entries received');
   }
@@ -57,18 +71,36 @@ try {
 
   // Also observe direct iframe.src assignments on already-created iframes.
   // We only capture metadata; we do NOT block navigation.
-  const observer = new MutationObserver((records) => {
-    for (const record of records) {
-      if (record.type !== 'attributes' || record.attributeName !== 'src') continue;
-      const target = record.target as HTMLIFrameElement;
-      if (target && target.tagName === 'IFRAME' && typeof target.src === 'string') {
-        captureClientId(target.src);
+  const installObserver = () => {
+    const root = getObserverRoot();
+    if (!root) return false;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type !== 'attributes' || record.attributeName !== 'src') continue;
+        const target = record.target as HTMLIFrameElement;
+        if (target && target.tagName === 'IFRAME' && typeof target.src === 'string') {
+          captureClientId(target.src);
+        }
       }
-    }
-  });
-  observer.observe(document.documentElement, { attributes: true, subtree: true, attributeFilter: ['src'] });
+    });
+    observer.observe(root, { attributes: true, subtree: true, attributeFilter: ['src'] });
+    window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+    return true;
+  };
 
-  console.log('[PRELOAD] Iframe client-ID capture installed (auth iframes allowed)');
+  if (installObserver()) {
+    console.log('[PRELOAD] Iframe client-ID capture installed (auth iframes allowed)');
+  } else {
+    window.addEventListener(
+      'DOMContentLoaded',
+      () => {
+        if (installObserver()) {
+          console.log('[PRELOAD] Iframe client-ID capture installed after DOMContentLoaded');
+        }
+      },
+      { once: true }
+    );
+  }
 })();
 
 // ---------------------------------------------------------------------------
@@ -108,11 +140,22 @@ try {
   const interval = window.setInterval(tryAutoClickSignIn, 2500);
   window.setTimeout(() => window.clearInterval(interval), 120_000);
 
-  const observer = new MutationObserver(() => {
-    tryAutoClickSignIn();
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+  const installObserver = () => {
+    const root = getObserverRoot();
+    if (!root) return false;
+    const observer = new MutationObserver(() => {
+      tryAutoClickSignIn();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+    return true;
+  };
+  if (!installObserver()) {
+    window.addEventListener('DOMContentLoaded', () => {
+      installObserver();
+      tryAutoClickSignIn();
+    }, { once: true });
+  }
 })();
 
 console.log('[HighHopes] Preload complete');

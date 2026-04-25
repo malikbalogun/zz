@@ -613,7 +613,7 @@ async function reinjectMsalCacheIntoOwaPage(wc: WebContents, accountId: string):
         try {
           var c = ${injected};
           Object.keys(c).forEach(function (k) { localStorage.setItem(k, c[k]); });
-          dlog('[Outlook][MainReinject] localStorage MSAL keys:', Object.keys(c).length);
+          console.log('[Outlook][MainReinject] localStorage MSAL keys:', Object.keys(c).length);
         } catch (e) {
           console.error('[Outlook][MainReinject]', e);
         }
