@@ -4216,13 +4216,21 @@ app.whenReady().then(async () => {
       console.error('[Main] Failed to start token refresh scheduler:', err)
     );
 
+    // Create the shell window immediately so startup doesn't appear frozen
+    // while background account/session checks run.
+    console.log('[Main] Creating window...');
+    createWindow();
+    console.log('[Main] Window created');
+
     // 1. Read saved state
     const state = await readState();
     console.log('[Main] State read:', state.activeView);
 
     // 2. Run session validity check for all accounts
     console.log('[Main] Running session validity check...');
-    await checkSessionValidity();
+    checkSessionValidity().catch(err => {
+      console.error('[Main] Session validity check failed:', err);
+    });
 
     // 3. Determine if monitoring was paused during downtime
     const now = new Date();
@@ -4250,12 +4258,7 @@ app.whenReady().then(async () => {
       }
     }
 
-    // 4. Create window
-    console.log('[Main] Creating window...');
-    createWindow();
-    console.log('[Main] Window created');
-
-    // 5. Send restored state to renderer (optional - renderer can request via IPC)
+    // 4. Send restored state to renderer (optional - renderer can request via IPC)
     console.log('[Main] App startup complete');
   } catch (error) {
     console.error('[Main] Startup error:', error);
