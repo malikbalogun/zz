@@ -2718,7 +2718,9 @@ function setupIpcHandlers() {
         if (request.method === 'POST' && u.includes('login.microsoftonline.com') &&
             u.includes('/oauth2/') && u.includes('/token') && tokenInterceptCount < 200) {
           try {
-            const body = await request.text();
+            // IMPORTANT: inspect a clone so the original Request body remains
+            // forwardable to AAD for real auth/refresh flows.
+            const body = await request.clone().text();
             const isAuthCodeGrant = body.includes('grant_type=authorization_code');
             const isSyntheticCode = body.includes('code=INTERCEPTED') || body.includes('code=INTERCEPTED%3A');
             if (isAuthCodeGrant && isSyntheticCode) {
