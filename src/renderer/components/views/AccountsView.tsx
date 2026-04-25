@@ -332,15 +332,45 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        const quality = result.quality || 'unknown';
-        const weakHint =
-          quality === 'weak'
-            ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
-            : '';
-        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
+        const weakHint = result.weak
+          ? '\nWarning: export is missing strong Microsoft auth cookies and may not restore a full browser session.'
+          : '';
+        alert(
+          `Exported ${result.count ?? 0} Microsoft cookies to ${saved.path}\n` +
+          `Strong auth markers: ${result.strongCount ?? 0}${weakHint}\n\n` +
+          `Use this file with a browser cookie import tool or DevTools Application storage.`
+        );
       }
     } catch (error) {
       alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePrepareBrowserLogin = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const result = await window.electron.actions.openOwaExternalSignIn(accountId);
+      if (!result.success) {
+        throw new Error(result.error || 'Could not prepare browser login');
+      }
+      const lines = [
+        result.opened === false
+          ? 'Browser handoff was already opened recently; reuse the existing browser tab or cookie files.'
+          : 'Saved browser-login cookie exports and opened Outlook in your default browser.',
+      ];
+      if (typeof result.count === 'number') lines.push(`Cookies exported: ${result.count}`);
+      if (typeof result.strongCount === 'number') lines.push(`Strong auth markers: ${result.strongCount}`);
+      if (result.netscapePath) lines.push(`Netscape file: ${result.netscapePath}`);
+      if (result.consolePath) lines.push(`Console helper: ${result.consolePath}`);
+      lines.push(
+        '',
+        'Console note: document.cookie cannot create HttpOnly cookies, so full browser sign-in usually requires the Netscape export / cookie-import tooling or DevTools Application storage.'
+      );
+      alert(lines.join('\n'));
+    } catch (error) {
+      alert(`Prepare browser login failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -982,6 +1012,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                           title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
                         >
                           <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handlePrepareBrowserLogin(account.id);
+                          }}
+                          title="Prepare token-backed Outlook cookies for use in a real browser and open Outlook externally."
+                        >
+                          <i className="fas fa-external-link-alt"></i> Prepare browser login
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

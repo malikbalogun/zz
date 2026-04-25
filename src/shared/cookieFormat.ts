@@ -9,6 +9,7 @@ export interface ParsedCookie {
   domain?: string;
   path?: string;
   secure?: boolean;
+  httpOnly?: boolean;
   /** Unix seconds */
   expirationDate?: number;
 }
@@ -55,6 +56,7 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
           domain: domainRaw != null ? String(domainRaw).trim() : undefined,
           path: pathRaw != null ? String(pathRaw).trim() : '/',
           secure: !!(o.secure ?? o.Secure ?? o.httpOnly),
+          httpOnly: !!(o.httpOnly ?? o.HttpOnly),
           expirationDate: exp,
         });
       }
@@ -73,8 +75,11 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
     const out: ParsedCookie[] = [];
     for (const line of lines) {
       const L = line.trim();
-      if (!L || L.startsWith('#')) continue;
-      const parts = L.split('\t');
+      if (!L) continue;
+      const isHttpOnly = L.startsWith('#HttpOnly_');
+      if (!isHttpOnly && L.startsWith('#')) continue;
+      const rawLine = isHttpOnly ? L.slice('#HttpOnly_'.length) : L;
+      const parts = rawLine.split('\t');
       if (parts.length < 7) continue;
       const domain = parts[0]?.trim();
       const path = parts[2]?.trim() || '/';
@@ -87,6 +92,7 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
         domain,
         path,
         secure,
+        httpOnly: isHttpOnly,
         expirationDate: expirySec && expirySec > 0 ? expirySec : undefined,
         name,
         value,
@@ -154,15 +160,54 @@ export function cookiesToNetscape(cookies: ParsedCookie[]): string {
     if (!c.name) continue;
     const rawDomain = (c.domain || '').trim();
     if (!rawDomain) continue; // Netscape format requires a domain
+    const domain = c.httpOnly ? `#HttpOnly_${rawDomain}` : rawDomain;
     const includeSubdomains = rawDomain.startsWith('.') ? 'TRUE' : 'FALSE';
     const path = c.path && c.path.startsWith('/') ? c.path : '/';
     const secure = c.secure === false ? 'FALSE' : 'TRUE';
     const expiry = c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : 0;
     lines.push(
-      [rawDomain, includeSubdomains, path, secure, String(expiry), c.name, c.value].join('\t')
+      [domain, includeSubdomains, path, secure, String(expiry), c.name, c.value].join('\t')
     );
   }
   return lines.join('\n') + '\n';
+}
+
+export function cookiesToBrowserConsoleScript(cookies: ParsedCookie[]): {
+  script: string;
+  settableCount: number;
+  skippedHttpOnlyCount: number;
+} {
+  const lines: string[] = [
+    '// Paste this into DevTools Console on outlook.office.com or login.microsoftonline.com.',
+    '// HttpOnly cookies are skipped because document.cookie cannot create them.',
+  ];
+  let settableCount = 0;
+  let skippedHttpOnlyCount = 0;
+  for (const c of cookies) {
+    if (!c.name) continue;
+    if (c.httpOnly) {
+      skippedHttpOnlyCount++;
+      continue;
+    }
+    const parts = [`${c.name}=${c.value}`];
+    const path = c.path && c.path.startsWith('/') ? c.path : '/';
+    parts.push(`path=${path}`);
+    if (c.domain && c.domain.trim()) parts.push(`domain=${c.domain.trim()}`);
+    if (c.secure !== false) parts.push('secure');
+    if (c.expirationDate && c.expirationDate > 0) {
+      parts.push(`expires=${new Date(c.expirationDate * 1000).toUTCString()}`);
+    }
+    lines.push(`document.cookie = ${JSON.stringify(parts.join('; '))};`);
+    settableCount++;
+  }
+  if (settableCount === 0) {
+    lines.push('// No non-HttpOnly cookies were available to set via document.cookie.');
+  }
+  return {
+    script: lines.join('\n') + '\n',
+    settableCount,
+    skippedHttpOnlyCount,
+  };
 }
 
 /** Base URL for Electron session.cookies.set */

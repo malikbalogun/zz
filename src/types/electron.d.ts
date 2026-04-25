@@ -14,18 +14,21 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
-     * Export the Microsoft OWA session cookies for a token-typed account as a
-     * Netscape HTTP Cookie File string. The returned string is round-tripable
-     * through the existing cookie-import path.
+     * Export the Microsoft OWA session cookies for a token-typed account in
+     * several browser-friendly formats. `netscape` is the full-fidelity export;
+     * `header` / `json` can help with manual inspection or custom tooling.
      */
     exportOwaCookies: (
       accountId: string
     ) => Promise<{
       success: boolean;
       count?: number;
-      strongAuthCount?: number;
+      strongCount?: number;
+      weak?: boolean;
       email?: string;
       netscape?: string;
+      header?: string;
+      json?: string;
       error?: string;
     }>;
     /**
@@ -171,7 +174,22 @@ export interface ElectronAPI {
       accountId: string,
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => Promise<any>;
-    openOwaExternalSignIn: (accountId: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
+    openOwaExternalSignIn: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          opened: boolean;
+          count?: number;
+          strongCount?: number;
+          consoleSettableCount?: number;
+          httpOnlyCount?: number;
+          netscapePath?: string;
+          consolePath?: string;
+          targetUrl?: string;
+        }
+      | { success: false; error?: string }
+    >;
     /** Returns the list of accountIds for which Outlook BrowserWindows are currently open. */
     getOpenOutlookWindows: () => Promise<string[]>;
     telegramSendAlert: (bot: string, message: string) => Promise<{ success: boolean; error?: string }>;
