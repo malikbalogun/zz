@@ -40,6 +40,14 @@ function buildClientInfo(oid: string, tid: string): string {
   return Buffer.from(JSON.stringify({ uid: oid, utid: tid })).toString('base64');
 }
 
+function shouldInterceptAuthorizeRequest(authorizeUrl: URL): boolean {
+  const prompt = (authorizeUrl.searchParams.get('prompt') || '').toLowerCase();
+  // Only short-circuit explicit silent authorize requests. Interactive sign-in
+  // must go to Microsoft so the browser session cookies are established for
+  // real and OWA remains signed in after the initial load.
+  return prompt === 'none';
+}
+
 function buildSyntheticIdToken(
   tokens: OwaTokenBundleSnapshot,
   nonce: string,
@@ -149,9 +157,16 @@ export function getOwaProtocolInterception(
     url.includes('/authorize') &&
     !url.includes('/devicecode')
   ) {
+    const authorizeUrl = new URL(url);
+    if (!shouldInterceptAuthorizeRequest(authorizeUrl)) {
+      return {
+        kind: 'passthrough',
+        nextTokenInterceptCount: tokenInterceptCount,
+      };
+    }
     return {
       kind: 'synthetic-authorize',
-      redirectUrl: buildSyntheticAuthorizeRedirect(url, tokens, now),
+      redirectUrl: buildSyntheticAuthorizeRedirect(authorizeUrl.toString(), tokens, now),
       nextTokenInterceptCount: tokenInterceptCount,
     };
   }

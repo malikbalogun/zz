@@ -93,7 +93,7 @@ test('getOwaProtocolInterception ignores real token refresh flows', () => {
 
 test('getOwaProtocolInterception intercepts authorize requests but skips device-code endpoints', () => {
   const intercepted = getOwaProtocolInterception({
-    url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F&state=s1&nonce=n1',
+    url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F&state=s1&nonce=n1&prompt=none',
     method: 'GET',
     tokenInterceptCount: 0,
     tokens: sampleTokens,
@@ -112,6 +112,35 @@ test('getOwaProtocolInterception intercepts authorize requests but skips device-
     tokens: sampleTokens,
   });
   assert.equal(deviceCode.kind, 'passthrough');
+});
+
+test('getOwaProtocolInterception lets interactive authorize requests pass through', () => {
+  const interactivePrompt = getOwaProtocolInterception({
+    url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F&state=s1&nonce=n1&prompt=login',
+    method: 'GET',
+    tokenInterceptCount: 0,
+    tokens: sampleTokens,
+    now: 1700000000000,
+  });
+  assert.equal(interactivePrompt.kind, 'passthrough');
+
+  const accountSelection = getOwaProtocolInterception({
+    url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F&state=s1&nonce=n1&prompt=select_account',
+    method: 'GET',
+    tokenInterceptCount: 0,
+    tokens: sampleTokens,
+    now: 1700000000000,
+  });
+  assert.equal(accountSelection.kind, 'passthrough');
+
+  const noPrompt = getOwaProtocolInterception({
+    url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?redirect_uri=https%3A%2F%2Foutlook.office.com%2Fmail%2F&state=s1&nonce=n1',
+    method: 'GET',
+    tokenInterceptCount: 0,
+    tokens: sampleTokens,
+    now: 1700000000000,
+  });
+  assert.equal(noPrompt.kind, 'passthrough');
 });
 
 test('getOwaProtocolInterception stops synthetic token interception after cap', () => {
