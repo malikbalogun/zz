@@ -173,6 +173,7 @@ export interface ElectronAPI {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => Promise<any>;
     openOwaExternalSignIn: (accountId: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
+    openOutlookDevTools: (accountId?: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
     /** Returns the list of accountIds for which Outlook BrowserWindows are currently open. */
     getOpenOutlookWindows: () => Promise<string[]>;
     telegramSendAlert: (bot: string, message: string) => Promise<{ success: boolean; error?: string }>;

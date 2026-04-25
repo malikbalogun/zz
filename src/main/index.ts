@@ -3141,6 +3141,69 @@ function setupIpcHandlers() {
     return openAccounts;
   });
 
+  ipcMain.handle('mailbox:openOutlookDevTools', async (_, accountId?: string) => {
+    const candidates: BrowserWindow[] = [];
+    for (const [windowKey, win] of outlookWindows.entries()) {
+      if (win.isDestroyed()) continue;
+      if (!accountId || windowKey.startsWith(`${accountId}:`)) {
+        candidates.push(win);
+      }
+    }
+    const target = candidates[0];
+    if (!target) {
+      return { success: false, error: 'No open Outlook window found' };
+    }
+    target.webContents.openDevTools({ mode: 'detach' });
+    target.focus();
+    return { success: true };
+  });
+
+  ipcMain.handle('mailbox:openOwaExternalSignIn', async (_, accountId: string) => {
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account) {
+        return { success: false as const, error: 'Account not found' };
+      }
+      if (account.auth?.type !== 'token') {
+        return { success: false as const, error: 'External OWA sign-in only applies to token accounts' };
+      }
+
+      const authority = normalizeAuthorityTenant(
+        account.auth?.authorityEndpoint || account.auth?.v2Token?.authorityEndpoint || 'common'
+      );
+      const clientId =
+        account.auth?.v2Token?.clientId ||
+        account.auth?.clientId ||
+        'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const redirectUri = 'https://outlook.office.com/mail/';
+      const state = `watcher-owa-${accountId}-${Date.now()}`;
+      const nonce = crypto.randomUUID();
+      const scope = 'https://outlook.office.com/.default openid profile offline_access';
+
+      const authorizeUrl =
+        `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize` +
+        `?client_id=${encodeURIComponent(clientId)}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+        `&response_mode=fragment` +
+        `&scope=${encodeURIComponent(scope)}` +
+        `&prompt=login` +
+        `&login_hint=${encodeURIComponent(account.email)}` +
+        `&state=${encodeURIComponent(state)}` +
+        `&nonce=${encodeURIComponent(nonce)}`;
+
+      appendOutlookDebug(`[Outlook] Opening external browser sign-in for ${account.email}`);
+      await shell.openExternal(authorizeUrl);
+      return { success: true as const, opened: true as const };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[Outlook] External browser sign-in failed: ${msg}`);
+      return { success: false as const, error: msg };
+    }
+  });
+
 
 
   // Telegram send alert

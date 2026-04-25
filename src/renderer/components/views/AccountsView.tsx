@@ -2,6 +2,7 @@ import { useState, useEffect, type FC } from 'react';
 import {
   refreshAccountToken,
   openOutlookWeb,
+  openOwaExternalBrowserSession,
   openPanelAdminDashboard,
   harvestAssociatedAccounts,
   pullOwaCookiesFromPanel,
@@ -498,6 +499,28 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
+  const handleOpenOutlookDevTools = async () => {
+    try {
+      const result = await window.electron.actions.openOutlookDevTools();
+      if (result?.success) {
+        alert('Opened Outlook devtools');
+      } else {
+        alert(result?.error || 'Failed to open Outlook devtools');
+      }
+    } catch (error) {
+      alert(`Failed to open Outlook devtools: ${error instanceof Error ? error.message : error}`);
+    }
+  };
+
+  const handleOpenExternalOwaSignIn = async (accountId: string) => {
+    try {
+      await openOwaExternalBrowserSession(accountId);
+      alert('Opened Microsoft sign-in in your default browser. Complete sign-in there, then reopen Outlook in the app.');
+    } catch (error) {
+      alert(`Could not open browser sign-in: ${error instanceof Error ? error.message : error}`);
+    }
+  };
+
 
 
   // Export modal
@@ -708,6 +731,9 @@ const AccountsView: FC<AccountsViewProps> = ({
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <button className="icon-btn" onClick={handleCopyOutlookDebugLogs} title="Copy Outlook debug logs to clipboard">
                   <i className="fas fa-bug"></i>
+                </button>
+                <button className="icon-btn" onClick={handleOpenOutlookDevTools} title="Open devtools for the currently open Outlook window">
+                  <i className="fas fa-terminal"></i>
                 </button>
                 <button className="icon-btn" onClick={loadData} title="Refresh accounts">
                   <i className="fas fa-sync-alt"></i>
@@ -1047,6 +1073,20 @@ const AccountsView: FC<AccountsViewProps> = ({
                             </div>
                           )}
                         </>
+                      )}
+                      <div className="act-dropdown-divider"></div>
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleOpenExternalOwaSignIn(account.id);
+                          }}
+                          title="Open the official Microsoft sign-in flow in your default browser for this mailbox."
+                        >
+                          <i className="fas fa-external-link-alt"></i> Browser sign-in fallback
+                        </div>
                       )}
                       <div className="act-dropdown-divider"></div>
                       <div className="act-dropdown-item act-dropdown-danger" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleDeleteAccount(account.id); }}>
