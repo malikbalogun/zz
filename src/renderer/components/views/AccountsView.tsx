@@ -291,7 +291,9 @@ const AccountsView: FC<AccountsViewProps> = ({
   const handleOpenOutlookWeb = async (accountId: string) => {
     setLoading(true);
     try {
-      await openOutlookWeb(accountId);
+      // Default to token path on Play: it's the most reliable for in-app OWA
+      // and avoids stale cookie-session sign-out loops.
+      await openOutlookWeb(accountId, { authPreference: 'token' });
     } catch (error) {
       alert(`Failed to open Outlook (OWA): ${error instanceof Error ? error.message : error}`);
     } finally {
