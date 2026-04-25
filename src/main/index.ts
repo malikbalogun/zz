@@ -2824,7 +2824,7 @@ function setupIpcHandlers() {
       });
       let autoHealInFlight = false;
       const AUTO_HEAL_COOLDOWN_MS = 30000;
-      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
+      outlookWindow.webContents.on('did-frame-finish-load', async () => {
         try {
           const txt = await outlookWindow.webContents.executeJavaScript(`
             (() => {
@@ -2955,8 +2955,6 @@ function setupIpcHandlers() {
       };
 
       let msCookies = await readMicrosoftCookies();
-      const strongBefore = countStrongMicrosoftSessionCookies(msCookies);
-
       if (msCookies.length === 0) {
         // Prime the partition: ensure a fresh token bundle is staged and load
         // OWA in a hidden BrowserWindow long enough for the auth cookies to

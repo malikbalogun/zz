@@ -31,7 +31,9 @@ export interface ElectronAPI {
       email?: string;
       netscape?: string;
       browserImportJson?: string;
+      browserImportJsonPath?: string;
       consoleScript?: string;
+      consoleScriptPath?: string;
       error?: string;
     }>;
     /**
