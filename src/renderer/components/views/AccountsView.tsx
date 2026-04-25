@@ -332,7 +332,12 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        alert(`Exported ${result.count} cookies to ${saved.path}`);
+        const quality = result.quality || 'unknown';
+        const weakHint =
+          quality === 'weak'
+            ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
+            : '';
+        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
       }
     } catch (error) {
       alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
