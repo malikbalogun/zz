@@ -50,6 +50,7 @@ const outlookSessionAuth = new WeakMap<Session, { accessToken: string; email: st
 /** Last successful in-memory OWA token refresh (avoids redundant refresh + focus storms). */
 const owaLastSuccessfulRefresh = new Map<string, number>();
 const owaRefreshLocks = new Set<string>();
+const owaLastAutoHealAt = new Map<string, number>();
 
 /** Open Outlook windows per account (accountId -> BrowserWindow) to prevent duplicate windows. */
 const outlookWindows = new Map<string, BrowserWindow>();
@@ -2645,6 +2646,7 @@ function setupIpcHandlers() {
           msalCacheMap.delete(accountId);
           outlookTokenStore.delete(accountId);
           owaLastSuccessfulRefresh.delete(accountId);
+          owaLastAutoHealAt.delete(accountId);
           outlookWindows.delete(windowKey);
           outlookWindowGeneration.delete(windowKey);
         } else {
@@ -2811,6 +2813,8 @@ function setupIpcHandlers() {
       outlookWindow.webContents.on('did-navigate', (_event, url) => {
         appendOutlookDebug(`[Outlook] Navigate: ${url}`);
       });
+      let autoHealInFlight = false;
+      const AUTO_HEAL_COOLDOWN_MS = 30000;
       outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
         try {
           const txt = await outlookWindow.webContents.executeJavaScript(`
@@ -2820,13 +2824,22 @@ function setupIpcHandlers() {
             })()
           `);
           if (typeof txt === 'string' && SIGNED_OUT_TEXT_RE.test(txt)) {
+            const now = Date.now();
+            const lastHeal = owaLastAutoHealAt.get(accountId) || 0;
+            if (autoHealInFlight || now - lastHeal < AUTO_HEAL_COOLDOWN_MS) {
+              return;
+            }
+            autoHealInFlight = true;
+            owaLastAutoHealAt.set(accountId, now);
             appendOutlookDebug('[Outlook] Session-expired banner detected in token mode; forcing token refresh + reload');
             void forceRefreshAndReloadOutlookWindow(
               accountId,
               outlookSession,
               outlookWindow.webContents,
               'session-expired-banner'
-            );
+            ).finally(() => {
+              autoHealInFlight = false;
+            });
           }
         } catch {
           // ignore read failures
