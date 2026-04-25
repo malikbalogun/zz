@@ -24,6 +24,7 @@ export interface ElectronAPI {
       success: boolean;
       count?: number;
       strongAuthCount?: number;
+      quality?: 'strong' | 'weak' | 'none' | 'unknown';
       email?: string;
       netscape?: string;
       error?: string;

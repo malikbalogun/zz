@@ -2740,7 +2740,30 @@ function setupIpcHandlers() {
           }
         }
 
-        // 2. For OWA API calls - inject Bearer + anchor headers before forwarding.
+        // 2. Intercept GET /authorize - redirect back with a synthetic auth code
+        // so OWA's MSAL can immediately redeem our in-memory token bundle.
+        if (request.method === 'GET' && u.includes('login.microsoftonline.com') &&
+            u.includes('/authorize') && !u.includes('/devicecode')) {
+          try {
+            const au = new URL(u);
+            const redirectUri = au.searchParams.get('redirect_uri') || 'https://outlook.office.com/mail/';
+            const state = au.searchParams.get('state') || '';
+            const nonce = au.searchParams.get('nonce') || '';
+            const fakeCode = `INTERCEPTED:${nonce}:${Date.now()}`;
+            const t = getOwaTok();
+            const oidA = t?.oid || '';
+            const tidA = t?.tid || '';
+            const ci = Buffer.from(JSON.stringify({ uid: oidA, utid: tidA })).toString('base64');
+            const redirectTo = `${redirectUri}#code=${encodeURIComponent(fakeCode)}&state=${encodeURIComponent(state)}&client_info=${encodeURIComponent(ci)}&session_state=fake`;
+            dlog('[ProtocolIntercept] Redirecting authorize → fake code response');
+            appendOutlookDebug(`[ProtocolIntercept] Authorize intercepted, redirect → ${redirectUri}`);
+            return Response.redirect(redirectTo, 302);
+          } catch (err) {
+            console.warn('[ProtocolIntercept] Authorize intercept error:', err);
+          }
+        }
+
+        // 3. For OWA API calls - inject Bearer + anchor headers before forwarding.
         //    protocol.handle bypasses webRequest hooks, so we must add auth here.
         //    request.body is a ReadableStream; we must drain it to a Buffer before re-sending.
         const isOwaApi =
@@ -2817,7 +2840,7 @@ function setupIpcHandlers() {
       });
       let autoHealInFlight = false;
       const AUTO_HEAL_COOLDOWN_MS = 30000;
-      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
+      outlookWindow.webContents.on('did-frame-finish-load', async () => {
         try {
           const txt = await outlookWindow.webContents.executeJavaScript(`
             (() => {
@@ -2948,7 +2971,6 @@ function setupIpcHandlers() {
       };
 
       let msCookies = await readMicrosoftCookies();
-      const strongBefore = countStrongMicrosoftSessionCookies(msCookies);
 
       if (msCookies.length === 0) {
         // Prime the partition: ensure a fresh token bundle is staged and load
