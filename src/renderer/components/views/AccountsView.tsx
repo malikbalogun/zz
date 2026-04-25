@@ -346,6 +346,27 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
+  const handleSnapshotOwaCookies = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const result = await window.electron.accounts.snapshotOwaCookies(accountId);
+      if (!result.success) {
+        throw new Error(result.error || 'Snapshot failed');
+      }
+      alert(
+        `Stored ${result.count ?? 0} OWA cookies on this account and copied the Cookie header to your clipboard.\n\n` +
+        `Strong auth cookies: ${result.strongAuthCount ?? result.strongCount ?? 0}\n` +
+        `Quality: ${result.quality || 'unknown'}\n\n` +
+        `Use the copied header in browser DevTools / inspect console requests, or switch this account to "In-app OWA: session cookies".`
+      );
+      await loadData();
+    } catch (error) {
+      alert(`Snapshot OWA cookies failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSetOwaMode = async (accountId: string, mode: 'token' | 'cookie') => {
     setLoading(true);
     try {
@@ -969,6 +990,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                           }}
                         >
                           <i className="fas fa-cookie-bite"></i> Pull OWA cookies from panel
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleSnapshotOwaCookies(account.id);
+                          }}
+                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy a Cookie header for inspect/console use."
+                        >
+                          <i className="fas fa-copy"></i> Snapshot cookies for inspect
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

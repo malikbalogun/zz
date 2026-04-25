@@ -24,8 +24,30 @@ export interface ElectronAPI {
       success: boolean;
       count?: number;
       strongAuthCount?: number;
+      strongCount?: number;
       email?: string;
       netscape?: string;
+      header?: string;
+      quality?: 'strong' | 'weak';
+      error?: string;
+    }>;
+    /**
+     * Snapshot the current token-backed OWA cookies onto the account and copy a
+     * ready-to-paste `Cookie:` header to the clipboard for browser devtools /
+     * inspect console use.
+     */
+    snapshotOwaCookies: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      count?: number;
+      strongAuthCount?: number;
+      strongCount?: number;
+      email?: string;
+      netscape?: string;
+      header?: string;
+      quality?: 'strong' | 'weak';
+      copiedToClipboard?: boolean;
       error?: string;
     }>;
     /**
