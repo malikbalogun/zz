@@ -332,12 +332,19 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        const quality = result.quality || 'unknown';
+        const quality = result.quality || 'strong';
         const weakHint =
           quality === 'weak'
             ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
             : '';
-        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
+        const strongCount =
+          typeof result.strongCount === 'number'
+            ? `\nStrong auth cookies: ${result.strongCount}`
+            : '';
+        const storedHint = result.storedOnAccount
+          ? '\nStored on account for cookie-mode/reapply too.'
+          : '';
+        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${strongCount}${storedHint}${weakHint}`);
       }
     } catch (error) {
       alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);

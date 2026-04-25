@@ -51,6 +51,7 @@ const outlookSessionAuth = new WeakMap<Session, { accessToken: string; email: st
 const owaLastSuccessfulRefresh = new Map<string, number>();
 const owaRefreshLocks = new Set<string>();
 const owaLastAutoHealAt = new Map<string, number>();
+const owaExternalBrowserOpenAt = new Map<string, number>();
 
 /** Open Outlook windows per account (accountId -> BrowserWindow) to prevent duplicate windows. */
 const outlookWindows = new Map<string, BrowserWindow>();
@@ -351,6 +352,24 @@ function decryptStoredCookiePayload(encB64: string): string {
   } catch {
     return encB64;
   }
+}
+
+function encryptStoredCookiePayload(raw: string): string {
+  if (!safeStorage.isEncryptionAvailable()) return raw;
+  return safeStorage.encryptString(raw).toString('base64');
+}
+
+async function persistOwaCookieExportOnAccount(accountId: string, cookiePaste: string): Promise<boolean> {
+  const latestStore = await readStore();
+  const accounts: any[] = latestStore.accounts || [];
+  const account = accounts.find((a: any) => a.id === accountId);
+  if (!account || account.auth?.type !== 'token') return false;
+  account.auth = {
+    ...account.auth,
+    owaCookiesEncrypted: encryptStoredCookiePayload(cookiePaste),
+  };
+  await writeStore(latestStore);
+  return true;
 }
 
 /** Decrypt stored Microsoft cookie paste (cookie-only account or token + owaCookiesEncrypted). */
@@ -2817,7 +2836,7 @@ function setupIpcHandlers() {
       });
       let autoHealInFlight = false;
       const AUTO_HEAL_COOLDOWN_MS = 30000;
-      outlookWindow.webContents.on('did-frame-finish-load', async (_event, _isMain, frameProcessId, frameRoutingId) => {
+      outlookWindow.webContents.on('did-frame-finish-load', async () => {
         try {
           const txt = await outlookWindow.webContents.executeJavaScript(`
             (() => {
@@ -2950,11 +2969,13 @@ function setupIpcHandlers() {
       let msCookies = await readMicrosoftCookies();
       const strongBefore = countStrongMicrosoftSessionCookies(msCookies);
 
-      if (msCookies.length === 0) {
-        // Prime the partition: ensure a fresh token bundle is staged and load
-        // OWA in a hidden BrowserWindow long enough for the auth cookies to
-        // settle. Capped at PRIME_TIMEOUT_MS to avoid hanging the IPC.
-        appendOutlookDebug(`[ExportCookies] Partition empty, priming for ${accountId}`);
+      if (msCookies.length === 0 || strongBefore === 0) {
+        // Prime the partition when it is empty or only contains helper cookies:
+        // token-backed OWA sessions often have DefaultAnchorMailbox / cache
+        // helpers before the real Microsoft auth cookies settle.
+        appendOutlookDebug(
+          `[ExportCookies] Priming partition for ${accountId} (cookies=${msCookies.length}, strong=${strongBefore})`
+        );
         try {
           const bundle = await loadOwaTokenBundle(accountId);
           applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
@@ -2993,7 +3014,7 @@ function setupIpcHandlers() {
             const pollTimer = setInterval(async () => {
               try {
                 const probe = await readMicrosoftCookies();
-                if (probe.length > 0) finish();
+                if (probe.length > 0 && countStrongMicrosoftSessionCookies(probe) > 0) finish();
               } catch {
                 /* keep polling */
               }
@@ -3030,14 +3051,17 @@ function setupIpcHandlers() {
       const strongAfter = countStrongMicrosoftSessionCookies(msCookies);
 
       const netscape = cookiesToNetscape(msCookies);
+      const quality = strongAfter > 0 ? 'strong' : 'weak';
+      const storedOnAccount = await persistOwaCookieExportOnAccount(accountId, netscape);
       appendOutlookDebug(
-        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter})`
+        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter}, stored=${storedOnAccount})`
       );
       return {
         success: true,
         count: msCookies.length,
         strongCount: strongAfter,
-        weak: strongAfter === 0,
+        quality,
+        storedOnAccount,
         email: account.email,
         netscape,
       };
@@ -4034,6 +4058,53 @@ function setupIpcHandlers() {
   ipcMain.handle('browser:open', async (_, url: string) => {
     await shell.openExternal(url);
     return { success: true };
+  });
+
+  ipcMain.handle('mailbox:openOwaExternalSignIn', async (_, accountId: string) => {
+    const lastOpenedAt = owaExternalBrowserOpenAt.get(accountId) || 0;
+    if (Date.now() - lastOpenedAt < 10_000) {
+      return { success: true as const, opened: false as const };
+    }
+
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const account = accounts.find((a: any) => a.id === accountId);
+    if (!account?.email) {
+      return { success: false as const, error: 'Account not found' };
+    }
+    if (account.auth?.type !== 'token') {
+      return { success: false as const, error: 'Browser OWA sign-in only applies to token-based Microsoft accounts.' };
+    }
+
+    const settings = store.settings || {};
+    const ms = settings.microsoftOAuth || {};
+    const clientId =
+      (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+      account.auth.clientId ||
+      'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+    const tenant =
+      normalizeAuthorityTenant(
+        (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+        account.auth.authorityEndpoint ||
+        'common'
+      ) || 'common';
+    const redirectUri =
+      (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+      'https://outlook.office.com/mail/';
+
+    const authUrl =
+      `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/authorize` +
+      `?client_id=${encodeURIComponent(clientId)}` +
+      `&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&scope=${encodeURIComponent('openid offline_access https://outlook.office.com/.default')}` +
+      `&prompt=select_account` +
+      `&login_hint=${encodeURIComponent(String(account.email).trim())}`;
+
+    await shell.openExternal(authUrl);
+    owaExternalBrowserOpenAt.set(accountId, Date.now());
+    appendOutlookDebug(`[OutlookExternal] Opened system-browser sign-in for ${account.email}`);
+    return { success: true as const, opened: true as const };
   });
 
   ipcMain.handle(
