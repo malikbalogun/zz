@@ -37,7 +37,7 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Capture OWA client ID from fetch requests to login endpoints
+// 2. Capture OWA client ID from login iframe URLs (without blocking auth)
 // ---------------------------------------------------------------------------
 (function () {
   function captureClientId(url: string) {
@@ -57,24 +57,29 @@ try {
     if (tag.toLowerCase() === 'iframe') {
       const isLoginUrl = (s: string) =>
         typeof s === 'string' && (s.includes('login.microsoftonline.com') || s.includes('login.windows.net'));
-
-      let _src = '';
-      Object.defineProperty(el, 'src', {
-        set(v) {
-          if (isLoginUrl(v)) { captureClientId(v); _src = ''; return; }
-          _src = v; el.setAttribute('src', v);
-        },
-        get() { return _src; },
-      });
-      const origSA = el.setAttribute.bind(el);
+      const origSetAttribute = el.setAttribute.bind(el);
       el.setAttribute = function (n: string, v: string) {
-        if (n === 'src' && isLoginUrl(v)) { captureClientId(v); return; }
-        return origSA(n, v);
+        if (n === 'src' && isLoginUrl(v)) captureClientId(v);
+        return origSetAttribute(n, v);
       };
     }
     return el;
   };
-  console.log('[PRELOAD] Iframe blocker + client-ID capture installed');
+
+  // Also observe direct iframe.src assignments on already-created iframes.
+  // We only capture metadata; we do NOT block navigation.
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type !== 'attributes' || record.attributeName !== 'src') continue;
+      const target = record.target as HTMLIFrameElement;
+      if (target && target.tagName === 'IFRAME' && typeof target.src === 'string') {
+        captureClientId(target.src);
+      }
+    }
+  });
+  observer.observe(document.documentElement, { attributes: true, subtree: true, attributeFilter: ['src'] });
+
+  console.log('[PRELOAD] Iframe client-ID capture installed (auth iframes allowed)');
 })();
 
 // ---------------------------------------------------------------------------
