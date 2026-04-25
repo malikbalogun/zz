@@ -5,7 +5,7 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies, cookiesToNetscape } from '../shared/cookieFormat';
+import { parseCookiePaste, filterMicrosoftRelatedCookies, cookiesToNetscape, type ParsedCookie } from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -326,6 +326,31 @@ function getMicrosoftCookiePasteFromAccount(account: any): string | null {
   return null;
 }
 
+// Session cookie sets that only include helper cookies (e.g. DefaultAnchorMailbox,
+// msal.cache.encryption) are not sufficient for resilient OWA cookie-mode sign-in.
+// We treat token accounts with weak cookie payloads as "prefer token mode" to avoid
+// opening a window that immediately lands in "Session expired".
+const STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS: RegExp[] = [
+  /^ESTSAUTH/i,
+  /^ESTSSC$/i,
+  /^OpenIdConnect\.(token|id_token|nonce)/i,
+  /^X-OWA-CANARY$/i,
+  /^Canary$/i,
+  /^rtFa$/i,
+  /^FedAuth$/i,
+  /^RPSAuth$/i,
+  /^MSP(Auth|Requ|OK|Prof|CID|TC)$/i,
+  /^esctx$/i,
+];
+
+function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
+  return cookies.some((c) => {
+    const name = String(c.name || '').trim();
+    if (!name) return false;
+    return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
+  });
+}
+
 /**
  * Open OWA using Microsoft session cookies only (no MSAL / token intercept).
  * Expects a Netscape / JSON / header paste compatible with `parseCookiePaste`.
@@ -418,6 +443,51 @@ async function openOwaWithCookieSession(
   outlookWindows.set(windowKey, outlookWindow);
   const myGeneration = (outlookWindowGeneration.get(windowKey) || 0) + 1;
   outlookWindowGeneration.set(windowKey, myGeneration);
+
+  // Mirror token-mode popup policy so OWA "Sign in" can open Microsoft auth
+  // windows inside Electron instead of showing "enable pop-ups" loops.
+  outlookWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      const allowedHosts = [
+        'outlook.office.com',
+        'outlook.office365.com',
+        'outlook.cloud.microsoft',
+        'login.microsoftonline.com',
+        'login.windows.net',
+        'admin.exchange.microsoft.com',
+        'admin.microsoft.com',
+        'm365.cloud.microsoft',
+      ];
+      const isInternal =
+        allowedHosts.includes(u.hostname) ||
+        u.hostname.endsWith('.office.com') ||
+        u.hostname.endsWith('.office365.com') ||
+        u.hostname.endsWith('.exchange.microsoft.com') ||
+        u.hostname.endsWith('.cloud.microsoft');
+      if (isInternal) {
+        appendOutlookDebug(`[OutlookCookie] Allowing internal popup: ${url}`);
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 1024,
+            height: 768,
+            webPreferences: {
+              partition: partitionName,
+              contextIsolation: false,
+              nodeIntegration: false,
+              sandbox: false,
+              preload: path.join(__dirname, 'preload-mailbox-cookie.js'),
+            },
+          },
+        };
+      }
+      shell.openExternal(url).catch(() => {});
+    } catch (err) {
+      console.error('[OutlookCookie] Failed to process window-open:', err);
+    }
+    return { action: 'deny' };
+  });
 
   outlookWindow.on('closed', () => {
     const currentGeneration = outlookWindowGeneration.get(windowKey);
@@ -2320,9 +2390,20 @@ function setupIpcHandlers() {
             'OWA cookie mode needs stored Microsoft session cookies. On Accounts, use "Pull OWA cookies from panel" (your panel must implement GET /api/mailbox/{email}/export-cookies), or add cookies to this account, or switch OWA mode back to OAuth tokens.'
           );
         }
-        await openOwaWithCookieSession(accountId, acc, paste, mode);
-        appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
-        return { success: true as const, session: 'cookie' as const };
+        // Token accounts can carry stale/partial cookie exports. If the stored
+        // payload lacks strong auth-cookie markers, avoid cookie mode and fall
+        // back to the token path for a stable login.
+        const parsed = filterMicrosoftRelatedCookies(parseCookiePaste(paste));
+        const strong = hasStrongMicrosoftSessionCookies(parsed);
+        if (acc.auth?.type === 'token' && !strong) {
+          appendOutlookDebug(
+            `[OutlookCookie] Stored cookies for ${acc.email} look weak (no auth markers); falling back to token mode`
+          );
+        } else {
+          await openOwaWithCookieSession(accountId, acc, paste, mode);
+          appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
+          return { success: true as const, session: 'cookie' as const };
+        }
       }
 
       const bundle = await loadOwaTokenBundle(accountId);
@@ -2890,6 +2971,12 @@ function setupIpcHandlers() {
       if (msCookies.length === 0) {
         throw new Error(
           `No Microsoft cookies could be captured for ${account.email}. Try opening Outlook (the play button) once first; the session needs to settle before cookies can be exported.`
+        );
+      }
+
+      if (!hasStrongMicrosoftSessionCookies(msCookies)) {
+        throw new Error(
+          `Only helper cookies were captured for ${account.email} (no strong Microsoft auth cookies yet). Open Outlook for this account, complete the in-window Sign in flow once, then export again.`
         );
       }
 
