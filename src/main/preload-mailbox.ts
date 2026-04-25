@@ -3,23 +3,12 @@ import { ipcRenderer } from 'electron';
 console.log('[HighHopes] Preload script loaded for mailbox window');
 
 // ---------------------------------------------------------------------------
-// 1. Clear stale MSAL keys then inject fresh cache from main process
+// 1. Inject MSAL cache from main process
 // ---------------------------------------------------------------------------
-try {
-  const staleKeys: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && (key.startsWith('msal') || key.startsWith('appmetadata-') || key === 'olk-msalexp')) {
-      staleKeys.push(key);
-    }
-  }
-  if (staleKeys.length > 0) {
-    staleKeys.forEach(k => localStorage.removeItem(k));
-    console.log(`[HighHopes] Cleared ${staleKeys.length} stale MSAL keys`);
-  }
-} catch (err) {
-  console.error('[HighHopes] Failed to clear stale keys:', (err as any).message);
-}
+// IMPORTANT:
+// Do NOT clear existing MSAL/browser auth keys here. OWA may actively manage
+// first-party session keys during sign-in/renewal, and aggressive clearing can
+// cause endless "session expired" loops after reload.
 
 try {
   console.log('[HighHopes] Requesting MSAL cache from main process...');
