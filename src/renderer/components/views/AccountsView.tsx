@@ -357,13 +357,13 @@ const AccountsView: FC<AccountsViewProps> = ({
     try {
       const account = accounts.find(a => a.id === accountId);
       const result = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!result.success || !result.domainJson) {
+      if (!result.success || !result.extensionJson) {
         throw new Error(result.error || 'Export failed');
       }
       const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
       const saved = await window.electron.files.saveTextWithDialog({
         defaultFilename: `${safeEmail}-cookies-domain-map-${new Date().toISOString().slice(0, 10)}.txt`,
-        content: result.domainJson,
+        content: result.extensionJson,
         filters: [
           { name: 'Text file', extensions: ['txt'] },
           { name: 'All files', extensions: ['*'] },
@@ -420,10 +420,10 @@ const AccountsView: FC<AccountsViewProps> = ({
         throw new Error(result.error || 'Snapshot failed');
       }
       alert(
-        `Stored ${result.count ?? 0} OWA cookies on this account and copied a paste-ready console script to your clipboard.\n\n` +
+        `Stored ${result.count ?? 0} OWA cookies on this account and copied browser-import JSON to your clipboard.\n\n` +
         `Strong auth cookies: ${result.strongAuthCount ?? result.strongCount ?? 0}\n` +
         `Quality: ${result.quality || 'unknown'}\n\n` +
-        `Paste it in browser DevTools / inspect console. For the best full browser-login import file, use "Export cookies (browser import JSON)".`
+        `Paste/import that JSON into your browser cookie importer extension. If you still want the console fallback path, use "Export cookies (browser snippet)".`
       );
       await loadData();
     } catch (error) {
@@ -1066,7 +1066,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleSnapshotOwaCookies(account.id);
                           }}
-                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy a paste-ready console script for inspect/browser testing."
+                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy Cookie-Editor / EditThisCookie-style browser import JSON to your clipboard."
                         >
                           <i className="fas fa-copy"></i> Snapshot cookies for inspect
                         </div>

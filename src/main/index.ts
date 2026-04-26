@@ -3224,8 +3224,8 @@ function setupIpcHandlers() {
 
   /**
    * Capture the current token-backed OWA session, persist it onto the account's
-   * `owaCookiesEncrypted`, and copy a ready-to-paste Cookie header for browser
-   * devtools / inspect console usage.
+   * `owaCookiesEncrypted`, and copy the exact browser-import JSON payload to the
+   * clipboard so the user can paste it into a cookie importer extension.
    */
   ipcMain.handle('account:snapshotOwaCookies', async (_, accountId: string) => {
     try {
@@ -3243,7 +3243,7 @@ function setupIpcHandlers() {
         owaCookiesEncrypted: encryptStoredCookiePayload(snapshot.netscape),
       };
       await writeStore(store);
-      clipboard.writeText(snapshot.browserSnippet);
+      clipboard.writeText(snapshot.extensionJson);
       appendOutlookDebug(
         `[CookieSnapshot] Stored ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
       );
