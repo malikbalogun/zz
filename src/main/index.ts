@@ -422,55 +422,47 @@ type CapturedOwaCookieSnapshot = {
   strongCount: number;
   netscape: string;
   header: string;
-  domainJson: string;
+  extensionJson: string;
+  consoleJson: string;
   browserSnippet: string;
   quality: 'strong' | 'weak';
 };
 
-function cookiesToDomainJson(cookies: ParsedCookie[]): string {
-  const grouped: Record<string, Record<string, Record<string, unknown>>> = {};
+function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<string, unknown>> {
+  const rows: Array<Record<string, unknown>> = [];
   for (const cookie of cookies) {
     const domain = String(cookie.domain || '').trim();
     const name = String(cookie.name || '').trim();
     if (!domain || !name) continue;
-    grouped[domain] ||= {};
-    const row: Record<string, unknown> = {
-      Name: name,
-      Value: cookie.value,
-      Path: cookie.path || '/',
-      Secure: cookie.secure !== false,
-      HttpOnly: cookie.httpOnly !== false,
-      HostOnly: cookie.hostOnly ?? !domain.startsWith('.'),
-      Session: cookie.session ?? !cookie.expirationDate,
-    };
-    if (cookie.sameSite) row.SameSite = cookie.sameSite;
-    if (typeof cookie.expirationDate === 'number') {
-      row.ExpirationDate = Math.floor(cookie.expirationDate * 1000);
-    }
-    if (typeof cookie.storeId === 'string' || cookie.storeId === null) {
-      row.StoreId = cookie.storeId;
-    }
-    grouped[domain][name] = row;
+    rows.push({
+      name,
+      value: cookie.value,
+      domain,
+      expirationDate:
+        typeof cookie.expirationDate === 'number'
+          ? Math.floor(cookie.expirationDate * 1000)
+          : undefined,
+      hostOnly: cookie.hostOnly ?? !domain.startsWith('.'),
+      httpOnly: cookie.httpOnly !== false,
+      path: cookie.path || '/',
+      sameSite: cookie.sameSite || 'none',
+      secure: cookie.secure !== false,
+      session: cookie.session ?? !cookie.expirationDate,
+      storeId:
+        typeof cookie.storeId === 'string' || cookie.storeId === null
+          ? cookie.storeId
+          : null,
+    });
   }
-  return `(${JSON.stringify(grouped, null, 2)})`;
+  return rows;
+}
+
+function cookiesToExtensionImportJson(cookies: ParsedCookie[]): string {
+  return JSON.stringify(cookiesToExtensionImportRows(cookies), null, 2);
 }
 
 function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
-  const serializable = cookies.map((cookie) => ({
-    name: cookie.name,
-    value: cookie.value,
-    domain: cookie.domain,
-    expirationDate: cookie.expirationDate
-      ? Math.floor(cookie.expirationDate * 1000)
-      : undefined,
-    hostOnly: cookie.hostOnly ?? (cookie.domain ? !cookie.domain.startsWith('.') : true),
-    httpOnly: cookie.httpOnly !== false,
-    path: cookie.path || '/',
-    sameSite: cookie.sameSite || 'none',
-    secure: cookie.secure !== false,
-    session: cookie.session ?? !cookie.expirationDate,
-    storeId: null,
-  }));
+  const serializable = cookiesToExtensionImportRows(cookies);
   const httpOnlySkipped = serializable
     .filter((cookie) => cookie.httpOnly)
     .map((cookie) => cookie.name);
@@ -478,7 +470,11 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
   const cookieHeader = cookiesToHeaderString(cookies);
   const normalizeHost = (domain?: string) => String(domain || '').replace(/^\./, '').toLowerCase();
   const writableHosts = Array.from(
-    new Set(cookieWritable.map((cookie) => normalizeHost(cookie.domain)).filter(Boolean))
+    new Set(
+      cookieWritable
+        .map((cookie) => normalizeHost(typeof cookie.domain === 'string' ? cookie.domain : undefined))
+        .filter(Boolean)
+    )
   ).sort((a, b) => {
     const preferred = [
       'login.microsoftonline.com',
@@ -679,7 +675,8 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
     strongCount,
     netscape: cookiesToNetscape(msCookies),
     header: cookiesToHeaderString(msCookies),
-    domainJson: cookiesToDomainJson(msCookies),
+    extensionJson: cookiesToExtensionImportJson(msCookies),
+    consoleJson: `(${JSON.stringify(cookiesToExtensionImportRows(msCookies), null, 2)})`,
     browserSnippet: cookiesToBrowserConsoleSnippet(msCookies),
     quality: strongCount > 0 ? 'strong' : 'weak',
   };
@@ -3213,7 +3210,8 @@ function setupIpcHandlers() {
         email: snapshot.account.email,
         netscape: snapshot.netscape,
         header: snapshot.header,
-        domainJson: snapshot.domainJson,
+        extensionJson: snapshot.extensionJson,
+        consoleJson: snapshot.consoleJson,
         browserSnippet: snapshot.browserSnippet,
         quality: snapshot.quality,
       };
@@ -3257,7 +3255,8 @@ function setupIpcHandlers() {
         email: snapshot.account.email,
         netscape: snapshot.netscape,
         header: snapshot.header,
-        domainJson: snapshot.domainJson,
+        extensionJson: snapshot.extensionJson,
+        consoleJson: snapshot.consoleJson,
         browserSnippet: snapshot.browserSnippet,
         quality: snapshot.quality,
         copiedToClipboard: true,

@@ -371,8 +371,8 @@ const AccountsView: FC<AccountsViewProps> = ({
       });
       if (saved.ok) {
         alert(
-          `Exported high-fidelity domain-keyed cookie JSON to ${saved.path}\n\n` +
-          `This format keeps browser-relevant metadata (HttpOnly, hostOnly, sameSite, session, expiry) and is the better custom file if you want to import cookies for real browser login.`
+          `Exported browser-import cookie JSON to ${saved.path}\n\n` +
+          `This file now matches the cookie-array format commonly accepted by browser cookie import extensions such as Cookie-Editor / EditThisCookie, including fields like hostOnly, session, sameSite, secure, and expirationDate.`
         );
       }
     } catch (error) {
@@ -1092,7 +1092,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleExportOwaDomainJson(account.id);
                           }}
-                          title="Save cookies as the high-fidelity domain-keyed JSON format for browser import/login workflows."
+                          title="Save cookies as a Cookie-Editor / EditThisCookie-style browser import JSON file."
                         >
                           <i className="fas fa-file-code"></i> Export cookies (browser import JSON)
                         </div>
