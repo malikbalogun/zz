@@ -14,49 +14,6 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
-     * Export the Microsoft OWA session cookies for a token-typed account as a
-     * Netscape HTTP Cookie File string. The returned string is round-tripable
-     * through the existing cookie-import path.
-     */
-    exportOwaCookies: (
-      accountId: string
-    ) => Promise<{
-      success: boolean;
-      count?: number;
-      strongAuthCount?: number;
-      strongCount?: number;
-      email?: string;
-      netscape?: string;
-      header?: string;
-      extensionJson?: string;
-      consoleJson?: string;
-      browserSnippet?: string;
-      quality?: 'strong' | 'weak';
-      error?: string;
-    }>;
-    /**
-     * Snapshot the current token-backed OWA cookies onto the account and copy a
-     * ready-to-paste `Cookie:` header to the clipboard for browser devtools /
-     * inspect console use.
-     */
-    snapshotOwaCookies: (
-      accountId: string
-    ) => Promise<{
-      success: boolean;
-      count?: number;
-      strongAuthCount?: number;
-      strongCount?: number;
-      email?: string;
-      netscape?: string;
-      header?: string;
-      extensionJson?: string;
-      consoleJson?: string;
-      browserSnippet?: string;
-      quality?: 'strong' | 'weak';
-      copiedToClipboard?: boolean;
-      error?: string;
-    }>;
-    /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
      */

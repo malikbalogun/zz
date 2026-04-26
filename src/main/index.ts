@@ -5,13 +5,7 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import {
-  parseCookiePaste,
-  filterMicrosoftRelatedCookies,
-  cookiesToHeaderString,
-  cookiesToNetscape,
-  type ParsedCookie,
-} from '../shared/cookieFormat';
+import { parseCookiePaste, filterMicrosoftRelatedCookies } from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -359,7 +353,7 @@ function decryptStoredCookiePayload(encB64: string): string {
   }
 }
 
-/** Decrypt stored Microsoft cookie paste (cookie-only account or token + owaCookiesEncrypted). */
+/** Decrypt stored Microsoft cookie paste for cookie-only accounts. */
 function getMicrosoftCookiePasteFromAccount(account: any): string | null {
   const auth = account?.auth;
   if (!auth) return null;
@@ -369,330 +363,7 @@ function getMicrosoftCookiePasteFromAccount(account: any): string | null {
     const raw = decryptStoredCookiePayload(enc).trim();
     return raw || null;
   }
-  if (auth.type === 'token' && typeof auth.owaCookiesEncrypted === 'string' && auth.owaCookiesEncrypted.trim()) {
-    const raw = decryptStoredCookiePayload(auth.owaCookiesEncrypted.trim()).trim();
-    return raw || null;
-  }
   return null;
-}
-
-// Session cookie sets that only include helper cookies (e.g. DefaultAnchorMailbox,
-// msal.cache.encryption) are not sufficient for resilient OWA cookie-mode sign-in.
-// We treat token accounts with weak cookie payloads as "prefer token mode" to avoid
-// opening a window that immediately lands in "Session expired".
-const STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS: RegExp[] = [
-  /^ESTSAUTH/i,
-  /^ESTSSC$/i,
-  /^OpenIdConnect\.(token|id_token|nonce)/i,
-  /^X-OWA-CANARY$/i,
-  /^Canary$/i,
-  /^rtFa$/i,
-  /^FedAuth$/i,
-  /^RPSAuth$/i,
-  /^MSP(Auth|Requ|OK|Prof|CID|TC)$/i,
-  /^esctx$/i,
-];
-
-function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
-  return cookies.some((c) => {
-    const name = String(c.name || '').trim();
-    if (!name) return false;
-    return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
-  });
-}
-
-function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): number {
-  let n = 0;
-  for (const c of cookies) {
-    const name = String(c.name || '').trim();
-    if (!name) continue;
-    if (STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name))) n++;
-  }
-  return n;
-}
-
-function encryptStoredCookiePayload(raw: string): string {
-  if (!safeStorage.isEncryptionAvailable()) return raw;
-  return safeStorage.encryptString(raw).toString('base64');
-}
-
-type CapturedOwaCookieSnapshot = {
-  account: any;
-  cookies: ParsedCookie[];
-  strongCount: number;
-  netscape: string;
-  header: string;
-  extensionJson: string;
-  consoleJson: string;
-  browserSnippet: string;
-  quality: 'strong' | 'weak';
-};
-
-function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<string, unknown>> {
-  const normalizeImporterSameSite = (
-    sameSite?: string
-  ): 'lax' | 'strict' | 'no_restriction' | undefined => {
-    const raw = String(sameSite || '').trim().toLowerCase();
-    if (!raw || raw === 'unspecified') return undefined;
-    if (raw === 'none' || raw === 'no_restriction') return 'no_restriction';
-    if (raw === 'lax') return 'lax';
-    if (raw === 'strict') return 'strict';
-    return undefined;
-  };
-  const rows: Array<Record<string, unknown>> = [];
-  for (const cookie of cookies) {
-    const rawDomain = String(cookie.domain || '').trim();
-    const domain = rawDomain.replace(/^\./, '');
-    const name = String(cookie.name || '').trim();
-    if (!domain || !name) continue;
-    const row: Record<string, unknown> = {
-      name,
-      value: cookie.value,
-      domain,
-      expirationDate:
-        typeof cookie.expirationDate === 'number'
-          ? Math.floor(cookie.expirationDate)
-          : undefined,
-      hostOnly: cookie.hostOnly ?? !rawDomain.startsWith('.'),
-      httpOnly: cookie.httpOnly !== false,
-      path: cookie.path || '/',
-      secure: cookie.secure !== false,
-      session: cookie.session ?? !cookie.expirationDate,
-      storeId:
-        typeof cookie.storeId === 'string' || cookie.storeId === null
-          ? cookie.storeId
-          : null,
-    };
-    const sameSite = normalizeImporterSameSite(cookie.sameSite);
-    if (sameSite) row.sameSite = sameSite;
-    rows.push(row);
-  }
-  return rows;
-}
-
-function cookiesToExtensionImportJson(cookies: ParsedCookie[]): string {
-  return JSON.stringify(cookiesToExtensionImportRows(cookies), null, 2);
-}
-
-function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
-  const serializable = cookiesToExtensionImportRows(cookies);
-  const httpOnlySkipped = serializable
-    .filter((cookie) => cookie.httpOnly)
-    .map((cookie) => cookie.name);
-  const cookieWritable = serializable.filter((cookie) => !cookie.httpOnly);
-  const cookieHeader = cookiesToHeaderString(cookies);
-  const normalizeHost = (domain?: string) => String(domain || '').replace(/^\./, '').toLowerCase();
-  const writableHosts = Array.from(
-    new Set(
-      cookieWritable
-        .map((cookie) => normalizeHost(typeof cookie.domain === 'string' ? cookie.domain : undefined))
-        .filter(Boolean)
-    )
-  ).sort((a, b) => {
-    const preferred = [
-      'login.microsoftonline.com',
-      'login.live.com',
-      'outlook.office.com',
-      'outlook.office365.com',
-      'outlook.cloud.microsoft',
-    ];
-    const ai = preferred.indexOf(a);
-    const bi = preferred.indexOf(b);
-    if (ai !== -1 || bi !== -1) {
-      return (ai === -1 ? preferred.length : ai) - (bi === -1 ? preferred.length : bi);
-    }
-    return a.localeCompare(b);
-  });
-  const outlookHost =
-    writableHosts.find((host) => host.includes('outlook')) || 'outlook.office.com';
-  const targetUrl = `https://${outlookHost}/mail/`;
-  const payload = JSON.stringify(cookieWritable);
-  const skippedComment = httpOnlySkipped.length
-    ? `/* HttpOnly cookies omitted from document.cookie path: ${httpOnlySkipped.join(', ')} */\n`
-    : '';
-  return (
-    `${skippedComment};(() => {\n` +
-    `  const cookies = JSON.parse(${JSON.stringify(payload)});\n` +
-    `  const hosts = ${JSON.stringify(writableHosts)};\n` +
-    `  const stateKey = '__OWA_COOKIE_BOOTSTRAP__:';\n` +
-    `  const targetUrl = ${JSON.stringify(targetUrl)};\n` +
-    `  const normalizeHost = (domain) => String(domain || '').replace(/^\\./, '').toLowerCase();\n` +
-    `  const matchesHost = (cookie, host) => { const d = normalizeHost(cookie.domain); return !!d && (host === d || host.endsWith('.' + d)); };\n` +
-    `  const writableForHost = (host) => cookies.filter((cookie) => matchesHost(cookie, host));\n` +
-    `  let state = null;\n` +
-    `  try { if (typeof window.name === 'string' && window.name.startsWith(stateKey)) state = JSON.parse(window.name.slice(stateKey.length)); } catch (_) { state = null; }\n` +
-    `  if (!state || !Array.isArray(state.cookies) || !Array.isArray(state.hosts)) {\n` +
-    `    state = { cookies, hosts, step: 0, targetUrl };\n` +
-    `    window.name = stateKey + JSON.stringify(state);\n` +
-    `  }\n` +
-    `  const currentHost = location.hostname.toLowerCase();\n` +
-    `  const currentTargetHost = state.hosts[state.step];\n` +
-    `  if (!currentTargetHost) {\n` +
-    `    window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
-    `    window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
-    `    if (${JSON.stringify(httpOnlySkipped)}.length) console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
-    `    window.name = '';\n` +
-    `    if (location.href !== state.targetUrl) location.href = state.targetUrl;\n` +
-    `    return;\n` +
-    `  }\n` +
-    `  if (!(currentHost === currentTargetHost || currentHost.endsWith('.' + currentTargetHost))) {\n` +
-    `    location.href = 'https://' + currentTargetHost + '/';\n` +
-    `    return;\n` +
-    `  }\n` +
-    `  window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
-    `  window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
-    `  for (const o of writableForHost(currentHost)) {\n` +
-    `    const parts = [\`${'${o.name}'}=${'${o.value}'}\`];\n` +
-    `    if (o.session !== true && typeof o.expirationDate === 'number') parts.push(\`Expires=\${new Date(o.expirationDate).toUTCString()}\`);\n` +
-    `    else parts.push('Max-Age=31536000');\n` +
-    `    parts.push(o.path ? \`path=\${o.path}\` : 'path=/');\n` +
-    `    if (o.domain) parts.push(\`domain=\${o.domain}\`);\n` +
-    `    if (o.secure !== false) parts.push('Secure');\n` +
-    `    parts.push(\`SameSite=\${o.sameSite || 'None'}\`);\n` +
-    `    document.cookie = parts.join(';');\n` +
-    `  }\n` +
-    `  if (${JSON.stringify(httpOnlySkipped)}.length) {\n` +
-    `    console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
-    `  }\n` +
-    `  state.step += 1;\n` +
-    `  window.name = stateKey + JSON.stringify(state);\n` +
-    `  const nextHost = state.hosts[state.step];\n` +
-    `  if (nextHost) {\n` +
-    `    location.href = 'https://' + nextHost + '/';\n` +
-    `    return;\n` +
-    `  }\n` +
-    `  window.name = '';\n` +
-    `  location.href = state.targetUrl;\n` +
-    `})();`
-  );
-}
-
-async function captureTokenBackedOwaCookies(accountId: string): Promise<CapturedOwaCookieSnapshot> {
-  const store = await readStore();
-  const accounts: any[] = store.accounts || [];
-  const account = accounts.find((a: any) => a.id === accountId);
-  if (!account) throw new Error('Account not found');
-  if (account.auth?.type !== 'token') {
-    throw new Error('Cookie export only applies to token-based Microsoft accounts.');
-  }
-
-  // Must match the partition used by mailbox:openOutlook (token path) so
-  // we read cookies from the same jar OWA actually populated.
-  const partitionName = `persist:outlook-${accountId}`;
-  const owaSession = session.fromPartition(partitionName);
-
-  const readMicrosoftCookies = async () => {
-    const all = await owaSession.cookies.get({});
-    const parsed = all.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path || '/',
-      secure: c.secure !== false,
-      httpOnly: c.httpOnly === true,
-      hostOnly: c.hostOnly === true,
-      sameSite:
-        c.sameSite === 'lax'
-          ? 'lax'
-          : c.sameSite === 'strict'
-            ? 'strict'
-            : c.sameSite === 'no_restriction'
-              ? 'none'
-              : undefined,
-      session: c.session === true,
-      expirationDate: c.expirationDate,
-    }));
-    return filterMicrosoftRelatedCookies(parsed);
-  };
-
-  let msCookies = await readMicrosoftCookies();
-  if (msCookies.length === 0 || !hasStrongMicrosoftSessionCookies(msCookies)) {
-    // Prime the partition: ensure a fresh token bundle is staged and load
-    // OWA in a hidden BrowserWindow long enough for the auth cookies to
-    // settle. Capped at PRIME_TIMEOUT_MS to avoid hanging the IPC.
-    appendOutlookDebug(`[ExportCookies] Partition empty, priming for ${accountId}`);
-    try {
-      const bundle = await loadOwaTokenBundle(accountId);
-      applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
-      installOutlookPartitionRequestHooks(owaSession);
-    } catch (err) {
-      throw new Error(
-        `Could not stage tokens for ${account.email}: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-
-    const primer = new BrowserWindow({
-      width: 800,
-      height: 600,
-      show: false,
-      webPreferences: {
-        partition: partitionName,
-        contextIsolation: false,
-        nodeIntegration: false,
-        sandbox: false,
-        preload: path.join(__dirname, 'preload-mailbox.js'),
-      },
-    });
-    windowToAccountMap.set(primer.webContents.id, accountId);
-
-    const PRIME_TIMEOUT_MS = 12000;
-    try {
-      await new Promise<void>((resolve) => {
-        const settled = { done: false };
-        const finish = () => {
-          if (settled.done) return;
-          settled.done = true;
-          clearInterval(pollTimer);
-          clearTimeout(hardTimeout);
-          resolve();
-        };
-        const pollTimer = setInterval(async () => {
-          try {
-            const probe = await readMicrosoftCookies();
-            if (probe.length > 0 && hasStrongMicrosoftSessionCookies(probe)) finish();
-          } catch {
-            /* keep polling */
-          }
-        }, 750);
-        const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
-        primer.loadURL('https://outlook.office.com/mail/inbox?locale=en-US').catch((loadErr) => {
-          appendOutlookDebug(
-            `[ExportCookies] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
-          );
-        });
-      });
-    } finally {
-      windowToAccountMap.delete(primer.webContents.id);
-      if (!primer.isDestroyed()) primer.destroy();
-    }
-
-    msCookies = await readMicrosoftCookies();
-  }
-
-  if (msCookies.length === 0) {
-    throw new Error(
-      `No Microsoft cookies could be captured for ${account.email}. Try opening Outlook (the play button) once first; the session needs to settle before cookies can be exported.`
-    );
-  }
-
-  const strongCount = countStrongMicrosoftSessionCookies(msCookies);
-  if (strongCount === 0) {
-    throw new Error(
-      `Only helper cookies were captured for ${account.email} (no strong Microsoft auth cookies yet). Open Outlook for this account, complete the in-window Sign in flow once, then export again.`
-    );
-  }
-
-  return {
-    account,
-    cookies: msCookies,
-    strongCount,
-    netscape: cookiesToNetscape(msCookies),
-    header: cookiesToHeaderString(msCookies),
-    extensionJson: cookiesToExtensionImportJson(msCookies),
-    consoleJson: `(${JSON.stringify(cookiesToExtensionImportRows(msCookies), null, 2)})`,
-    browserSnippet: cookiesToBrowserConsoleSnippet(msCookies),
-    quality: strongCount > 0 ? 'strong' : 'weak',
-  };
 }
 
 /**
@@ -2720,34 +2391,18 @@ function setupIpcHandlers() {
       const acc = accountsList.find((a: any) => a.id === accountId);
       if (!acc?.email) throw new Error('Account not found');
 
-      const explicitToken = options?.authPreference === 'token';
-      const useCookiesPath =
-        !explicitToken &&
-        (acc.auth?.type === 'cookie' ||
-          options?.authPreference === 'cookie' ||
-          (acc.auth?.type === 'token' && acc.auth?.owaMailboxMode === 'cookie'));
+      const useCookiesPath = acc.auth?.type === 'cookie' || options?.authPreference === 'cookie';
 
       if (useCookiesPath) {
         const paste = getMicrosoftCookiePasteFromAccount(acc);
         if (!paste) {
           throw new Error(
-            'OWA cookie mode needs stored Microsoft session cookies. On Accounts, use "Pull OWA cookies from panel" (your panel must implement GET /api/mailbox/{email}/export-cookies), or add cookies to this account, or switch OWA mode back to OAuth tokens.'
+            'OWA cookie mode needs stored Microsoft session cookies. Add cookies to this account with Add Account -> Cookie, or use a token account for OAuth.'
           );
         }
-        // Token accounts can carry stale/partial cookie exports. If the stored
-        // payload lacks strong auth-cookie markers, avoid cookie mode and fall
-        // back to the token path for a stable login.
-        const parsed = filterMicrosoftRelatedCookies(parseCookiePaste(paste));
-        const strong = hasStrongMicrosoftSessionCookies(parsed);
-        if (acc.auth?.type === 'token' && !strong) {
-          appendOutlookDebug(
-            `[OutlookCookie] Stored cookies for ${acc.email} look weak (no auth markers); falling back to token mode`
-          );
-        } else {
-          await openOwaWithCookieSession(accountId, acc, paste, mode);
-          appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
-          return { success: true as const, session: 'cookie' as const };
-        }
+        await openOwaWithCookieSession(accountId, acc, paste, mode);
+        appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
+        return { success: true as const, session: 'cookie' as const };
       }
 
       const bundle = await loadOwaTokenBundle(accountId);
@@ -3198,93 +2853,8 @@ function setupIpcHandlers() {
   });
 
   /**
-   * Export the Microsoft session cookies stored under a token account's OWA
-   * partition as a **Netscape HTTP Cookie File** string. This is the inverse
-   * of the existing cookie-import path, and the format round-trips back into
-   * `parseCookiePaste`.
-   *
-   * If the partition has no Microsoft cookies yet (e.g. the user has never
-   * opened OWA for this account in this app), we prime them by briefly
-   * loading https://outlook.office.com/mail/inbox in a hidden BrowserWindow
-   * with the same partition + preload — long enough for the OAuth interceptor
-   * + AAD redirects to set the auth cookies.
-   */
-  ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
-    try {
-      const snapshot = await captureTokenBackedOwaCookies(accountId);
-      appendOutlookDebug(
-        `[ExportCookies] Exported ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
-      );
-      return {
-        success: true,
-        count: snapshot.cookies.length,
-        strongCount: snapshot.strongCount,
-        strongAuthCount: snapshot.strongCount,
-        email: snapshot.account.email,
-        netscape: snapshot.netscape,
-        header: snapshot.header,
-        extensionJson: snapshot.extensionJson,
-        consoleJson: snapshot.consoleJson,
-        browserSnippet: snapshot.browserSnippet,
-        quality: snapshot.quality,
-      };
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      appendOutlookDebug(`[ExportCookies] Failed: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-
-  /**
-   * Capture the current token-backed OWA session, persist it onto the account's
-   * `owaCookiesEncrypted`, and copy the exact browser-import JSON payload to the
-   * clipboard so the user can paste it into a cookie importer extension.
-   */
-  ipcMain.handle('account:snapshotOwaCookies', async (_, accountId: string) => {
-    try {
-      const snapshot = await captureTokenBackedOwaCookies(accountId);
-      const store = await readStore();
-      const accounts: any[] = store.accounts || [];
-      const account = accounts.find((a: any) => a.id === accountId);
-      if (!account) throw new Error('Account not found');
-      if (account.auth?.type !== 'token') {
-        throw new Error('Cookie snapshot only applies to token-based Microsoft accounts.');
-      }
-
-      account.auth = {
-        ...account.auth,
-        owaCookiesEncrypted: encryptStoredCookiePayload(snapshot.netscape),
-      };
-      await writeStore(store);
-      clipboard.writeText(snapshot.extensionJson);
-      appendOutlookDebug(
-        `[CookieSnapshot] Stored ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
-      );
-      return {
-        success: true,
-        count: snapshot.cookies.length,
-        strongCount: snapshot.strongCount,
-        strongAuthCount: snapshot.strongCount,
-        email: snapshot.account.email,
-        netscape: snapshot.netscape,
-        header: snapshot.header,
-        extensionJson: snapshot.extensionJson,
-        consoleJson: snapshot.consoleJson,
-        browserSnippet: snapshot.browserSnippet,
-        quality: snapshot.quality,
-        copiedToClipboard: true,
-      };
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      appendOutlookDebug(`[CookieSnapshot] Failed: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-
-  /**
-   * Re-apply the stored cookie paste for a cookie-typed account (or a token
-   * account with `owaCookiesEncrypted` set) to the OWA partition. Useful as
-   * a manual "did the cookies actually take?" check from AccountsView.
+   * Re-apply the stored cookie paste for a cookie-typed account to its OWA
+   * partition. Useful as a manual "did the cookies actually take?" check.
    *
    * Returns how many cookies parsed, were Microsoft-related, and were
    * successfully written.
@@ -3299,7 +2869,7 @@ function setupIpcHandlers() {
       const paste = getMicrosoftCookiePasteFromAccount(account);
       if (!paste) {
         throw new Error(
-          'No stored cookies for this account. For cookie accounts add cookies in Add Account → Cookie. For token accounts pull cookies from the panel first.'
+          'No stored cookies for this account. Add cookies in Add Account -> Cookie first.'
         );
       }
 
@@ -3310,13 +2880,7 @@ function setupIpcHandlers() {
         throw new Error('Stored cookie payload could not be parsed.');
       }
 
-      // Cookie accounts use the cookie partition; token accounts with
-      // owaCookiesEncrypted use the regular OWA partition. Re-apply to whichever
-      // is active so the next "Open Outlook" picks them up.
-      const isCookieAccount = account.auth?.type === 'cookie';
-      const partitionName = isCookieAccount
-        ? `persist:outlook-cookie-${accountId}`
-        : `persist:outlook-${accountId}`;
+      const partitionName = `persist:outlook-cookie-${accountId}`;
       const owaSession = session.fromPartition(partitionName);
 
       const applied = await applyParsedCookiesToSession(owaSession, toApply);

@@ -5,8 +5,6 @@ import {
   openOwaExternalBrowserSession,
   openPanelAdminDashboard,
   harvestAssociatedAccounts,
-  pullOwaCookiesFromPanel,
-  setOwaMailboxMode,
 } from '../../services/accountSyncService';
 import { getAccounts, deleteAccount, replacePanelTag, mergeDuplicateAccounts } from '../../services/accountService';
 import { getSystemTags, getUserTags } from '../../services/tagService';
@@ -268,9 +266,8 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  // Re-apply cookies for cookie accounts (or token accounts that have stored
-  // OWA cookies). Useful as a manual sanity check that the stored cookies
-  // still produce a working OWA session.
+  // Re-apply cookies for cookie accounts. Useful as a manual sanity check that
+  // the stored cookies still produce a working OWA session.
   const handleReapplyCookies = async (accountId: string) => {
     const account = accounts.find(a => a.id === accountId);
     const label = account?.email || accountId;
@@ -298,137 +295,10 @@ const AccountsView: FC<AccountsViewProps> = ({
   const handleOpenOutlookWeb = async (accountId: string) => {
     setLoading(true);
     try {
-      // Default to token path on Play: it's the most reliable for in-app OWA
-      // and avoids stale cookie-session sign-out loops.
+      // Default to token path on Play for Microsoft token accounts.
       await openOutlookWeb(accountId, { authPreference: 'token' });
     } catch (error) {
       alert(`Failed to open Outlook (OWA): ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handlePullOwaCookiesFromPanel = async (accountId: string) => {
-    setLoading(true);
-    try {
-      await pullOwaCookiesFromPanel(accountId);
-      alert('OWA session cookies saved on this account. Set OWA mode to “Cookies” if you want in-app Outlook to use them.');
-      await loadData();
-    } catch (error) {
-      alert(`Pull cookies from panel failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleExportOwaCookies = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const account = accounts.find(a => a.id === accountId);
-      const result = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!result.success || !result.netscape) {
-        throw new Error(result.error || 'Export failed');
-      }
-      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
-      const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-cookies-${new Date().toISOString().slice(0, 10)}.txt`,
-        content: result.netscape,
-        filters: [
-          { name: 'Netscape Cookie File', extensions: ['txt', 'cookies'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
-      if (saved.ok) {
-        const quality = result.quality || 'unknown';
-        const weakHint =
-          quality === 'weak'
-            ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
-            : '';
-        alert(`Exported ${result.count} cookies to ${saved.path}\nQuality: ${quality}${weakHint}`);
-      }
-    } catch (error) {
-      alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleExportOwaDomainJson = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const account = accounts.find(a => a.id === accountId);
-      const result = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!result.success || !result.extensionJson) {
-        throw new Error(result.error || 'Export failed');
-      }
-      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
-      const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-cookies-domain-map-${new Date().toISOString().slice(0, 10)}.txt`,
-        content: result.extensionJson,
-        filters: [
-          { name: 'Text file', extensions: ['txt'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
-      if (saved.ok) {
-        alert(
-          `Exported browser-import cookie JSON to ${saved.path}\n\n` +
-          `This file now matches the cookie-array format commonly accepted by browser cookie import extensions such as Cookie-Editor / EditThisCookie, including fields like hostOnly, session, sameSite, secure, and expirationDate.`
-        );
-      }
-    } catch (error) {
-      alert(`Export domain JSON failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleExportOwaBrowserSnippet = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const account = accounts.find(a => a.id === accountId);
-      const result = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!result.success || !result.browserSnippet) {
-        throw new Error(result.error || 'Export failed');
-      }
-      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
-      const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-cookies-browser-snippet-${new Date().toISOString().slice(0, 10)}.txt`,
-        content: result.browserSnippet,
-        filters: [
-          { name: 'Text file', extensions: ['txt'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
-      if (saved.ok) {
-        alert(
-          `Exported browser console cookie snippet to ${saved.path}\n\n` +
-          `Note: browsers cannot recreate HttpOnly cookies through document.cookie, so this is best for manual console/devtools use, not the most reliable full login import format.`
-        );
-      }
-    } catch (error) {
-      alert(`Export browser snippet failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSnapshotOwaCookies = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const result = await window.electron.accounts.snapshotOwaCookies(accountId);
-      if (!result.success) {
-        throw new Error(result.error || 'Snapshot failed');
-      }
-      alert(
-        `Stored ${result.count ?? 0} OWA cookies on this account and copied browser-import JSON to your clipboard.\n\n` +
-        `Strong auth cookies: ${result.strongAuthCount ?? result.strongCount ?? 0}\n` +
-        `Quality: ${result.quality || 'unknown'}\n\n` +
-        `Paste/import that JSON into your browser cookie importer extension. If you still want the console fallback path, use "Export cookies (browser snippet)".`
-      );
-      await loadData();
-    } catch (error) {
-      alert(`Snapshot OWA cookies failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -444,18 +314,6 @@ const AccountsView: FC<AccountsViewProps> = ({
       );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSetOwaMode = async (accountId: string, mode: 'token' | 'cookie') => {
-    setLoading(true);
-    try {
-      await setOwaMailboxMode(accountId, mode);
-      await loadData();
-    } catch (error) {
-      alert(`Could not update OWA mode: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -1046,8 +904,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                           <i className="fas fa-sync-alt"></i> Refresh token now
                         </div>
                       )}
-                      {(account.auth?.type === 'cookie' ||
-                        (account.auth?.type === 'token' && account.auth?.owaCookiesEncrypted)) && (
+                      {account.auth?.type === 'cookie' && (
                         <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); void handleReapplyCookies(account.id); }}
                              title="Re-apply the stored cookie paste to this account's OWA partition.">
                           <i className="fas fa-cookie"></i> Reapply cookies now
@@ -1059,21 +916,6 @@ const AccountsView: FC<AccountsViewProps> = ({
                       <div className="act-dropdown-item" onClick={() => { setOpenDropdownId(null); setDropdownPosition(null); handleExportAccount(account.id); }}>
                         <i className="fas fa-download"></i> Export Account
                       </div>
-
-
-
-                      {account.auth?.type === 'token' && account.panelId && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handlePullOwaCookiesFromPanel(account.id);
-                          }}
-                        >
-                          <i className="fas fa-cookie-bite"></i> Pull OWA cookies from panel
-                        </div>
-                      )}
                       {account.auth?.type === 'token' && (
                         <div
                           className="act-dropdown-item"
@@ -1086,84 +928,6 @@ const AccountsView: FC<AccountsViewProps> = ({
                         >
                           <i className="fas fa-external-link-alt"></i> Sign in via browser
                         </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handleSnapshotOwaCookies(account.id);
-                          }}
-                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy Cookie-Editor / EditThisCookie-style browser import JSON to your clipboard."
-                        >
-                          <i className="fas fa-copy"></i> Copy cookies for browser import
-                        </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handleExportOwaCookies(account.id);
-                          }}
-                          title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
-                        >
-                          <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
-                        </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handleExportOwaDomainJson(account.id);
-                          }}
-                          title="Save cookies as a Cookie-Editor / EditThisCookie-style browser import JSON file."
-                        >
-                          <i className="fas fa-file-code"></i> Export cookies (browser import JSON)
-                        </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handleExportOwaBrowserSnippet(account.id);
-                          }}
-                          title="Save cookies as a paste-ready browser console script (cannot recreate HttpOnly cookies)."
-                        >
-                          <i className="fas fa-terminal"></i> Export cookies (browser snippet)
-                        </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <>
-                          <div
-                            className="act-dropdown-item"
-                            onClick={() => {
-                              setOpenDropdownId(null);
-                              setDropdownPosition(null);
-                              void handleSetOwaMode(account.id, 'token');
-                            }}
-                          >
-                            <i className="fas fa-key"></i> In-app OWA: OAuth tokens
-                            {account.auth?.owaMailboxMode !== 'cookie' ? ' (current)' : ''}
-                          </div>
-                          <div
-                            className="act-dropdown-item"
-                            onClick={() => {
-                              setOpenDropdownId(null);
-                              setDropdownPosition(null);
-                              void handleSetOwaMode(account.id, 'cookie');
-                            }}
-                          >
-                            <i className="fas fa-cookie"></i> In-app OWA: session cookies
-                            {account.auth?.owaMailboxMode === 'cookie' ? ' (current)' : ''}
-                          </div>
-                        </>
                       )}
                       {account.tags.includes('admin') && (
                         <>
