@@ -3,7 +3,6 @@ import {
   fetchAccounts,
   exportToken,
   exportTokensBatch,
-  exportMailboxCookies,
   getPanel,
   encryptPassword,
 } from './panelService';
@@ -113,15 +112,6 @@ export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
         resource: (remote as any).resource,
         scopeType: (remote as any).scopeType,
       };
-      if (existingAccount?.auth?.type === 'token') {
-        const prev = existingAccount.auth;
-        if (prev.owaCookiesEncrypted) {
-          (auth as Extract<UIAccount['auth'], { type: 'token' }>).owaCookiesEncrypted = prev.owaCookiesEncrypted;
-        }
-        if (prev.owaMailboxMode) {
-          (auth as Extract<UIAccount['auth'], { type: 'token' }>).owaMailboxMode = prev.owaMailboxMode;
-        }
-      }
     } else {
       // Should not happen if export succeeded, but guard
       auth = {
@@ -559,47 +549,10 @@ export async function refreshAccountTokenViaCredential(accountId: string): Promi
 // ----------------------------------------------------------------------
 // Mailbox Viewer
 // ----------------------------------------------------------------------
-/**
- * Pull Microsoft OWA session cookies from your panel (optional route) and store them encrypted on this token account.
- * Panel must implement: `GET /api/mailbox/{email}/export-cookies` with the usual panel Bearer token.
- */
-export async function pullOwaCookiesFromPanel(accountId: string): Promise<UIAccount> {
-  const accounts = await getAccounts();
-  const account = accounts.find(a => a.id === accountId);
-  if (!account) throw new Error('Account not found');
-  if (!account.panelId) throw new Error('This account is not linked to a panel. Sync accounts from a panel first.');
-  if (account.auth?.type !== 'token') throw new Error('Panel cookie import applies to Microsoft token accounts.');
-  const panel = await authenticatePanel(account.panelId);
-  const res = await exportMailboxCookies(panel, account.email);
-  if (!res.ok) throw new Error(res.error);
-  const enc = await encryptCookies(res.cookies);
-  return updateAccount(accountId, {
-    auth: {
-      ...account.auth,
-      owaCookiesEncrypted: enc,
-    },
-  });
-}
-
-/** Choose how in-app OWA opens for a token account: OAuth injection vs stored Microsoft cookies. */
-export async function setOwaMailboxMode(accountId: string, mode: 'token' | 'cookie'): Promise<UIAccount> {
-  const accounts = await getAccounts();
-  const account = accounts.find(a => a.id === accountId);
-  if (!account?.auth) throw new Error('Account not found');
-  if (account.auth.type === 'cookie') {
-    if (mode === 'token') throw new Error('This account is cookie-only; OWA always uses cookies.');
-    return account;
-  }
-  if (account.auth.type !== 'token') throw new Error('Only Microsoft token accounts support OWA mode.');
-  return updateAccount(accountId, {
-    auth: { ...account.auth, owaMailboxMode: mode },
-  });
-}
-
-/** Opens Microsoft 365 Outlook on the web (OWA) in an Electron window (OAuth + MSAL, or cookie session — see account `owaMailboxMode`). */
+/** Opens Microsoft 365 Outlook on the web (OWA) in an Electron window. */
 export async function openOutlookWeb(
   accountId: string,
-  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
+  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' }
 ): Promise<void> {
   try {
     await window.electron.actions.openOutlook(accountId, options);
