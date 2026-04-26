@@ -525,7 +525,7 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
   };
 
   let msCookies = await readMicrosoftCookies();
-  if (msCookies.length === 0) {
+  if (msCookies.length === 0 || !hasStrongMicrosoftSessionCookies(msCookies)) {
     // Prime the partition: ensure a fresh token bundle is staged and load
     // OWA in a hidden BrowserWindow long enough for the auth cookies to
     // settle. Capped at PRIME_TIMEOUT_MS to avoid hanging the IPC.
@@ -568,7 +568,7 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
         const pollTimer = setInterval(async () => {
           try {
             const probe = await readMicrosoftCookies();
-            if (probe.length > 0) finish();
+            if (probe.length > 0 && hasStrongMicrosoftSessionCookies(probe)) finish();
           } catch {
             /* keep polling */
           }

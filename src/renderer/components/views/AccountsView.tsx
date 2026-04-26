@@ -45,7 +45,7 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [activeAccount, setActiveAccount] = useState<string | null>(null); // for single‑account actions
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
-  const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number } | null>(null);
+  const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'expired'>('all');
   /** When set, filters the table to children of this admin email
    *  (matches the `child-of:<email>` tag set by harvestAssociatedAccounts). */
@@ -72,22 +72,28 @@ const AccountsView: FC<AccountsViewProps> = ({
     } else {
       // opening
       const rect = button.getBoundingClientRect();
-      const dropdownWidth = 180;
-      const dropdownHeight = 300; // approximate
+      const dropdownWidth = 220;
+      const dropdownHeight = 420; // approximate; actual menu scrolls if taller
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
+      const viewportPadding = 8;
       let left = rect.left;
       let top = rect.bottom + 2; // small gap
 
       // Adjust horizontally if dropdown would overflow right edge
-      if (left + dropdownWidth > viewportWidth) {
-        left = viewportWidth - dropdownWidth - 8; // 8px margin
+      if (left + dropdownWidth > viewportWidth - viewportPadding) {
+        left = viewportWidth - dropdownWidth - viewportPadding;
       }
+      if (left < viewportPadding) left = viewportPadding;
       // Adjust vertically if dropdown would overflow bottom edge
-      if (top + dropdownHeight > viewportHeight) {
+      if (top + dropdownHeight > viewportHeight - viewportPadding) {
         top = rect.top - dropdownHeight; // position above button
       }
-      setDropdownPosition({ top, left });
+      if (top < viewportPadding) {
+        top = viewportPadding;
+      }
+      const maxHeight = Math.max(180, viewportHeight - top - viewportPadding);
+      setDropdownPosition({ top, left, maxHeight });
       setOpenDropdownId(accountId);
     }
   };

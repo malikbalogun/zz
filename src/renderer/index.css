@@ -179,6 +179,13 @@
 .dark .inbox-reader-empty h3 { color: #9ca3af; }
 .inbox-reader-empty p { font-size: 13px; }
 
+/* Account actions dropdown */
+.act-dropdown {
+  max-height: min(420px, calc(100vh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 /* ============================================
    CONTACTS VIEW
    ============================================ */
