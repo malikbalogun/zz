@@ -66,7 +66,7 @@ contextBridge.exposeInMainWorld('electron', {
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
     /** Token account → exported cookie formats (Netscape + custom text formats). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
-    /** Token account → persisted cookie snapshot + clipboard Cookie header. */
+    /** Token account → persisted cookie snapshot + clipboard console-ready snippet. */
     snapshotOwaCookies: (accountId: string) => ipcRenderer.invoke('account:snapshotOwaCookies', accountId),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),

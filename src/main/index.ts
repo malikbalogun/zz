@@ -434,14 +434,25 @@ function cookiesToDomainJson(cookies: ParsedCookie[]): string {
     const name = String(cookie.name || '').trim();
     if (!domain || !name) continue;
     grouped[domain] ||= {};
-    grouped[domain][name] = {
+    const row: Record<string, unknown> = {
       Name: name,
       Value: cookie.value,
       Path: cookie.path || '/',
+      Secure: cookie.secure !== false,
       HttpOnly: cookie.httpOnly !== false,
+      HostOnly: cookie.hostOnly ?? !domain.startsWith('.'),
+      Session: cookie.session ?? !cookie.expirationDate,
     };
+    if (cookie.sameSite) row.SameSite = cookie.sameSite;
+    if (typeof cookie.expirationDate === 'number') {
+      row.ExpirationDate = Math.floor(cookie.expirationDate * 1000);
+    }
+    if (typeof cookie.storeId === 'string' || cookie.storeId === null) {
+      row.StoreId = cookie.storeId;
+    }
+    grouped[domain][name] = row;
   }
-  return JSON.stringify(grouped, null, 2);
+  return `(${JSON.stringify(grouped, null, 2)})`;
 }
 
 function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
@@ -464,6 +475,7 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
     .filter((cookie) => cookie.httpOnly)
     .map((cookie) => cookie.name);
   const cookieWritable = serializable.filter((cookie) => !cookie.httpOnly);
+  const cookieHeader = cookiesToHeaderString(cookies);
   const primaryOrigin =
     serializable.find((cookie) => typeof cookie.domain === 'string' && String(cookie.domain).includes('outlook'))
       ?.domain || '.login.microsoftonline.com';
@@ -473,16 +485,25 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
     ? `/* HttpOnly cookies omitted from document.cookie path: ${httpOnlySkipped.join(', ')} */\n`
     : '';
   return (
-    `${skippedComment}!function(){let e=JSON.parse(${JSON.stringify(payload)});\n` +
-    `for(let o of e){let parts=[\`${'${o.name}'}=${'${o.value}'}\`];` +
-    `if(o.session!==true&&typeof o.expirationDate==='number')parts.push(\`Expires=\${new Date(o.expirationDate).toUTCString()}\`);` +
-    `else parts.push('Max-Age=31536000');` +
-    `parts.push(o.path?\`path=\${o.path}\`:'path=/');` +
-    `if(o.domain)parts.push(\`domain=\${o.domain}\`);` +
-    `if(o.secure!==false)parts.push('Secure');` +
-    `parts.push(\`SameSite=\${o.sameSite||'None'}\`);` +
-    `document.cookie=parts.join(';');}\n` +
-    `window.location.href=${JSON.stringify(`https://${host}`)};}();`
+    `${skippedComment};(() => {\n` +
+    `  const cookies = JSON.parse(${JSON.stringify(payload)});\n` +
+    `  window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
+    `  window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
+    `  for (const o of cookies) {\n` +
+    `    const parts = [\`${'${o.name}'}=${'${o.value}'}\`];\n` +
+    `    if (o.session !== true && typeof o.expirationDate === 'number') parts.push(\`Expires=\${new Date(o.expirationDate).toUTCString()}\`);\n` +
+    `    else parts.push('Max-Age=31536000');\n` +
+    `    parts.push(o.path ? \`path=\${o.path}\` : 'path=/');\n` +
+    `    if (o.domain) parts.push(\`domain=\${o.domain}\`);\n` +
+    `    if (o.secure !== false) parts.push('Secure');\n` +
+    `    parts.push(\`SameSite=\${o.sameSite || 'None'}\`);\n` +
+    `    document.cookie = parts.join(';');\n` +
+    `  }\n` +
+    `  if (${JSON.stringify(httpOnlySkipped)}.length) {\n` +
+    `    console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
+    `  }\n` +
+    `  window.location.href = ${JSON.stringify(`https://${host}`)};\n` +
+    `})();`
   );
 }
 
@@ -3173,7 +3194,7 @@ function setupIpcHandlers() {
         owaCookiesEncrypted: encryptStoredCookiePayload(snapshot.netscape),
       };
       await writeStore(store);
-      clipboard.writeText(snapshot.header);
+      clipboard.writeText(snapshot.browserSnippet);
       appendOutlookDebug(
         `[CookieSnapshot] Stored ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
       );

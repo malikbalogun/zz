@@ -420,10 +420,10 @@ const AccountsView: FC<AccountsViewProps> = ({
         throw new Error(result.error || 'Snapshot failed');
       }
       alert(
-        `Stored ${result.count ?? 0} OWA cookies on this account and copied the Cookie header to your clipboard.\n\n` +
+        `Stored ${result.count ?? 0} OWA cookies on this account and copied a paste-ready console script to your clipboard.\n\n` +
         `Strong auth cookies: ${result.strongAuthCount ?? result.strongCount ?? 0}\n` +
         `Quality: ${result.quality || 'unknown'}\n\n` +
-        `Use the copied header in browser DevTools / inspect console requests. For the best full browser-login import file, use "Export cookies (domain JSON)".`
+        `Paste it in browser DevTools / inspect console. For the best full browser-login import file, use "Export cookies (browser import JSON)".`
       );
       await loadData();
     } catch (error) {
@@ -1066,7 +1066,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleSnapshotOwaCookies(account.id);
                           }}
-                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy a Cookie header for inspect/console use."
+                          title="Token -> Cookies. Persist the current OWA session cookies on this account and copy a paste-ready console script for inspect/browser testing."
                         >
                           <i className="fas fa-copy"></i> Snapshot cookies for inspect
                         </div>

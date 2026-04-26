@@ -29,6 +29,7 @@ export interface ElectronAPI {
       netscape?: string;
       header?: string;
       domainJson?: string;
+      consoleJson?: string;
       browserSnippet?: string;
       quality?: 'strong' | 'weak';
       error?: string;
@@ -49,6 +50,7 @@ export interface ElectronAPI {
       netscape?: string;
       header?: string;
       domainJson?: string;
+      consoleJson?: string;
       browserSnippet?: string;
       quality?: 'strong' | 'weak';
       copiedToClipboard?: boolean;
