@@ -826,6 +826,15 @@ class MockOutlookService {
     return messages;
   }
 
+  static async fetchAllMessagesInFolderPaginated(
+    account: UIAccount,
+    folderId: string,
+    opts?: { maxPerFolder?: number; pageSize?: number }
+  ): Promise<OutlookMessage[]> {
+    const limit = Math.min(opts?.maxPerFolder ?? 100, 10000);
+    return MockOutlookService.fetchMessages(account, folderId, undefined, limit);
+  }
+
   static async searchMessages(
     _account: UIAccount,
     query: string,
