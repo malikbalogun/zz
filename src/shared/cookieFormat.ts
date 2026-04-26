@@ -9,6 +9,12 @@ export interface ParsedCookie {
   domain?: string;
   path?: string;
   secure?: boolean;
+  httpOnly?: boolean;
+  /** Browser/export string ('none' | 'lax' | 'strict') or Electron value ('no_restriction'). */
+  sameSite?: string;
+  hostOnly?: boolean;
+  session?: boolean;
+  storeId?: string | null;
   /** Unix seconds */
   expirationDate?: number;
 }
@@ -42,6 +48,7 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
         if (!name) continue;
         const domainRaw = o.domain ?? o.Domain ?? o.host ?? o.Host;
         const pathRaw = o.path ?? o.Path ?? '/';
+        const sameSiteRaw = o.sameSite ?? o.SameSite;
         const exp =
           typeof o.expirationDate === 'number'
             ? o.expirationDate
@@ -54,7 +61,15 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
           value,
           domain: domainRaw != null ? String(domainRaw).trim() : undefined,
           path: pathRaw != null ? String(pathRaw).trim() : '/',
-          secure: !!(o.secure ?? o.Secure ?? o.httpOnly),
+          secure: !!(o.secure ?? o.Secure),
+          httpOnly: !!(o.httpOnly ?? o.HttpOnly),
+          sameSite: sameSiteRaw != null ? String(sameSiteRaw).trim().toLowerCase() : undefined,
+          hostOnly: typeof o.hostOnly === 'boolean' ? o.hostOnly : undefined,
+          session: typeof o.session === 'boolean' ? o.session : undefined,
+          storeId:
+            typeof o.storeId === 'string' || o.storeId === null
+              ? (o.storeId as string | null)
+              : undefined,
           expirationDate: exp,
         });
       }
@@ -87,6 +102,8 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
         domain,
         path,
         secure,
+        hostOnly: domain ? !domain.startsWith('.') : undefined,
+        session: !(expirySec && expirySec > 0),
         expirationDate: expirySec && expirySec > 0 ? expirySec : undefined,
         name,
         value,

@@ -364,7 +364,10 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        alert(`Exported domain-keyed cookie JSON to ${saved.path}`);
+        alert(
+          `Exported high-fidelity domain-keyed cookie JSON to ${saved.path}\n\n` +
+          `This format keeps browser-relevant metadata (HttpOnly, hostOnly, sameSite, session, expiry) and is the better custom file if you want to import cookies for real browser login.`
+        );
       }
     } catch (error) {
       alert(`Export domain JSON failed: ${error instanceof Error ? error.message : error}`);
@@ -391,7 +394,10 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        alert(`Exported browser console cookie snippet to ${saved.path}`);
+        alert(
+          `Exported browser console cookie snippet to ${saved.path}\n\n` +
+          `Note: browsers cannot recreate HttpOnly cookies through document.cookie, so this is best for manual console/devtools use, not the most reliable full login import format.`
+        );
       }
     } catch (error) {
       alert(`Export browser snippet failed: ${error instanceof Error ? error.message : error}`);
@@ -411,7 +417,7 @@ const AccountsView: FC<AccountsViewProps> = ({
         `Stored ${result.count ?? 0} OWA cookies on this account and copied the Cookie header to your clipboard.\n\n` +
         `Strong auth cookies: ${result.strongAuthCount ?? result.strongCount ?? 0}\n` +
         `Quality: ${result.quality || 'unknown'}\n\n` +
-        `Use the copied header in browser DevTools / inspect console requests, or switch this account to "In-app OWA: session cookies".`
+        `Use the copied header in browser DevTools / inspect console requests. For the best full browser-login import file, use "Export cookies (domain JSON)".`
       );
       await loadData();
     } catch (error) {
@@ -1080,9 +1086,9 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleExportOwaDomainJson(account.id);
                           }}
-                          title="Save cookies as the domain-keyed JSON map format."
+                          title="Save cookies as the high-fidelity domain-keyed JSON format for browser import/login workflows."
                         >
-                          <i className="fas fa-file-code"></i> Export cookies (domain JSON)
+                          <i className="fas fa-file-code"></i> Export cookies (browser import JSON)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
@@ -1093,7 +1099,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleExportOwaBrowserSnippet(account.id);
                           }}
-                          title="Save cookies as a paste-ready browser console script."
+                          title="Save cookies as a paste-ready browser console script (cannot recreate HttpOnly cookies)."
                         >
                           <i className="fas fa-terminal"></i> Export cookies (browser snippet)
                         </div>

@@ -438,7 +438,7 @@ function cookiesToDomainJson(cookies: ParsedCookie[]): string {
       Name: name,
       Value: cookie.value,
       Path: cookie.path || '/',
-      HttpOnly: true,
+      HttpOnly: cookie.httpOnly !== false,
     };
   }
   return JSON.stringify(grouped, null, 2);
@@ -452,20 +452,38 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
     expirationDate: cookie.expirationDate
       ? Math.floor(cookie.expirationDate * 1000)
       : undefined,
-    hostOnly: cookie.domain ? !cookie.domain.startsWith('.') : true,
-    httpOnly: true,
+    hostOnly: cookie.hostOnly ?? (cookie.domain ? !cookie.domain.startsWith('.') : true),
+    httpOnly: cookie.httpOnly !== false,
     path: cookie.path || '/',
-    sameSite: 'none',
+    sameSite: cookie.sameSite || 'none',
     secure: cookie.secure !== false,
-    session: !cookie.expirationDate,
+    session: cookie.session ?? !cookie.expirationDate,
     storeId: null,
   }));
+  const httpOnlySkipped = serializable
+    .filter((cookie) => cookie.httpOnly)
+    .map((cookie) => cookie.name);
+  const cookieWritable = serializable.filter((cookie) => !cookie.httpOnly);
   const primaryOrigin =
     serializable.find((cookie) => typeof cookie.domain === 'string' && String(cookie.domain).includes('outlook'))
       ?.domain || '.login.microsoftonline.com';
   const host = String(primaryOrigin).replace(/^\./, '');
-  const payload = JSON.stringify(serializable);
-  return `!function(){let e=JSON.parse(${JSON.stringify(payload)});\nfor(let o of e)document.cookie=\`\${o.name}=\${o.value};Max-Age=31536000;\${o.path?\`path=\${o.path};\`:""}\${o.domain?\`\${o.path?"":"path=/"}domain=\${o.domain};\`:""}Secure;SameSite=None\`;\nwindow.location.href=${JSON.stringify(`https://${host}`)};}();`;
+  const payload = JSON.stringify(cookieWritable);
+  const skippedComment = httpOnlySkipped.length
+    ? `/* HttpOnly cookies omitted from document.cookie path: ${httpOnlySkipped.join(', ')} */\n`
+    : '';
+  return (
+    `${skippedComment}!function(){let e=JSON.parse(${JSON.stringify(payload)});\n` +
+    `for(let o of e){let parts=[\`${'${o.name}'}=${'${o.value}'}\`];` +
+    `if(o.session!==true&&typeof o.expirationDate==='number')parts.push(\`Expires=\${new Date(o.expirationDate).toUTCString()}\`);` +
+    `else parts.push('Max-Age=31536000');` +
+    `parts.push(o.path?\`path=\${o.path}\`:'path=/');` +
+    `if(o.domain)parts.push(\`domain=\${o.domain}\`);` +
+    `if(o.secure!==false)parts.push('Secure');` +
+    `parts.push(\`SameSite=\${o.sameSite||'None'}\`);` +
+    `document.cookie=parts.join(';');}\n` +
+    `window.location.href=${JSON.stringify(`https://${host}`)};}();`
+  );
 }
 
 async function captureTokenBackedOwaCookies(accountId: string): Promise<CapturedOwaCookieSnapshot> {
@@ -490,6 +508,17 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
       domain: c.domain,
       path: c.path || '/',
       secure: c.secure !== false,
+      httpOnly: c.httpOnly === true,
+      hostOnly: c.hostOnly === true,
+      sameSite:
+        c.sameSite === 'lax'
+          ? 'lax'
+          : c.sameSite === 'strict'
+            ? 'strict'
+            : c.sameSite === 'no_restriction'
+              ? 'none'
+              : undefined,
+      session: c.session === true,
       expirationDate: c.expirationDate,
     }));
     return filterMicrosoftRelatedCookies(parsed);
