@@ -346,6 +346,60 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
+  const handleExportOwaDomainJson = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const account = accounts.find(a => a.id === accountId);
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success || !result.domainJson) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const saved = await window.electron.files.saveTextWithDialog({
+        defaultFilename: `${safeEmail}-cookies-domain-map-${new Date().toISOString().slice(0, 10)}.txt`,
+        content: result.domainJson,
+        filters: [
+          { name: 'Text file', extensions: ['txt'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (saved.ok) {
+        alert(`Exported domain-keyed cookie JSON to ${saved.path}`);
+      }
+    } catch (error) {
+      alert(`Export domain JSON failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExportOwaBrowserSnippet = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const account = accounts.find(a => a.id === accountId);
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success || !result.browserSnippet) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const saved = await window.electron.files.saveTextWithDialog({
+        defaultFilename: `${safeEmail}-cookies-browser-snippet-${new Date().toISOString().slice(0, 10)}.txt`,
+        content: result.browserSnippet,
+        filters: [
+          { name: 'Text file', extensions: ['txt'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (saved.ok) {
+        alert(`Exported browser console cookie snippet to ${saved.path}`);
+      }
+    } catch (error) {
+      alert(`Export browser snippet failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSnapshotOwaCookies = async (accountId: string) => {
     setLoading(true);
     try {
@@ -1016,6 +1070,32 @@ const AccountsView: FC<AccountsViewProps> = ({
                           title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
                         >
                           <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleExportOwaDomainJson(account.id);
+                          }}
+                          title="Save cookies as the domain-keyed JSON map format."
+                        >
+                          <i className="fas fa-file-code"></i> Export cookies (domain JSON)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleExportOwaBrowserSnippet(account.id);
+                          }}
+                          title="Save cookies as a paste-ready browser console script."
+                        >
+                          <i className="fas fa-terminal"></i> Export cookies (browser snippet)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

@@ -28,6 +28,8 @@ export interface ElectronAPI {
       email?: string;
       netscape?: string;
       header?: string;
+      domainJson?: string;
+      browserSnippet?: string;
       quality?: 'strong' | 'weak';
       error?: string;
     }>;
@@ -46,6 +48,8 @@ export interface ElectronAPI {
       email?: string;
       netscape?: string;
       header?: string;
+      domainJson?: string;
+      browserSnippet?: string;
       quality?: 'strong' | 'weak';
       copiedToClipboard?: boolean;
       error?: string;

