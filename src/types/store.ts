@@ -16,13 +16,6 @@ export interface UIAccount {
     scopeType?: 'graph' | 'ews';
     resource?: string;
     /**
-     * Optional Microsoft cookie jar (Netscape / header paste), encrypted.
-     * Typically filled by your panel’s `GET /api/mailbox/{email}/export-cookies` if implemented.
-     */
-    owaCookiesEncrypted?: string;
-    /** In-app OWA: use Bearer/MSAL injection (`token`) or stored Microsoft cookies (`cookie`). */
-    owaMailboxMode?: 'token' | 'cookie';
-    /**
      * Optional Microsoft Graph refresh token captured under admin scopes
      * (Directory.Read.All / User.Read.All). When set, the admin enumeration
      * UI can list every user in the tenant via Graph `/users`.

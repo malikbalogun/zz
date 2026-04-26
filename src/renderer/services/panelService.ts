@@ -202,53 +202,6 @@ export async function exportToken(panel: Panel, email: string) {
   return response.data;
 }
 
-export type PanelExportCookiesResult =
-  | { ok: true; cookies: string }
-  | { ok: false; status: number; error: string };
-
-/**
- * Optional panel route: `GET /api/mailbox/{email}/export-cookies` with panel `Authorization: Bearer`.
- * Your server should return JSON `{ "success": true, "cookies": "<netscape or header string>" }`
- * or raw text cookies. **404** means the route is not implemented yet on that panel.
- */
-export async function exportMailboxCookies(panel: Panel, email: string): Promise<PanelExportCookiesResult> {
-  if (!panel.token) throw new Error('Panel not authenticated');
-  const response = await window.electron.api.request({
-    url: `${panel.url}/api/mailbox/${encodeURIComponent(email)}/export-cookies`,
-    method: 'GET',
-    headers: { Authorization: `Bearer ${panel.token}` },
-  });
-  if (response.status === 404) {
-    return {
-      ok: false,
-      status: 404,
-      error:
-        'This panel does not expose GET /api/mailbox/{email}/export-cookies yet. Add it on your panel server to return Microsoft session cookies (Netscape or Cookie header string) for the mailbox.',
-    };
-  }
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      error: `export-cookies failed: HTTP ${response.status}`,
-    };
-  }
-  const d = response.data;
-  let cookies = '';
-  if (d && typeof d === 'object') {
-    if (typeof (d as any).cookies === 'string') cookies = (d as any).cookies;
-    else if (typeof (d as any).cookieHeader === 'string') cookies = (d as any).cookieHeader;
-    else if ((d as any).success && typeof (d as any).data === 'string') cookies = (d as any).data;
-  } else if (typeof d === 'string') {
-    cookies = d;
-  }
-  cookies = String(cookies || '').trim();
-  if (!cookies) {
-    return { ok: false, status: response.status, error: 'Panel returned an empty cookies payload' };
-  }
-  return { ok: true, cookies };
-}
-
 /**
  * Fetch folders for a given account.
  * @param panel Authenticated panel
