@@ -29,6 +29,7 @@ type SavedInboxView = {
   query: string;
 };
 const SAVED_VIEWS_KEY = 'inboxSavedViews';
+const INBOX_PAGE_SIZE = 50;
 
 function buildMonitorHitMap(alerts: MonitoringAlert[], accountId: string): Record<string, MonitorRowHit> {
   const map: Record<string, MonitorRowHit> = {};
@@ -56,6 +57,9 @@ const CentralInboxView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
+  const [messageNextLink, setMessageNextLink] = useState<string | null>(null);
+  const [messageMode, setMessageMode] = useState<'folder' | 'search'>('folder');
   const [loadingBody, setLoadingBody] = useState(false);
   const [error, setError] = useState('');
   const [showReplyBox, setShowReplyBox] = useState(false);
@@ -193,9 +197,15 @@ const CentralInboxView: React.FC = () => {
     setError('');
     setSelectedMsg(null);
     setMsgBody('');
+    setMessageMode('folder');
+    setMessageNextLink(null);
     try {
-      const msgs = await OutlookService.fetchMessages(selectedAccount, selectedFolderId, undefined, 25);
-      setMessages(msgs);
+      const page = await OutlookService.fetchMessagesPage(selectedAccount, {
+        folderId: selectedFolderId,
+        limit: INBOX_PAGE_SIZE,
+      });
+      setMessages(page.messages);
+      setMessageNextLink(page.nextLink || null);
       try {
         const alerts = await getMonitoringAlerts();
         setMonitorHits(buildMonitorHitMap(alerts, selectedAccountId));
@@ -210,10 +220,35 @@ const CentralInboxView: React.FC = () => {
     }
   };
 
+  const loadMoreMessages = async () => {
+    if (!selectedAccount || !messageNextLink || messageMode !== 'folder') return;
+    setLoadingMoreMessages(true);
+    setError('');
+    try {
+      const page = await OutlookService.fetchMessagesPage(selectedAccount, { pageUrl: messageNextLink });
+      setMessages(prev => [...prev, ...page.messages]);
+      setMessageNextLink(page.nextLink || null);
+      try {
+        const alerts = await getMonitoringAlerts();
+        setMonitorHits(buildMonitorHitMap(alerts, selectedAccountId));
+      } catch {
+        /* keep prior highlights */
+      }
+    } catch (err: any) {
+      setError(`Failed to load more messages: ${err.message}`);
+    } finally {
+      setLoadingMoreMessages(false);
+    }
+  };
+
   const handleSearch = async () => {
     if (!selectedAccount || !searchQuery.trim()) return;
     setLoadingMessages(true);
     setError('');
+    setSelectedMsg(null);
+    setMsgBody('');
+    setMessageMode('search');
+    setMessageNextLink(null);
     try {
       const results = await OutlookService.searchMessages(selectedAccount, searchQuery, undefined, 40);
       setMessages(results);
@@ -693,6 +728,23 @@ const CentralInboxView: React.FC = () => {
               <div className="inbox-empty">
                 <i className="fas fa-inbox"></i>
                 <p>No messages found</p>
+              </div>
+            )}
+            {messageMode === 'folder' && messageNextLink && (
+              <div className="inbox-load-more">
+                <button
+                  type="button"
+                  className="action-btn secondary"
+                  onClick={() => void loadMoreMessages()}
+                  disabled={loadingMoreMessages}
+                >
+                  {loadingMoreMessages ? (
+                    <i className="fas fa-spinner fa-spin"></i>
+                  ) : (
+                    <i className="fas fa-chevron-down"></i>
+                  )}
+                  <span style={{ marginLeft: 8 }}>{loadingMoreMessages ? 'Loading...' : 'Load more emails'}</span>
+                </button>
               </div>
             )}
           </div>

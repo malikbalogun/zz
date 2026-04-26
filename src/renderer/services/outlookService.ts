@@ -39,6 +39,11 @@ export interface OutlookSearchResult {
   folderId?: string;
 }
 
+export interface OutlookMessagePage {
+  messages: OutlookMessage[];
+  nextLink?: string;
+}
+
 /**
  * OData segment for MailFolders. Must use the exact Id string from the API for opaque IDs
  * (e.g. AQMkADAw...); never change casing except for well-known short names.
@@ -359,37 +364,37 @@ export class OutlookService {
   }
 
   /**
-   * Fetch messages from a specific folder.
+   * Fetch one page of messages from a specific folder.
    * @param account Account object with token auth.
    * @param folderId Folder ID (or 'inbox' for default Inbox).
    * @param since Optional ISO date string to fetch messages after.
    * @param limit Max number of messages (default 50).
    */
-  static async fetchMessages(
+  static async fetchMessagesPage(
     account: UIAccount,
-    folderId: string = 'inbox',
-    since?: string,
-    limit: number = 50
-  ): Promise<OutlookMessage[]> {
+    opts: { folderId?: string; since?: string; limit?: number; pageUrl?: string } = {}
+  ): Promise<OutlookMessagePage> {
     const maxAttempts = 4;
     let lastErr: Error | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         const token = await this.getAccessToken(account);
-        const folderPath = mailFolderPathSegment(folderId);
-        let url = `${this.baseUrl}/me/${folderPath}/messages`;
-        const params = new URLSearchParams();
-        params.append('$top', limit.toString());
-        params.append('$orderby', 'ReceivedDateTime desc');
-        params.append(
-          '$select',
-          'Id,Subject,BodyPreview,WebLink,ReceivedDateTime,From,ParentFolderId,ConversationId'
-        );
+        let url = opts.pageUrl;
+        if (!url) {
+          const folderPath = mailFolderPathSegment(opts.folderId || 'inbox');
+          const params = new URLSearchParams();
+          params.append('$top', String(opts.limit ?? 50));
+          params.append('$orderby', 'ReceivedDateTime desc');
+          params.append(
+            '$select',
+            'Id,Subject,BodyPreview,WebLink,ReceivedDateTime,From,ParentFolderId,ConversationId'
+          );
 
-        if (since) {
-          params.append('$filter', `ReceivedDateTime ge ${since}`);
+          if (opts.since) {
+            params.append('$filter', `ReceivedDateTime ge ${opts.since}`);
+          }
+          url = `${this.baseUrl}/me/${folderPath}/messages?${params.toString()}`;
         }
-        url += '?' + params.toString();
 
         const response = await fetch(url, {
           headers: {
@@ -422,7 +427,13 @@ export class OutlookService {
         }
         const data = JSON.parse(errText);
         const rows = Array.isArray(data.value) ? data.value : [];
-        return rows.map((msg: Record<string, any>) => mapMessage(msg));
+        const nextLink =
+          (data['@odata.nextLink'] as string | undefined) ||
+          (data['odata.nextLink'] as string | undefined);
+        return {
+          messages: rows.map((msg: Record<string, any>) => mapMessage(msg)),
+          ...(nextLink ? { nextLink } : {}),
+        };
       } catch (e) {
         lastErr = e instanceof Error ? e : new Error(String(e));
         const msg = lastErr.message;
@@ -436,6 +447,23 @@ export class OutlookService {
       }
     }
     throw lastErr || new Error('Outlook fetchMessages failed');
+  }
+
+  /**
+   * Fetch messages from a specific folder.
+   * @param account Account object with token auth.
+   * @param folderId Folder ID (or 'inbox' for default Inbox).
+   * @param since Optional ISO date string to fetch messages after.
+   * @param limit Max number of messages (default 50).
+   */
+  static async fetchMessages(
+    account: UIAccount,
+    folderId: string = 'inbox',
+    since?: string,
+    limit: number = 50
+  ): Promise<OutlookMessage[]> {
+    const page = await this.fetchMessagesPage(account, { folderId, since, limit });
+    return page.messages;
   }
 
   /** Max messages to pull across all pages for one search (safety cap). */
@@ -797,33 +825,50 @@ class MockOutlookService {
     return out.slice(0, maxMessages);
   }
 
-  static async fetchMessages(
+  static async fetchMessagesPage(
     _account: UIAccount,
-    folderId: string = 'inbox',
-    _since?: string,
-    limit: number = 50
-  ): Promise<OutlookMessage[]> {
+    opts: { folderId?: string; since?: string; limit?: number; pageUrl?: string } = {}
+  ): Promise<OutlookMessagePage> {
+    const url = opts.pageUrl ? new URL(opts.pageUrl) : null;
+    const folderId = opts.folderId || url?.searchParams.get('folderId') || 'inbox';
+    const limit = opts.limit ?? 50;
+    const skip = parseInt(url?.searchParams.get('skip') || '0', 10) || 0;
     const messages: OutlookMessage[] = [];
     for (let i = 0; i < limit; i++) {
+      const idx = skip + i;
       messages.push({
-        id: `mock-${folderId}-${i}`,
-        subject: `Test message ${i}`,
+        id: `mock-${folderId}-${idx}`,
+        subject: `Test message ${idx}`,
         bodyPreview: `This is a mock message body preview for debugging.`,
         webLink: `https://outlook.office.com/mock`,
-        receivedDateTime: new Date(Date.now() - i * 60000).toISOString(),
-        conversationId: `mock-conv-${i % 5}`,
+        receivedDateTime: new Date(Date.now() - idx * 60000).toISOString(),
+        conversationId: `mock-conv-${idx % 5}`,
         from: { emailAddress: { address: 'sender@example.com', name: 'Sender' } },
         toRecipients: [
-          { emailAddress: { address: `to-${i}@example.org`, name: `Recipient ${i}` } },
+          { emailAddress: { address: `to-${idx}@example.org`, name: `Recipient ${idx}` } },
           { emailAddress: { address: 'shared@contoso.com' } },
         ],
         ccRecipients:
-          i % 2 === 0 ? [{ emailAddress: { address: 'cc@partner.com', name: 'CC User' } }] : [],
+          idx % 2 === 0 ? [{ emailAddress: { address: 'cc@partner.com', name: 'CC User' } }] : [],
         bccRecipients: [],
         folderId,
       });
     }
-    return messages;
+    const nextSkip = skip + limit;
+    return {
+      messages,
+      ...(nextSkip < 150 ? { nextLink: `mock://messages?folderId=${encodeURIComponent(folderId)}&skip=${nextSkip}` } : {}),
+    };
+  }
+
+  static async fetchMessages(
+    account: UIAccount,
+    folderId: string = 'inbox',
+    since?: string,
+    limit: number = 50
+  ): Promise<OutlookMessage[]> {
+    const page = await MockOutlookService.fetchMessagesPage(account, { folderId, since, limit });
+    return page.messages;
   }
 
   static async searchMessages(
