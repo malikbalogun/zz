@@ -429,37 +429,43 @@ type CapturedOwaCookieSnapshot = {
 };
 
 function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<string, unknown>> {
-  const normalizeImporterSameSite = (sameSite?: string): 'Lax' | 'Strict' | null => {
+  const normalizeImporterSameSite = (
+    sameSite?: string
+  ): 'lax' | 'strict' | 'no_restriction' | undefined => {
     const raw = String(sameSite || '').trim().toLowerCase();
-    if (!raw || raw === 'none' || raw === 'no_restriction' || raw === 'unspecified') return null;
-    if (raw === 'lax') return 'Lax';
-    if (raw === 'strict') return 'Strict';
-    return null;
+    if (!raw || raw === 'unspecified') return undefined;
+    if (raw === 'none' || raw === 'no_restriction') return 'no_restriction';
+    if (raw === 'lax') return 'lax';
+    if (raw === 'strict') return 'strict';
+    return undefined;
   };
   const rows: Array<Record<string, unknown>> = [];
   for (const cookie of cookies) {
-    const domain = String(cookie.domain || '').trim();
+    const rawDomain = String(cookie.domain || '').trim();
+    const domain = rawDomain.replace(/^\./, '');
     const name = String(cookie.name || '').trim();
     if (!domain || !name) continue;
-    rows.push({
+    const row: Record<string, unknown> = {
       name,
       value: cookie.value,
       domain,
       expirationDate:
         typeof cookie.expirationDate === 'number'
-          ? Math.floor(cookie.expirationDate * 1000)
+          ? Math.floor(cookie.expirationDate)
           : undefined,
-      hostOnly: cookie.hostOnly ?? !domain.startsWith('.'),
+      hostOnly: cookie.hostOnly ?? !rawDomain.startsWith('.'),
       httpOnly: cookie.httpOnly !== false,
       path: cookie.path || '/',
-      sameSite: normalizeImporterSameSite(cookie.sameSite),
       secure: cookie.secure !== false,
       session: cookie.session ?? !cookie.expirationDate,
       storeId:
         typeof cookie.storeId === 'string' || cookie.storeId === null
           ? cookie.storeId
           : null,
-    });
+    };
+    const sameSite = normalizeImporterSameSite(cookie.sameSite);
+    if (sameSite) row.sameSite = sameSite;
+    rows.push(row);
   }
   return rows;
 }
