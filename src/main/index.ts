@@ -429,6 +429,13 @@ type CapturedOwaCookieSnapshot = {
 };
 
 function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<string, unknown>> {
+  const normalizeImporterSameSite = (sameSite?: string): 'Lax' | 'Strict' | null => {
+    const raw = String(sameSite || '').trim().toLowerCase();
+    if (!raw || raw === 'none' || raw === 'no_restriction' || raw === 'unspecified') return null;
+    if (raw === 'lax') return 'Lax';
+    if (raw === 'strict') return 'Strict';
+    return null;
+  };
   const rows: Array<Record<string, unknown>> = [];
   for (const cookie of cookies) {
     const domain = String(cookie.domain || '').trim();
@@ -445,7 +452,7 @@ function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<str
       hostOnly: cookie.hostOnly ?? !domain.startsWith('.'),
       httpOnly: cookie.httpOnly !== false,
       path: cookie.path || '/',
-      sameSite: cookie.sameSite || 'none',
+      sameSite: normalizeImporterSameSite(cookie.sameSite),
       secure: cookie.secure !== false,
       session: cookie.session ?? !cookie.expirationDate,
       storeId:

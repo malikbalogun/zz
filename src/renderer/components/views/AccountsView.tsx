@@ -1068,7 +1068,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                           }}
                           title="Token -> Cookies. Persist the current OWA session cookies on this account and copy Cookie-Editor / EditThisCookie-style browser import JSON to your clipboard."
                         >
-                          <i className="fas fa-copy"></i> Snapshot cookies for inspect
+                          <i className="fas fa-copy"></i> Copy cookies for browser import
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
