@@ -202,6 +202,7 @@ contextBridge.exposeInMainWorld('electron', {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => ipcRenderer.invoke('mailbox:openOutlook', accountId, options ?? {}),
     /** Official OAuth authorize URL in system browser (login_hint + tenant from Settings). */
+    openOwaExternalSignIn: (accountId: string) => ipcRenderer.invoke('owa:openExternalSignIn', accountId),
 
     getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),
     telegramSendSearchResults: (bot: string, results: any[]) => ipcRenderer.invoke('telegram:sendSearchResults', bot, results),

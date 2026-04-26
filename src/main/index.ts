@@ -4269,6 +4269,46 @@ function setupIpcHandlers() {
     return { success: true };
   });
 
+  ipcMain.handle('openOwaExternalSignIn', async (_, accountId: string) => {
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+
+      const settings = store.settings || {};
+      const ms = settings.microsoftOAuth || {};
+      const clientId =
+        (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+        account.auth?.clientId ||
+        'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const authority =
+        (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+        normalizeAuthorityTenant(account.auth?.authorityEndpoint || 'common') ||
+        'common';
+      const redirectUri =
+        (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+        'https://outlook.office.com/mail/';
+      const scopes =
+        Array.isArray(ms.scopes) && ms.scopes.length > 0
+          ? ms.scopes.filter((s: unknown) => typeof s === 'string' && s.trim())
+          : ['openid', 'profile', 'offline_access', 'https://outlook.office.com/.default'];
+      const url = new URL(`https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`);
+      url.searchParams.set('client_id', clientId);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('response_mode', 'query');
+      url.searchParams.set('scope', scopes.join(' '));
+      url.searchParams.set('prompt', 'select_account');
+      url.searchParams.set('login_hint', account.email);
+
+      await shell.openExternal(url.toString());
+      return { success: true as const, opened: true as const };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
+    }
+  });
+
   ipcMain.handle(
     'files:saveTextWithDialog',
     async (

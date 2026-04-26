@@ -2,6 +2,7 @@ import { useState, useEffect, type FC } from 'react';
 import {
   refreshAccountToken,
   openOutlookWeb,
+  openOwaExternalBrowserSession,
   openPanelAdminDashboard,
   harvestAssociatedAccounts,
   pullOwaCookiesFromPanel,
@@ -428,6 +429,21 @@ const AccountsView: FC<AccountsViewProps> = ({
       await loadData();
     } catch (error) {
       alert(`Snapshot OWA cookies failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBrowserSignIn = async (accountId: string) => {
+    setLoading(true);
+    try {
+      await openOwaExternalBrowserSession(accountId);
+      alert(
+        'Opened the official Microsoft browser sign-in flow.\n\n' +
+        'Complete sign-in in your default browser, then open Outlook there or come back and retry any in-app actions.'
+      );
+    } catch (error) {
+      alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -1056,6 +1072,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                           }}
                         >
                           <i className="fas fa-cookie-bite"></i> Pull OWA cookies from panel
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleBrowserSignIn(account.id);
+                          }}
+                          title="Open the official Microsoft sign-in page in your default browser for this mailbox."
+                        >
+                          <i className="fas fa-external-link-alt"></i> Sign in via browser
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
