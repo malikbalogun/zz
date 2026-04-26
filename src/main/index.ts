@@ -4269,7 +4269,7 @@ function setupIpcHandlers() {
     return { success: true };
   });
 
-  ipcMain.handle('openOwaExternalSignIn', async (_, accountId: string) => {
+  const handleOpenOwaExternalSignIn = async (_: unknown, accountId: string) => {
     try {
       const store = await readStore();
       const accounts: any[] = store.accounts || [];
@@ -4307,7 +4307,10 @@ function setupIpcHandlers() {
     } catch (error: any) {
       return { success: false as const, error: error?.message || String(error) };
     }
-  });
+  };
+  ipcMain.handle('owa:openExternalSignIn', handleOpenOwaExternalSignIn);
+  // Back-compat alias for older renderer builds / branches.
+  ipcMain.handle('openOwaExternalSignIn', handleOpenOwaExternalSignIn);
 
   ipcMain.handle(
     'files:saveTextWithDialog',
