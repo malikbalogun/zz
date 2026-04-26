@@ -476,10 +476,27 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
     .map((cookie) => cookie.name);
   const cookieWritable = serializable.filter((cookie) => !cookie.httpOnly);
   const cookieHeader = cookiesToHeaderString(cookies);
-  const primaryOrigin =
-    serializable.find((cookie) => typeof cookie.domain === 'string' && String(cookie.domain).includes('outlook'))
-      ?.domain || '.login.microsoftonline.com';
-  const host = String(primaryOrigin).replace(/^\./, '');
+  const normalizeHost = (domain?: string) => String(domain || '').replace(/^\./, '').toLowerCase();
+  const writableHosts = Array.from(
+    new Set(cookieWritable.map((cookie) => normalizeHost(cookie.domain)).filter(Boolean))
+  ).sort((a, b) => {
+    const preferred = [
+      'login.microsoftonline.com',
+      'login.live.com',
+      'outlook.office.com',
+      'outlook.office365.com',
+      'outlook.cloud.microsoft',
+    ];
+    const ai = preferred.indexOf(a);
+    const bi = preferred.indexOf(b);
+    if (ai !== -1 || bi !== -1) {
+      return (ai === -1 ? preferred.length : ai) - (bi === -1 ? preferred.length : bi);
+    }
+    return a.localeCompare(b);
+  });
+  const outlookHost =
+    writableHosts.find((host) => host.includes('outlook')) || 'outlook.office.com';
+  const targetUrl = `https://${outlookHost}/mail/`;
   const payload = JSON.stringify(cookieWritable);
   const skippedComment = httpOnlySkipped.length
     ? `/* HttpOnly cookies omitted from document.cookie path: ${httpOnlySkipped.join(', ')} */\n`
@@ -487,9 +504,35 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
   return (
     `${skippedComment};(() => {\n` +
     `  const cookies = JSON.parse(${JSON.stringify(payload)});\n` +
+    `  const hosts = ${JSON.stringify(writableHosts)};\n` +
+    `  const stateKey = '__OWA_COOKIE_BOOTSTRAP__:';\n` +
+    `  const targetUrl = ${JSON.stringify(targetUrl)};\n` +
+    `  const normalizeHost = (domain) => String(domain || '').replace(/^\\./, '').toLowerCase();\n` +
+    `  const matchesHost = (cookie, host) => { const d = normalizeHost(cookie.domain); return !!d && (host === d || host.endsWith('.' + d)); };\n` +
+    `  const writableForHost = (host) => cookies.filter((cookie) => matchesHost(cookie, host));\n` +
+    `  let state = null;\n` +
+    `  try { if (typeof window.name === 'string' && window.name.startsWith(stateKey)) state = JSON.parse(window.name.slice(stateKey.length)); } catch (_) { state = null; }\n` +
+    `  if (!state || !Array.isArray(state.cookies) || !Array.isArray(state.hosts)) {\n` +
+    `    state = { cookies, hosts, step: 0, targetUrl };\n` +
+    `    window.name = stateKey + JSON.stringify(state);\n` +
+    `  }\n` +
+    `  const currentHost = location.hostname.toLowerCase();\n` +
+    `  const currentTargetHost = state.hosts[state.step];\n` +
+    `  if (!currentTargetHost) {\n` +
+    `    window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
+    `    window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
+    `    if (${JSON.stringify(httpOnlySkipped)}.length) console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
+    `    window.name = '';\n` +
+    `    if (location.href !== state.targetUrl) location.href = state.targetUrl;\n` +
+    `    return;\n` +
+    `  }\n` +
+    `  if (!(currentHost === currentTargetHost || currentHost.endsWith('.' + currentTargetHost))) {\n` +
+    `    location.href = 'https://' + currentTargetHost + '/';\n` +
+    `    return;\n` +
+    `  }\n` +
     `  window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
     `  window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
-    `  for (const o of cookies) {\n` +
+    `  for (const o of writableForHost(currentHost)) {\n` +
     `    const parts = [\`${'${o.name}'}=${'${o.value}'}\`];\n` +
     `    if (o.session !== true && typeof o.expirationDate === 'number') parts.push(\`Expires=\${new Date(o.expirationDate).toUTCString()}\`);\n` +
     `    else parts.push('Max-Age=31536000');\n` +
@@ -502,7 +545,15 @@ function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
     `  if (${JSON.stringify(httpOnlySkipped)}.length) {\n` +
     `    console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
     `  }\n` +
-    `  window.location.href = ${JSON.stringify(`https://${host}`)};\n` +
+    `  state.step += 1;\n` +
+    `  window.name = stateKey + JSON.stringify(state);\n` +
+    `  const nextHost = state.hosts[state.step];\n` +
+    `  if (nextHost) {\n` +
+    `    location.href = 'https://' + nextHost + '/';\n` +
+    `    return;\n` +
+    `  }\n` +
+    `  window.name = '';\n` +
+    `  location.href = state.targetUrl;\n` +
     `})();`
   );
 }
