@@ -569,14 +569,14 @@ export async function openOutlookWeb(
   }
 }
 
-/** Opens Microsoft OAuth authorize in the **default browser** (official redirect; complete MFA/CA in browser). */
+/** Opens an app-controlled OWA session that signs this mailbox in with the stored Microsoft refresh token. */
 export async function openOwaExternalBrowserSession(accountId: string): Promise<void> {
-  const r = await window.electron.actions.openOwaExternalSignIn(accountId);
+  const r = await window.electron.actions.openOutlook(accountId, { mode: 'owa', authPreference: 'token' });
   if (!r || (r as { success?: boolean }).success !== true) {
-    throw new Error((r as { error?: string })?.error || 'Could not start browser sign-in');
+    throw new Error((r as { error?: string })?.error || 'Could not start one-click sign-in');
   }
   if ((r as { opened?: boolean }).opened === false) {
-    throw new Error('Browser sign-in was already opened a moment ago. Check your existing browser tab.');
+    throw new Error('Sign-in was already opened a moment ago. Check the existing Outlook window.');
   }
 }
 

@@ -5,7 +5,12 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies } from '../shared/cookieFormat';
+import {
+  parseCookiePaste,
+  filterMicrosoftRelatedCookies,
+  cookiesToEditThisCookieJson,
+  type ParsedCookie,
+} from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -2374,14 +2379,11 @@ function setupIpcHandlers() {
     }
   });
 
-  // Open Outlook web UI with token injection (or Exchange Admin Center when mode=exchangeAdmin)
-  ipcMain.handle(
-    'mailbox:openOutlook',
-    async (
-      _,
-      accountId: string,
-      options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
-    ) => {
+  const handleOpenOutlook = async (
+    _: unknown,
+    accountId: string,
+    options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
+  ) => {
     const mode = options?.mode === 'exchangeAdmin' ? 'exchangeAdmin' : 'owa';
     dlog('Open Outlook UI for account', accountId, 'mode=', mode);
     appendOutlookDebug(`[Outlook] Open requested account=${accountId} mode=${mode}`);
@@ -2850,7 +2852,10 @@ function setupIpcHandlers() {
         .join(' - ');
       throw new Error(`${raw}\n\n${hint}`);
     }
-  });
+  };
+
+  // Open Outlook web UI with token injection (or Exchange Admin Center when mode=exchangeAdmin)
+  ipcMain.handle('mailbox:openOutlook', handleOpenOutlook);
 
   /**
    * Re-apply the stored cookie paste for a cookie-typed account to its OWA
@@ -2898,6 +2903,92 @@ function setupIpcHandlers() {
       const msg = error?.message || String(error);
       appendOutlookDebug(`[ReapplyCookies] failed: ${msg}`);
       return { success: false, error: msg };
+    }
+  });
+
+  const readMicrosoftOwaCookiesForAccount = async (accountId: string): Promise<{
+    account: any;
+    cookies: ParsedCookie[];
+  }> => {
+    const store = await readStore();
+    const accounts: any[] = store.accounts || [];
+    const account = accounts.find((a: any) => a.id === accountId);
+    if (!account?.email) throw new Error('Account not found');
+
+    const partitionName =
+      account.auth?.type === 'cookie'
+        ? `persist:outlook-cookie-${accountId}`
+        : `persist:outlook-${accountId}`;
+    const owaSession = session.fromPartition(partitionName);
+
+    if (account.auth?.type === 'token') {
+      const bundle = await loadOwaTokenBundle(accountId);
+      applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
+      installOutlookPartitionRequestHooks(owaSession);
+    } else if (account.auth?.type === 'cookie') {
+      const paste = getMicrosoftCookiePasteFromAccount(account);
+      if (paste) {
+        const parsedAll = parseCookiePaste(paste);
+        const msCookies = filterMicrosoftRelatedCookies(parsedAll);
+        const toApply = msCookies.length ? msCookies : parsedAll;
+        if (toApply.length) {
+          await applyParsedCookiesToSession(owaSession, toApply);
+        }
+      }
+    } else {
+      throw new Error('Cookie export supports token or cookie accounts only.');
+    }
+
+    const all = await owaSession.cookies.get({});
+    const parsed: ParsedCookie[] = all.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || '/',
+      secure: c.secure !== false,
+      httpOnly: c.httpOnly,
+      sameSite: c.sameSite,
+      hostOnly: !String(c.domain || '').startsWith('.'),
+      session: !c.expirationDate,
+      storeId: null,
+      expirationDate: c.expirationDate,
+    }));
+    const cookies = filterMicrosoftRelatedCookies(parsed);
+    if (!cookies.length) {
+      throw new Error(
+        `No Microsoft cookies are available for ${account.email}. Use "Sign in via browser" once, then export again.`
+      );
+    }
+    return { account, cookies };
+  };
+
+  ipcMain.handle('account:exportOwaCookieJson', async (_, accountId: string) => {
+    try {
+      const { account, cookies } = await readMicrosoftOwaCookiesForAccount(accountId);
+      const json = cookiesToEditThisCookieJson(cookies);
+      return {
+        success: true as const,
+        email: account.email,
+        count: cookies.length,
+        json,
+      };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('account:copyOwaCookieJson', async (_, accountId: string) => {
+    try {
+      const { account, cookies } = await readMicrosoftOwaCookiesForAccount(accountId);
+      const json = cookiesToEditThisCookieJson(cookies);
+      clipboard.writeText(json);
+      return {
+        success: true as const,
+        email: account.email,
+        count: cookies.length,
+      };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
     }
   });
 
@@ -3834,43 +3925,8 @@ function setupIpcHandlers() {
   });
 
   const handleOpenOwaExternalSignIn = async (_: unknown, accountId: string) => {
-    try {
-      const store = await readStore();
-      const accounts: any[] = store.accounts || [];
-      const account = accounts.find((a: any) => a.id === accountId);
-      if (!account?.email) throw new Error('Account not found');
-
-      const settings = store.settings || {};
-      const ms = settings.microsoftOAuth || {};
-      const clientId =
-        (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
-        account.auth?.clientId ||
-        'd3590ed6-52b3-4102-aeff-aad2292ab01c';
-      const authority =
-        (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
-        normalizeAuthorityTenant(account.auth?.authorityEndpoint || 'common') ||
-        'common';
-      const redirectUri =
-        (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
-        'https://outlook.office.com/mail/';
-      const scopes =
-        Array.isArray(ms.scopes) && ms.scopes.length > 0
-          ? ms.scopes.filter((s: unknown) => typeof s === 'string' && s.trim())
-          : ['openid', 'profile', 'offline_access', 'https://outlook.office.com/.default'];
-      const url = new URL(`https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`);
-      url.searchParams.set('client_id', clientId);
-      url.searchParams.set('response_type', 'code');
-      url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('response_mode', 'query');
-      url.searchParams.set('scope', scopes.join(' '));
-      url.searchParams.set('prompt', 'select_account');
-      url.searchParams.set('login_hint', account.email);
-
-      await shell.openExternal(url.toString());
-      return { success: true as const, opened: true as const };
-    } catch (error: any) {
-      return { success: false as const, error: error?.message || String(error) };
-    }
+    appendOutlookDebug(`[Outlook] Legacy external sign-in IPC requested for account=${accountId}`);
+    return handleOpenOutlook(_, accountId, { mode: 'owa', authPreference: 'token' });
   };
   ipcMain.handle('owa:openExternalSignIn', handleOpenOwaExternalSignIn);
   // Back-compat alias for older renderer builds / branches.
