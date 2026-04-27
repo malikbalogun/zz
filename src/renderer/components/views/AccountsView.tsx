@@ -971,9 +971,9 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleOpenInDefaultBrowser(account.id);
                           }}
-                          title="Open the Microsoft sign-in page in your default OS browser (Chrome / Safari / Firefox / Edge) with the email pre-filled and a redirect that lands on the inbox after sign-in. PASSWORD STILL REQUIRED — Microsoft does not allow refresh-token exchange in third-party browsers; the in-app button above is the only password-less path."
+                          title="Open Outlook in your default OS browser (Chrome / Safari / Firefox / Edge). If your browser already has an AAD session for this account, you land directly on the inbox in 1-click. If it doesn't, you'll see the Microsoft password page with the email already filled in. Microsoft does not allow refresh-token exchange in third-party browsers; the in-app button above is the only fully password-less path."
                         >
-                          <i className="fas fa-external-link-alt"></i> Open in default browser (password required)
+                          <i className="fas fa-external-link-alt"></i> Open in default browser (1-click if signed in)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

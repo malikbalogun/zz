@@ -4520,6 +4520,16 @@ function setupIpcHandlers() {
         (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
         'https://outlook.office.com/mail/';
 
+      // No `prompt` parameter on purpose: that lets AAD use its default
+      // "smart" behavior — if the user's browser already has an active AAD
+      // session for this account, AAD silently redirects to the inbox
+      // (true 1-click). Setting `prompt=select_account` would force the
+      // account-picker even for users with a single matching session;
+      // setting `prompt=none` would 400 if there is no session (which we
+      // can't gracefully recover from in `shell.openExternal`).
+      //
+      // `login_hint` + `domain_hint` make AAD pick the right account / IDP
+      // automatically when there are multiple sessions in the browser.
       const url = new URL(
         `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`
       );
@@ -4529,7 +4539,8 @@ function setupIpcHandlers() {
       url.searchParams.set('response_mode', 'query');
       url.searchParams.set('scope', 'openid profile offline_access https://outlook.office.com/.default');
       url.searchParams.set('login_hint', account.email);
-      url.searchParams.set('prompt', 'select_account');
+      const domainHint = account.email.split('@')[1];
+      if (domainHint) url.searchParams.set('domain_hint', domainHint);
 
       await shell.openExternal(url.toString());
       return { success: true as const, email: account.email, url: url.toString() };
