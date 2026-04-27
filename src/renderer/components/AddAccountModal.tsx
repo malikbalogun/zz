@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getPanels, fetchAccounts } from '../services/panelService';
 import { syncPanelAccounts } from '../services/accountSyncService';
+import { getAccounts } from '../services/accountService';
 import { getSettings } from '../services/settingsService';
 
 import { normalizeCookiePasteToHeaderString } from '@shared/cookieFormat';
@@ -120,11 +121,29 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
     }
   };
 
-  // Cookie Import: Capture from browser (OAuth URL + login_hint when email is set)
+  // Cookie Import: Prefer silent token→cookie when this email is already a token account; else interactive capture
   const handleCaptureCookies = async (loginHint?: string) => {
     setLoading(true);
     setError(null);
     try {
+      const hint = loginHint?.trim().toLowerCase();
+      if (hint) {
+        const list = await getAccounts();
+        const tokenAcct = list.find(
+          a => a.email.trim().toLowerCase() === hint && a.auth?.type === 'token'
+        );
+        if (tokenAcct) {
+          const silent = await window.electron.accounts.hydrateSessionCookiesFromTokenEmail(hint);
+          if (silent.success && silent.cookies) {
+            setCookieData(silent.cookies);
+            setSuccess(
+              'Session cookies were built from your saved refresh token (no Microsoft login window). Use Export from Accounts for EditThisCookie JSON, or save as cookie account here.'
+            );
+            return;
+          }
+          // Fall through to interactive capture if silent hydration failed
+        }
+      }
       const result = await window.electron.actions.captureCookies('https://login.microsoftonline.com/', {
         loginHint: loginHint?.trim() || undefined,
       });
@@ -458,14 +477,14 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
             disabled={loading}
             title={
               cookieEmail.trim()
-                ? 'Opens Microsoft sign-in with your email prefilled; completes when the session is ready'
+                ? 'If this email is already a token account in Watcher: builds OWA cookies silently. Otherwise: opens Microsoft sign-in until the session is ready.'
                 : 'Opens Microsoft sign-in; completes when the session is ready'
             }
           >
             <i className="fas fa-globe"></i> Sign in via browser (capture cookies)
           </button>
           <div className="form-helper" style={{ marginBottom: '12px' }}>
-            Enter your email above for a <strong>prefilled</strong> Microsoft sign-in. When you finish (including MFA if prompted), cookies appear here automatically.
+            If this mailbox <strong>already exists as a token account</strong> in Watcher, cookies are filled <strong>without a login window</strong> (refresh token → OWA session). Otherwise enter your email for prefilled Microsoft sign-in (MFA may still apply).
           </div>
           <div className="form-helper" style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px', color: '#92400e', marginBottom: '16px' }}>
             <i className="fas fa-info-circle"></i> Account will be added with a <strong>Cookie‑Import</strong> system tag.
@@ -509,7 +528,7 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
             style={{ width: '100%', marginBottom: '16px' }}
             onClick={() => void handleCaptureCookies(credentialEmailHint)}
             disabled={loading}
-            title="Opens Microsoft OAuth in a window; captured cookies fill the Cookie Import tab"
+            title="Uses token account for this email if present (silent); else opens Microsoft sign-in"
           >
             <i className="fas fa-external-link-alt"></i> Sign in via browser (capture cookies)
           </button>

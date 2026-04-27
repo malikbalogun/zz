@@ -394,6 +394,12 @@ const AccountsView: FC<AccountsViewProps> = ({
     setLoading(true);
     try {
       await openOwaExternalBrowserSession(accountId);
+      alert(
+        'EditThisCookie JSON is on your clipboard.\n\n' +
+          '1. In the tab that opened (outlook.office.com), open Edit This Cookie → Import.\n' +
+          '2. Paste (Ctrl+V) and confirm.\n' +
+          '3. Refresh the page — you should land in the inbox for this mailbox.'
+      );
     } catch (error) {
       alert(`Open in browser failed: ${error instanceof Error ? error.message : error}`);
     } finally {
@@ -880,7 +886,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                   {account.auth?.type === 'token' && (
                     <button
                       className="icon-btn"
-                      title="Open Microsoft 365 in your default browser with this mailbox prefilled (complete MFA there if required)"
+                    title="Copy OWA session cookies as JSON, open Outlook in your browser — paste into Edit This Cookie on that tab, then refresh"
                       onClick={() => void handleOpenOwaInSystemBrowser(account.id)}
                       disabled={loading}
                     >

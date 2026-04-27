@@ -34,6 +34,13 @@ export interface ElectronAPI {
       error?: string;
     }>;
     /**
+     * Token account matching email: silently refresh + prime OWA cookies (no UI).
+     * Returns Cookie header string + EditThisCookie JSON for browser import.
+     */
+    hydrateSessionCookiesFromTokenEmail: (
+      email: string
+    ) => Promise<{ success: boolean; cookies?: string; json?: string; error?: string }>;
+    /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
      */

@@ -66,6 +66,9 @@ contextBridge.exposeInMainWorld('electron', {
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
     /** Token account → Netscape cookie file (round-trip with the cookie import path). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
+    /** Refresh-token account: silently populate OWA partition cookies (no UI), return header + EditThisCookie JSON. */
+    hydrateSessionCookiesFromTokenEmail: (email: string) =>
+      ipcRenderer.invoke('account:hydrateSessionCookiesFromTokenEmail', email),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
     /** Replace primary auth on a token account after re-authentication. */

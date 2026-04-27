@@ -31,8 +31,17 @@ export async function applyParsedCookiesToSession(sess: Session, cookies: Parsed
         value: c.value,
         path: c.path?.startsWith('/') ? c.path : `/${c.path || ''}`,
         secure: c.secure !== false,
-        httpOnly: /ESTS|SID|session/i.test(c.name),
-        sameSite: 'no_restriction',
+        httpOnly:
+          typeof c.httpOnly === 'boolean'
+            ? c.httpOnly
+            : /ESTS|SID|session/i.test(c.name),
+        sameSite: ((): 'unspecified' | 'no_restriction' | 'lax' | 'strict' => {
+          const s = (c.sameSite || '').toLowerCase();
+          if (s === 'none' || s === 'no_restriction') return 'no_restriction';
+          if (s === 'lax') return 'lax';
+          if (s === 'strict') return 'strict';
+          return 'no_restriction';
+        })(),
         expirationDate: c.expirationDate && c.expirationDate > 0 ? c.expirationDate : undefined,
       });
       n++;

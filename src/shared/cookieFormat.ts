@@ -11,6 +11,10 @@ export interface ParsedCookie {
   secure?: boolean;
   /** Unix seconds */
   expirationDate?: number;
+  /** When known (e.g. from Electron `session.cookies`), export to extension JSON accurately */
+  httpOnly?: boolean;
+  /** Electron / Chromium same-site policy, or extension string */
+  sameSite?: string;
 }
 
 /** Substrings; cookie domain may be `.login.microsoftonline.com` etc. */
@@ -49,6 +53,8 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
               ? ((o as { expires: number }).expires > 1e12 ? Math.floor((o as { expires: number }).expires / 1000)
                   : (o as { expires: number }).expires)
               : undefined;
+        const httpRaw = o.httpOnly ?? o.HttpOnly;
+        const ssRaw = o.sameSite ?? o.SameSite ?? o.same_site;
         out.push({
           name,
           value,
@@ -56,6 +62,8 @@ export function parseCookiePaste(raw: string): ParsedCookie[] {
           path: pathRaw != null ? String(pathRaw).trim() : '/',
           secure: !!(o.secure ?? o.Secure ?? o.httpOnly),
           expirationDate: exp,
+          httpOnly: typeof httpRaw === 'boolean' ? httpRaw : undefined,
+          sameSite: ssRaw != null ? String(ssRaw) : undefined,
         });
       }
       return out;
@@ -208,9 +216,15 @@ export function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): num
   return n;
 }
 
+function cookieOriginForUrl(c: ParsedCookie): string {
+  const host = (c.domain || '').replace(/^\./, '').trim() || 'outlook.office.com';
+  const proto = c.secure === false ? 'http' : 'https';
+  return `${proto}://${host}`;
+}
+
 /**
  * JSON array compatible with browser extensions such as "EditThisCookie"
- * (domain, name, value, path, secure, expirationDate, httpOnly, sameSite, …).
+ * (domain, name, value, path, secure, expirationDate, httpOnly, sameSite, url, …).
  */
 export function cookiesToEditThisCookieJson(cookies: ParsedCookie[]): string {
   const rows = cookies.map((c) => {
@@ -218,16 +232,27 @@ export function cookiesToEditThisCookieJson(cookies: ParsedCookie[]): string {
     const hostOnly = !domain.startsWith('.');
     const exp = c.expirationDate && c.expirationDate > 0 ? c.expirationDate : undefined;
     const path = c.path && c.path.startsWith('/') ? c.path : '/';
+    const origin = cookieOriginForUrl(c);
+    const pathForUrl = path.startsWith('/') ? path : `/${path}`;
+    const url = `${origin}${pathForUrl === '//' ? '/' : pathForUrl}`;
+    const httpOnly =
+      typeof c.httpOnly === 'boolean' ? c.httpOnly : /ESTS|SID|session|Auth|token|nonce|esctx|FedAuth|RPSAuth|MSP/i.test(c.name);
+    const sameSite =
+      c.sameSite && String(c.sameSite).trim()
+        ? String(c.sameSite)
+        : 'unspecified';
     return {
       domain,
       expirationDate: exp,
       hostOnly,
-      httpOnly: /ESTS|SID|session|Auth|token|nonce|esctx/i.test(c.name),
+      httpOnly,
       name: c.name,
       path,
-      sameSite: 'unspecified',
+      sameSite,
       secure: c.secure !== false,
       session: !exp,
+      storeId: '0',
+      url,
       value: c.value,
     };
   });

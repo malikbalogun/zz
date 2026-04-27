@@ -102,13 +102,15 @@ test('cookiesToNetscape round-trip via parseCookiePaste', () => {
 
 test('cookiesToEditThisCookieJson produces valid JSON array', () => {
   const j = cookiesToEditThisCookieJson([
-    { name: 'ESTSAUTH', value: 'x', domain: '.login.microsoftonline.com', path: '/', secure: true },
+    { name: 'ESTSAUTH', value: 'x', domain: '.login.microsoftonline.com', path: '/', secure: true, httpOnly: true },
   ]);
   const arr = JSON.parse(j.trim());
   assert.ok(Array.isArray(arr));
   assert.equal(arr[0].name, 'ESTSAUTH');
   assert.equal(arr[0].value, 'x');
   assert.equal(arr[0].domain, '.login.microsoftonline.com');
+  assert.equal(arr[0].httpOnly, true);
+  assert.ok(String(arr[0].url).includes('login.microsoftonline.com'));
 });
 
 test('cookiesToNetscape skips entries with no domain', () => {
