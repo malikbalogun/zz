@@ -338,6 +338,31 @@ function appendOutlookDebug(line: string): void {
   }
 }
 
+/**
+ * Append `?mkt=<displayLanguage>` (or merge into existing query) to any
+ * Outlook on the web URL we open, so OWA renders in the user's chosen
+ * default language regardless of the mailbox's own preference. The
+ * preference comes from Settings → Outlook display.
+ */
+async function applyOwaDisplayLanguage(rawUrl: string): Promise<string> {
+  try {
+    const store = await readStore();
+    const lang =
+      typeof store?.settings?.outlook?.displayLanguage === 'string'
+        ? store.settings.outlook.displayLanguage.trim()
+        : '';
+    if (!lang) return rawUrl;
+    const u = new URL(rawUrl);
+    u.searchParams.set('mkt', lang);
+    // OWA also honours `locale` on its bootstrap. Setting both removes
+    // any race between the two.
+    if (!u.searchParams.has('locale')) u.searchParams.set('locale', lang);
+    return u.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 function extractClientIdFromUrl(urlStr: string): string | null {
   try {
     const u = new URL(urlStr);
@@ -647,6 +672,7 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
     windowToAccountMap.set(primer.webContents.id, accountId);
 
     const PRIME_TIMEOUT_MS = 12000;
+    const primerUrl = await applyOwaDisplayLanguage('https://outlook.office.com/mail/inbox');
     try {
       await new Promise<void>((resolve) => {
         const settled = { done: false };
@@ -666,7 +692,7 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
           }
         }, 750);
         const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
-        primer.loadURL('https://outlook.office.com/mail/inbox?locale=en-US').catch((loadErr) => {
+        primer.loadURL(primerUrl).catch((loadErr) => {
           appendOutlookDebug(
             `[ExportCookies] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
           );
@@ -761,10 +787,13 @@ async function openOwaWithCookieSession(
 
   installOutlookPartitionRequestHooks(outlookSession);
 
-  const startUrl =
+  const baseStartUrl =
     mode === 'exchangeAdmin'
       ? 'https://admin.exchange.microsoft.com/'
       : 'https://outlook.office.com/mail/inbox';
+  const startUrl = mode === 'exchangeAdmin'
+    ? baseStartUrl
+    : await applyOwaDisplayLanguage(baseStartUrl);
   const windowTitle =
     mode === 'exchangeAdmin' ? `Exchange admin - ${account.email}` : `Outlook (cookies) - ${account.email}`;
 
@@ -2805,7 +2834,7 @@ function setupIpcHandlers() {
       const startUrl =
         mode === 'exchangeAdmin'
           ? 'https://admin.exchange.microsoft.com/'
-          : 'https://outlook.office.com/mail/inbox?locale=en-US';
+          : await applyOwaDisplayLanguage('https://outlook.office.com/mail/inbox');
       const windowTitle =
         mode === 'exchangeAdmin' ? `Exchange admin - ${account.email}` : `Outlook - ${account.email}`;
 
@@ -3425,7 +3454,7 @@ function setupIpcHandlers() {
         win.webContents.setUserAgent(
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         );
-        await win.loadURL('https://outlook.office.com/mail/inbox');
+        await win.loadURL(await applyOwaDisplayLanguage('https://outlook.office.com/mail/inbox'));
       }
 
       appendOutlookDebug(

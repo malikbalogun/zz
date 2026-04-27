@@ -346,6 +346,70 @@ const SettingsView = () => {
           </div>
         </div>
 
+        {/* Outlook display */}
+        <div className="settings-card">
+          <h3 className="settings-title">
+            <span className="settings-icon"><i className="fas fa-globe"></i></span> Outlook display
+          </h3>
+          <p className="form-helper" style={{ marginBottom: 12 }}>
+            Forces Outlook on the web to render in your chosen language regardless of the mailbox owner's preference. Applied to every in-app OWA window we open via the <code>mkt</code> URL parameter.
+          </p>
+          <div className="form-group">
+            <label className="form-label">Default Outlook UI language</label>
+            <select
+              className="form-input"
+              value={settings.outlook?.displayLanguage ?? 'en-US'}
+              onChange={e => updateSetting('outlook.displayLanguage', e.target.value)}
+            >
+              <option value="">(use mailbox default)</option>
+              <option value="en-US">English (United States)</option>
+              <option value="en-GB">English (United Kingdom)</option>
+              <option value="fr-FR">Français (France)</option>
+              <option value="fr-CA">Français (Canada)</option>
+              <option value="es-ES">Español (España)</option>
+              <option value="es-MX">Español (México)</option>
+              <option value="de-DE">Deutsch (Deutschland)</option>
+              <option value="it-IT">Italiano (Italia)</option>
+              <option value="pt-BR">Português (Brasil)</option>
+              <option value="pt-PT">Português (Portugal)</option>
+              <option value="nl-NL">Nederlands (Nederland)</option>
+              <option value="sv-SE">Svenska (Sverige)</option>
+              <option value="da-DK">Dansk (Danmark)</option>
+              <option value="nb-NO">Norsk bokmål (Norge)</option>
+              <option value="fi-FI">Suomi (Suomi)</option>
+              <option value="pl-PL">Polski (Polska)</option>
+              <option value="cs-CZ">Čeština (Česko)</option>
+              <option value="hu-HU">Magyar (Magyarország)</option>
+              <option value="ro-RO">Română (România)</option>
+              <option value="el-GR">Ελληνικά (Ελλάδα)</option>
+              <option value="ru-RU">Русский (Россия)</option>
+              <option value="uk-UA">Українська (Україна)</option>
+              <option value="tr-TR">Türkçe (Türkiye)</option>
+              <option value="ar-SA">العربية (السعودية)</option>
+              <option value="he-IL">עברית (ישראל)</option>
+              <option value="hi-IN">हिन्दी (भारत)</option>
+              <option value="ja-JP">日本語 (日本)</option>
+              <option value="ko-KR">한국어 (대한민국)</option>
+              <option value="zh-CN">中文 (简体, 中国)</option>
+              <option value="zh-TW">中文 (繁體, 台灣)</option>
+              <option value="th-TH">ไทย (ประเทศไทย)</option>
+              <option value="vi-VN">Tiếng Việt (Việt Nam)</option>
+              <option value="id-ID">Bahasa Indonesia (Indonesia)</option>
+            </select>
+            <div className="form-helper">
+              Or type any BCP-47 tag below for unlisted locales.
+            </div>
+            <input
+              type="text"
+              className="form-input"
+              style={{ marginTop: 8 }}
+              placeholder="e.g. en-US, fr-FR, zh-CN"
+              value={settings.outlook?.displayLanguage ?? ''}
+              onChange={e => updateSetting('outlook.displayLanguage', e.target.value)}
+            />
+          </div>
+        </div>
+
         {/* Translation */}
         <div className="settings-card">
           <h3 className="settings-title">

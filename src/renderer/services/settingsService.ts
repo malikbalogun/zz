@@ -90,6 +90,10 @@ const DEFAULT_SETTINGS: Settings = {
     redirectUri: 'https://outlook.office.com/mail/',
     scopes: ['Mail.Read', 'Mail.Send', 'offline_access', 'openid', 'profile'],
   },
+  outlook: {
+    // BCP-47 tag forwarded to OWA via mkt= on every load.
+    displayLanguage: 'en-US',
+  },
   translation: {
     enabled: true,
     targetLang: 'en',

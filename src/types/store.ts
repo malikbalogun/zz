@@ -294,6 +294,16 @@ export interface Settings {
     redirectUri?: string;
     scopes?: string[];
   };
+  /** Outlook on the web display preferences (forced on every OWA window we open). */
+  outlook?: {
+    /**
+     * Default UI language for the in-app OWA window (BCP-47 / ISO 639-1
+     * tag, e.g. 'en-US', 'fr-FR', 'es-ES'). Forwarded to OWA via the
+     * `mkt` URL parameter on every load, which OWA respects as an
+     * override of the mailbox's own language preference.
+     */
+    displayLanguage?: string;
+  };
   /** In-app message body translator (LibreTranslate-compatible endpoint). */
   translation?: {
     enabled?: boolean;
