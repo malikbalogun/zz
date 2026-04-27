@@ -5,7 +5,13 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies } from '../shared/cookieFormat';
+import {
+  parseCookiePaste,
+  filterMicrosoftRelatedCookies,
+  cookiesToHeaderString,
+  cookiesToNetscape,
+  type ParsedCookie,
+} from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -364,6 +370,227 @@ function getMicrosoftCookiePasteFromAccount(account: any): string | null {
     return raw || null;
   }
   return null;
+}
+
+// Cookie sets that only include helper cookies (e.g. DefaultAnchorMailbox,
+// msal.cache.encryption) are not sufficient to restore a real OWA browser
+// session. We track which cookies look like "real" Microsoft auth cookies so
+// the UI can warn the user when the captured snapshot is too thin.
+const STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS: RegExp[] = [
+  /^ESTSAUTH/i,
+  /^ESTSSC$/i,
+  /^OpenIdConnect\.(token|id_token|nonce)/i,
+  /^X-OWA-CANARY$/i,
+  /^Canary$/i,
+  /^rtFa$/i,
+  /^FedAuth$/i,
+  /^RPSAuth$/i,
+  /^MSP(Auth|Requ|OK|Prof|CID|TC)$/i,
+  /^esctx$/i,
+];
+
+function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
+  return cookies.some((c) => {
+    const name = String(c.name || '').trim();
+    if (!name) return false;
+    return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
+  });
+}
+
+function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): number {
+  let n = 0;
+  for (const c of cookies) {
+    const name = String(c.name || '').trim();
+    if (!name) continue;
+    if (STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name))) n++;
+  }
+  return n;
+}
+
+/**
+ * Convert parsed cookies into the JSON shape that browser cookie-importer
+ * extensions (Cookie-Editor / EditThisCookie) accept. The output is a flat
+ * array of objects with the fields those extensions expect.
+ */
+function cookiesToExtensionImportRows(cookies: ParsedCookie[]): Array<Record<string, unknown>> {
+  const normalizeImporterSameSite = (
+    sameSite?: string
+  ): 'lax' | 'strict' | 'no_restriction' | undefined => {
+    const raw = String(sameSite || '').trim().toLowerCase();
+    if (!raw || raw === 'unspecified') return undefined;
+    if (raw === 'none' || raw === 'no_restriction') return 'no_restriction';
+    if (raw === 'lax') return 'lax';
+    if (raw === 'strict') return 'strict';
+    return undefined;
+  };
+  const rows: Array<Record<string, unknown>> = [];
+  for (const cookie of cookies) {
+    const rawDomain = String(cookie.domain || '').trim();
+    const domain = rawDomain.replace(/^\./, '');
+    const name = String(cookie.name || '').trim();
+    if (!domain || !name) continue;
+    const row: Record<string, unknown> = {
+      name,
+      value: cookie.value,
+      domain,
+      expirationDate:
+        typeof cookie.expirationDate === 'number'
+          ? Math.floor(cookie.expirationDate)
+          : undefined,
+      hostOnly: cookie.hostOnly ?? !rawDomain.startsWith('.'),
+      httpOnly: cookie.httpOnly !== false,
+      path: cookie.path || '/',
+      secure: cookie.secure !== false,
+      session: cookie.session ?? !cookie.expirationDate,
+      storeId:
+        typeof cookie.storeId === 'string' || cookie.storeId === null
+          ? cookie.storeId
+          : null,
+    };
+    const sameSite = normalizeImporterSameSite(cookie.sameSite);
+    if (sameSite) row.sameSite = sameSite;
+    rows.push(row);
+  }
+  return rows;
+}
+
+function cookiesToExtensionImportJson(cookies: ParsedCookie[]): string {
+  return JSON.stringify(cookiesToExtensionImportRows(cookies), null, 2);
+}
+
+type CapturedOwaCookieSnapshot = {
+  account: any;
+  cookies: ParsedCookie[];
+  strongCount: number;
+  netscape: string;
+  header: string;
+  extensionJson: string;
+  quality: 'strong' | 'weak';
+};
+
+/**
+ * Capture the Microsoft session cookies stored under a token account's OWA
+ * partition. If the partition has no cookies yet, primes them by briefly
+ * loading https://outlook.office.com/mail/inbox in a hidden BrowserWindow with
+ * the same partition + preload long enough for the OAuth interceptor + AAD
+ * redirects to set the auth cookies.
+ */
+async function captureTokenBackedOwaCookies(accountId: string): Promise<CapturedOwaCookieSnapshot> {
+  const store = await readStore();
+  const accounts: any[] = store.accounts || [];
+  const account = accounts.find((a: any) => a.id === accountId);
+  if (!account) throw new Error('Account not found');
+  if (account.auth?.type !== 'token') {
+    throw new Error('Cookie export only applies to token-based Microsoft accounts.');
+  }
+
+  // Must match the partition used by mailbox:openOutlook (token path) so we
+  // read cookies from the same jar OWA actually populated.
+  const partitionName = `persist:outlook-${accountId}`;
+  const owaSession = session.fromPartition(partitionName);
+
+  const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
+    const all = await owaSession.cookies.get({});
+    const parsed: ParsedCookie[] = all.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || '/',
+      secure: c.secure !== false,
+      httpOnly: c.httpOnly === true,
+      hostOnly: c.hostOnly === true,
+      sameSite:
+        c.sameSite === 'lax'
+          ? 'lax'
+          : c.sameSite === 'strict'
+            ? 'strict'
+            : c.sameSite === 'no_restriction'
+              ? 'none'
+              : undefined,
+      session: c.session === true,
+      expirationDate: c.expirationDate,
+    }));
+    return filterMicrosoftRelatedCookies(parsed);
+  };
+
+  let msCookies = await readMicrosoftCookies();
+  if (msCookies.length === 0 || !hasStrongMicrosoftSessionCookies(msCookies)) {
+    appendOutlookDebug(`[ExportCookies] Partition empty/weak, priming for ${accountId}`);
+    try {
+      const bundle = await loadOwaTokenBundle(accountId);
+      applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
+      installOutlookPartitionRequestHooks(owaSession);
+    } catch (err) {
+      throw new Error(
+        `Could not stage tokens for ${account.email}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const primer = new BrowserWindow({
+      width: 800,
+      height: 600,
+      show: false,
+      webPreferences: {
+        partition: partitionName,
+        contextIsolation: false,
+        nodeIntegration: false,
+        sandbox: false,
+        preload: path.join(__dirname, 'preload-mailbox.js'),
+      },
+    });
+    windowToAccountMap.set(primer.webContents.id, accountId);
+
+    const PRIME_TIMEOUT_MS = 12000;
+    try {
+      await new Promise<void>((resolve) => {
+        const settled = { done: false };
+        const finish = () => {
+          if (settled.done) return;
+          settled.done = true;
+          clearInterval(pollTimer);
+          clearTimeout(hardTimeout);
+          resolve();
+        };
+        const pollTimer = setInterval(async () => {
+          try {
+            const probe = await readMicrosoftCookies();
+            if (probe.length > 0 && hasStrongMicrosoftSessionCookies(probe)) finish();
+          } catch {
+            /* keep polling */
+          }
+        }, 750);
+        const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
+        primer.loadURL('https://outlook.office.com/mail/inbox?locale=en-US').catch((loadErr) => {
+          appendOutlookDebug(
+            `[ExportCookies] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
+          );
+        });
+      });
+    } finally {
+      windowToAccountMap.delete(primer.webContents.id);
+      if (!primer.isDestroyed()) primer.destroy();
+    }
+
+    msCookies = await readMicrosoftCookies();
+  }
+
+  if (msCookies.length === 0) {
+    throw new Error(
+      `No Microsoft cookies could be captured for ${account.email}. Try opening Outlook (the play button) once first; the session needs to settle before cookies can be exported.`
+    );
+  }
+
+  const strongCount = countStrongMicrosoftSessionCookies(msCookies);
+
+  return {
+    account,
+    cookies: msCookies,
+    strongCount,
+    netscape: cookiesToNetscape(msCookies),
+    header: cookiesToHeaderString(msCookies),
+    extensionJson: cookiesToExtensionImportJson(msCookies),
+    quality: strongCount > 0 ? 'strong' : 'weak',
+  };
 }
 
 /**
@@ -2897,6 +3124,78 @@ function setupIpcHandlers() {
         .filter(Boolean)
         .join(' - ');
       throw new Error(`${raw}\n\n${hint}`);
+    }
+  });
+
+  /**
+   * Capture the current OWA cookies for a token account and return them in
+   * multiple formats. Used by both the "Export cookies (JSON)" menu item and
+   * the one-click "Sign in via browser" flow which copies the JSON to the
+   * clipboard and opens outlook.office.com in the user's default browser.
+   */
+  ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
+    try {
+      const snapshot = await captureTokenBackedOwaCookies(accountId);
+      appendOutlookDebug(
+        `[ExportCookies] Captured ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
+      );
+      return {
+        success: true as const,
+        count: snapshot.cookies.length,
+        strongCount: snapshot.strongCount,
+        email: snapshot.account.email,
+        netscape: snapshot.netscape,
+        header: snapshot.header,
+        extensionJson: snapshot.extensionJson,
+        quality: snapshot.quality,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[ExportCookies] Failed: ${msg}`);
+      return { success: false as const, error: msg };
+    }
+  });
+
+  /**
+   * One-click "Sign in via browser": capture this token account's OWA
+   * cookies, copy the Cookie-Editor / EditThisCookie JSON to the clipboard,
+   * then open outlook.office.com in the user's default browser. The user only
+   * needs to click "Import" in their cookie-editor extension to be signed in.
+   */
+  ipcMain.handle('account:browserSignInOneClick', async (_, accountId: string) => {
+    try {
+      const snapshot = await captureTokenBackedOwaCookies(accountId);
+      clipboard.writeText(snapshot.extensionJson);
+      const targetUrl = 'https://outlook.office.com/mail/';
+      await shell.openExternal(targetUrl);
+      appendOutlookDebug(
+        `[BrowserSignIn] One-click for ${snapshot.account.email}: copied ${snapshot.cookies.length} cookies (strong=${snapshot.strongCount}) and opened ${targetUrl}`
+      );
+      return {
+        success: true as const,
+        email: snapshot.account.email,
+        count: snapshot.cookies.length,
+        strongCount: snapshot.strongCount,
+        quality: snapshot.quality,
+        targetUrl,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[BrowserSignIn] One-click failed: ${msg}`);
+      return { success: false as const, error: msg };
+    }
+  });
+
+  /**
+   * Copy text directly to the clipboard from the renderer. Used by the
+   * "Copy JSON" button in the Export cookies modal.
+   */
+  ipcMain.handle('clipboard:writeText', async (_, text: string) => {
+    try {
+      clipboard.writeText(typeof text === 'string' ? text : '');
+      return { success: true as const };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
     }
   });
 
