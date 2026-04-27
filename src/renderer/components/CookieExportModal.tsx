@@ -262,6 +262,20 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
               {activeMeta.hint}
             </div>
 
+            <div
+              className="form-helper"
+              style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: 10, color: '#92400e', marginBottom: 12, fontSize: 12 }}
+            >
+              <i className="fas fa-exclamation-triangle" style={{ marginRight: 6 }}></i>
+              <strong>Note:</strong> these cookies were captured from the in-app token partition.
+              Some ESTSAUTH-class auth cookies are <code>HttpOnly</code> and cannot be written from
+              <code>document.cookie</code>, so the browser-console snippet is best-effort. The
+              Cookie-Editor / EditThisCookie extension <em>can</em> write HttpOnly cookies and is the
+              most reliable path. If the imported session still bounces to the sign-in page on a real
+              browser, use the in-app <strong>Sign in via browser (1-click)</strong> button instead —
+              it opens an in-app Chromium window with the same cookies <em>plus</em> the Bearer
+              header that OWA's session APIs require.</div>
+
             <textarea
               className="form-input"
               readOnly

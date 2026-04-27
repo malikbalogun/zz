@@ -3264,16 +3264,12 @@ function setupIpcHandlers() {
     }
   });
 
-  /**
-   * One-click "Sign in via browser": prime the token account's OWA partition
-   * (refreshing the token + loading outlook.office.com if needed so the AAD
-   * auth cookies are populated), copy every cookie directly into a fresh
-   * "browser" partition with full metadata preserved (httpOnly / sameSite /
-   * hostOnly / domain — no Netscape round-trip), and open the inbox in a
-   * Chromium BrowserWindow on that partition with no Bearer / MSAL hooks.
-   *
-   * The user lands directly on `outlook.office.com/mail/inbox` signed in.
-   */
+  // Legacy/unused: the cookie-only "browser sign-in" path bounces to the MS
+  // sign-in page because OWA's session cookies are paired with the Bearer
+  // header that the token partition's webRequest hook injects. The renderer
+  // now wires the 1-click button to mailbox:openOutlook directly (same
+  // engine as Play). This stub is kept so older renderer builds don't blow
+  // up, but it is no longer reachable from the current UI.
   ipcMain.handle('account:browserSignInOneClick', async (_, accountId: string) => {
     try {
       const storeData = await readStore();

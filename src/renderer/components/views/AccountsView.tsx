@@ -305,17 +305,21 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  // True 1-click "Sign in via browser": exchange the refresh token for OWA
-  // session cookies and open the inbox in a Chromium window with those
-  // cookies already injected. Lands directly on outlook.office.com/mail/inbox
-  // signed in — no password, MFA, paste, or extension steps.
+  // True 1-click "Sign in via browser": opens the inbox in an in-app
+  // Chromium window using the same engine Play uses (token-mode OWA window
+  // with refresh-token bundle + Bearer header injection + MSAL cache + the
+  // DefaultAnchorMailbox cookies). The user lands directly on the inbox
+  // signed in — no password, MFA, or paste step.
+  //
+  // We deliberately use the proven Play engine instead of any
+  // cookies-only path: OWA's session cookies (X-OWA-CANARY, etc.) only
+  // authenticate when paired with the Bearer header the partition's
+  // webRequest hook injects on every outbound request. Without that hook
+  // OWA has no AAD identity and bounces straight to the sign-in page.
   const handleBrowserSignIn = async (accountId: string) => {
     setLoading(true);
     try {
-      const result = await window.electron.accounts.browserSignInOneClick(accountId);
-      if (!result.success) {
-        throw new Error(result.error || 'Browser sign-in failed');
-      }
+      await openOutlookWeb(accountId, { authPreference: 'token' });
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
     } finally {
@@ -936,7 +940,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="One-click: exchange this account's refresh token for OWA cookies and open the inbox in a Chromium window already signed in (no password, MFA, or paste step)."
+                          title="Open Outlook on the web for this account in a Chromium window already signed in via the stored refresh token (no password, MFA, or paste step)."
                         >
                           <i className="fas fa-external-link-alt"></i> Sign in via browser (1-click)
                         </div>
