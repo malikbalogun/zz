@@ -575,6 +575,16 @@ export async function openOwaExternalBrowserSession(accountId: string): Promise<
   if (!r || (r as { success?: boolean }).success !== true) {
     throw new Error((r as { error?: string })?.error || 'Could not start browser sign-in');
   }
+  const typed = r as {
+    primaryOrigin?: string;
+    strongCount?: number;
+  };
+  if ((typed.strongCount ?? 0) === 0) {
+    console.warn(
+      '[Accounts] Browser sign-in opened without strong OWA cookies; fallback import may be required.',
+      { accountId, primaryOrigin: typed.primaryOrigin }
+    );
+  }
   if ((r as { opened?: boolean }).opened === false) {
     throw new Error('Browser sign-in was already opened a moment ago. Check your existing browser tab.');
   }
