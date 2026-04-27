@@ -4484,11 +4484,20 @@ function setupIpcHandlers() {
 
   /**
    * Open Outlook on the web in the user's *default OS browser* (Chrome /
-   * Safari / Firefox / Edge — whatever is registered as the system browser),
-   * with the email pre-filled via `login_hint` so the user only has to
-   * complete the password / MFA step. We cannot exchange a refresh token
-   * for AAD session cookies in someone else's browser, so a true
-   * password-less land-in-inbox path requires using the in-app window.
+   * Safari / Firefox / Edge — whatever is registered as the system browser).
+   *
+   * This goes straight to AAD's `/oauth2/v2.0/authorize` endpoint with the
+   * email pre-filled via `login_hint` and `prompt=select_account`, then
+   * `redirect_uri=https://outlook.office.com/mail/` so AAD bounces the user
+   * straight into their inbox after sign-in. The OWA bootstrap URL strips
+   * `login_hint` during its handoff, which is why we don't use it.
+   *
+   * NOTE: Microsoft does NOT issue AAD session cookies in exchange for a
+   * refresh token, so this flow can never be fully password-less. The user
+   * will be prompted for their password (and MFA, if configured) unless
+   * their browser already has an AAD session for this account. The only
+   * truly password-less path is the in-app `Sign in (in-app browser)`
+   * button which uses our Bearer-injection hook.
    */
   ipcMain.handle('owa:openInDefaultBrowser', async (_, accountId: string) => {
     try {
@@ -4496,15 +4505,34 @@ function setupIpcHandlers() {
       const accounts: any[] = store.accounts || [];
       const account = accounts.find((a: any) => a.id === accountId);
       if (!account?.email) throw new Error('Account not found');
-      // Outlook on the web honours `login_hint` on the OWA bootstrap URL,
-      // so the user lands on the AAD password page with their email already
-      // populated. If they're already signed into AAD in their browser
-      // (different tenant or persistent session) AAD picks the right
-      // account automatically and forwards them to the inbox.
-      const url =
-        `https://outlook.office.com/owa/?bO=1&login_hint=${encodeURIComponent(account.email)}#path=/mail/inbox`;
-      await shell.openExternal(url);
-      return { success: true as const, email: account.email, url };
+
+      const settings = store.settings || {};
+      const ms = settings.microsoftOAuth || {};
+      const clientId =
+        (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+        account.auth?.clientId ||
+        'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const authority =
+        (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+        normalizeAuthorityTenant(account.auth?.authorityEndpoint || 'common') ||
+        'common';
+      const redirectUri =
+        (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+        'https://outlook.office.com/mail/';
+
+      const url = new URL(
+        `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`
+      );
+      url.searchParams.set('client_id', clientId);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('response_mode', 'query');
+      url.searchParams.set('scope', 'openid profile offline_access https://outlook.office.com/.default');
+      url.searchParams.set('login_hint', account.email);
+      url.searchParams.set('prompt', 'select_account');
+
+      await shell.openExternal(url.toString());
+      return { success: true as const, email: account.email, url: url.toString() };
     } catch (error: any) {
       return { success: false as const, error: error?.message || String(error) };
     }
