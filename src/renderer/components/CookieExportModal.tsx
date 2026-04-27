@@ -110,15 +110,56 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
 
   const handleCopy = async (id: FormatId) => {
     if (!snapshot) return;
+    const text = snapshot[id];
+    let copied = false;
+    let lastError: unknown = null;
     try {
-      const r = await window.electron.clipboard.writeText(snapshot[id]);
-      if (!r.success) throw new Error(r.error || 'Could not copy to clipboard');
+      const r = await window.electron.clipboard.writeText(text);
+      if (r.success) {
+        copied = true;
+      } else {
+        lastError = r.error;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+    if (!copied) {
+      try {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (!copied) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) copied = true;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (copied) {
       setCopiedFormat(id);
       window.setTimeout(() => {
         setCopiedFormat(prev => (prev === id ? null : prev));
       }, 1500);
-    } catch (err) {
-      alert(`Copy failed: ${err instanceof Error ? err.message : err}`);
+    } else {
+      const detail =
+        lastError instanceof Error
+          ? lastError.message
+          : typeof lastError === 'string'
+            ? lastError
+            : 'Unknown error';
+      alert(`Copy failed: ${detail}\n\nTip: click inside the text box, press Ctrl/Cmd+A, then Ctrl/Cmd+C to copy manually.`);
     }
   };
 

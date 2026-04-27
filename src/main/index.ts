@@ -3265,19 +3265,29 @@ function setupIpcHandlers() {
   });
 
   /**
-   * One-click "Sign in via browser": exchange the account's refresh token
-   * for OWA session cookies, then open the inbox in a Chromium BrowserWindow
-   * with those cookies already injected. The user lands directly on
-   * `outlook.office.com/mail/inbox` signed in — no password, MFA, or paste
-   * step.
+   * One-click "Sign in via browser": prime the token account's OWA partition
+   * (refreshing the token + loading outlook.office.com if needed so the AAD
+   * auth cookies are populated), copy every cookie directly into a fresh
+   * "browser" partition with full metadata preserved (httpOnly / sameSite /
+   * hostOnly / domain — no Netscape round-trip), and open the inbox in a
+   * Chromium BrowserWindow on that partition with no Bearer / MSAL hooks.
    *
-   * Implementation: capture cookies into a Netscape blob (the same path
-   * `Reapply cookies now` uses), then route through `openOwaWithCookieSession`,
-   * which already owns the cookie-mode BrowserWindow + popup policy used by
-   * Play (cookie accounts).
+   * The user lands directly on `outlook.office.com/mail/inbox` signed in.
    */
   ipcMain.handle('account:browserSignInOneClick', async (_, accountId: string) => {
     try {
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') {
+        throw new Error('1-click browser sign-in only applies to Microsoft token accounts.');
+      }
+
+      // Step 1: prime the token partition so its cookie jar is fully
+      // populated. captureTokenBackedOwaCookies already does the priming
+      // dance (loadOwaTokenBundle + hidden BrowserWindow + poll) and rejects
+      // weak snapshots, so we reuse it.
       const snapshot = await captureTokenBackedOwaCookies(accountId);
       if (snapshot.quality === 'weak') {
         throw new Error(
@@ -3285,14 +3295,150 @@ function setupIpcHandlers() {
           `Open Outlook (the play button) once first to populate the auth cookies, then retry.`
         );
       }
-      await openOwaWithCookieSession(accountId, snapshot.account, snapshot.netscape, 'owa');
+
+      // Step 2: open a clean "browser" partition and copy every Electron
+      // cookie from the token partition into it, fully preserving metadata.
+      // Going through Netscape / our parsed-cookie shape silently drops
+      // httpOnly / sameSite / hostOnly which is what was making OWA bounce
+      // the user back to the sign-in page.
+      const sourceSession = session.fromPartition(`persist:outlook-${accountId}`);
+      const targetPartition = `persist:owa-browser-${accountId}`;
+      const targetSession = session.fromPartition(targetPartition);
+      try {
+        await targetSession.clearStorageData({ storages: ['cookies'] });
+      } catch (err) {
+        appendOutlookDebug(
+          `[BrowserSignIn] clearStorageData failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      const sourceCookies = await sourceSession.cookies.get({});
+      let copied = 0;
+      for (const c of sourceCookies) {
+        if (!c.name) continue;
+        const rawDomain = String(c.domain || '');
+        const hostForUrl = rawDomain.replace(/^\./, '');
+        if (!hostForUrl) continue;
+        const url = `${c.secure === false ? 'http' : 'https'}://${hostForUrl}${c.path || '/'}`;
+        try {
+          await targetSession.cookies.set({
+            url,
+            name: c.name,
+            value: c.value,
+            domain: rawDomain || undefined,
+            path: c.path || '/',
+            secure: c.secure !== false,
+            httpOnly: c.httpOnly === true,
+            sameSite:
+              c.sameSite === 'lax'
+                ? 'lax'
+                : c.sameSite === 'strict'
+                  ? 'strict'
+                  : 'no_restriction',
+            expirationDate:
+              typeof c.expirationDate === 'number' && c.expirationDate > 0
+                ? c.expirationDate
+                : undefined,
+          });
+          copied++;
+        } catch (setErr) {
+          appendOutlookDebug(
+            `[BrowserSignIn] cookies.set failed name=${c.name} domain=${rawDomain}: ${setErr instanceof Error ? setErr.message : String(setErr)}`
+          );
+        }
+      }
+
+      if (copied === 0) {
+        throw new Error('No cookies could be copied to the browser partition.');
+      }
+
+      // Step 3: open a vanilla Chromium window on the new partition. No
+      // Bearer hook, no MSAL preload — just the cookies — so the page
+      // behaves exactly like a real browser would after the user pasted
+      // the cookies into Cookie-Editor.
+      const windowKey = `${accountId}:owa-browser`;
+      const existing = outlookWindows.get(windowKey);
+      if (existing && !existing.isDestroyed()) {
+        existing.focus();
+        if (existing.isMinimized()) existing.restore();
+      } else {
+        const win = new BrowserWindow({
+          width: 1400,
+          height: 900,
+          show: true,
+          title: `Outlook (browser) - ${account.email}`,
+          webPreferences: {
+            partition: targetPartition,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        });
+        outlookWindows.set(windowKey, win);
+        const myGen = (outlookWindowGeneration.get(windowKey) || 0) + 1;
+        outlookWindowGeneration.set(windowKey, myGen);
+
+        win.webContents.setWindowOpenHandler(({ url }) => {
+          try {
+            const u = new URL(url);
+            const allowedHosts = [
+              'outlook.office.com',
+              'outlook.office365.com',
+              'outlook.cloud.microsoft',
+              'login.microsoftonline.com',
+              'login.windows.net',
+              'admin.exchange.microsoft.com',
+              'admin.microsoft.com',
+              'm365.cloud.microsoft',
+            ];
+            const isInternal =
+              allowedHosts.includes(u.hostname) ||
+              u.hostname.endsWith('.office.com') ||
+              u.hostname.endsWith('.office365.com') ||
+              u.hostname.endsWith('.exchange.microsoft.com') ||
+              u.hostname.endsWith('.cloud.microsoft');
+            if (isInternal) {
+              return {
+                action: 'allow',
+                overrideBrowserWindowOptions: {
+                  width: 1024,
+                  height: 768,
+                  webPreferences: {
+                    partition: targetPartition,
+                    contextIsolation: true,
+                    nodeIntegration: false,
+                    sandbox: true,
+                  },
+                },
+              };
+            }
+            shell.openExternal(url).catch(() => {});
+          } catch {
+            /* ignore */
+          }
+          return { action: 'deny' };
+        });
+
+        win.on('closed', () => {
+          if (outlookWindowGeneration.get(windowKey) === myGen) {
+            outlookWindows.delete(windowKey);
+            outlookWindowGeneration.delete(windowKey);
+          }
+        });
+
+        win.webContents.setUserAgent(
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
+        await win.loadURL('https://outlook.office.com/mail/inbox');
+      }
+
       appendOutlookDebug(
-        `[BrowserSignIn] One-click for ${snapshot.account.email}: opened cookie window with ${snapshot.cookies.length} cookies (strong=${snapshot.strongCount})`
+        `[BrowserSignIn] One-click for ${account.email}: copied ${copied}/${sourceCookies.length} cookies into ${targetPartition} (snapshot.strong=${snapshot.strongCount})`
       );
       return {
         success: true as const,
-        email: snapshot.account.email,
-        count: snapshot.cookies.length,
+        email: account.email,
+        count: copied,
         strongCount: snapshot.strongCount,
         quality: snapshot.quality,
       };
