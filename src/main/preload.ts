@@ -64,12 +64,8 @@ contextBridge.exposeInMainWorld('electron', {
     delete: (accountId: string) => ipcRenderer.invoke('account:delete', accountId),
     deleteBulk: (ids: string[]) => ipcRenderer.invoke('account:deleteBulk', ids),
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
-    exportOwaCookieJson: (accountId: string) =>
-      ipcRenderer.invoke('account:exportOwaCookieJson', accountId),
-    copyOwaCookieJson: (accountId: string) =>
-      ipcRenderer.invoke('account:copyOwaCookieJson', accountId),
-    copyOwaCookieConsoleScript: (accountId: string) =>
-      ipcRenderer.invoke('account:copyOwaCookieConsoleScript', accountId),
+    /** Token account -> browser-importable cookie exports (Netscape + JSON + console snippet). */
+    exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
     /** Replace primary auth on a token account after re-authentication. */
@@ -203,7 +199,12 @@ contextBridge.exposeInMainWorld('electron', {
       accountId: string,
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => ipcRenderer.invoke('mailbox:openOutlook', accountId, options ?? {}),
-    /** Official OAuth authorize URL in system browser (login_hint + tenant from Settings). */
+    /**
+     * One-click browser continuation:
+     * 1) prime token-backed OWA cookie session in-app,
+     * 2) open external browser authorize URL (prompt=none + login_hint),
+     * 3) copy fallback console installer snippet to clipboard.
+     */
     openOwaExternalSignIn: (accountId: string) => ipcRenderer.invoke('owa:openExternalSignIn', accountId),
 
     getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),

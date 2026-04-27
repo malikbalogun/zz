@@ -6,8 +6,9 @@ import {
   filterMicrosoftRelatedCookies,
   cookieToSetUrl,
   cookiesToNetscape,
-  cookiesToEditThisCookieJson,
-  cookiesToConsoleScript,
+  cookiesToCookieEditorJson,
+  pickPrimaryCookieOrigin,
+  cookiesToBrowserConsoleSnippet,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -111,55 +112,43 @@ test('cookiesToNetscape skips entries with no domain', () => {
   assert.ok(dataLines[0].endsWith('\tok\tv'));
 });
 
-test('cookiesToEditThisCookieJson emits browser-importable cookie JSON', () => {
-  const text = cookiesToEditThisCookieJson([
+test('cookiesToCookieEditorJson emits extension-friendly fields', () => {
+  const json = cookiesToCookieEditorJson([
     {
       name: 'ESTSAUTH',
-      value: 'secret',
+      value: 'abc123',
       domain: '.login.microsoftonline.com',
       path: '/',
       secure: true,
       httpOnly: true,
-      sameSite: 'none',
-      expirationDate: 1893456000,
-    },
-    { name: 'skip', value: 'missing-domain' },
-  ]);
-  const parsed = JSON.parse(text);
-  assert.equal(parsed.length, 1);
-  assert.deepEqual(parsed[0], {
-    domain: '.login.microsoftonline.com',
-    expirationDate: 1893456000,
-    hostOnly: false,
-    httpOnly: true,
-    name: 'ESTSAUTH',
-    path: '/',
-    sameSite: 'no_restriction',
-    secure: true,
-    session: false,
-    storeId: null,
-    value: 'secret',
-  });
-});
-
-test('cookiesToConsoleScript emits pasteable document.cookie commands', () => {
-  const text = cookiesToConsoleScript([
-    {
-      name: 'X-OWA-CANARY',
-      value: 'abc123',
-      domain: '.outlook.office.com',
-      path: '/',
-      secure: true,
       sameSite: 'no_restriction',
       expirationDate: 1893456000,
     },
-    { name: 'skip', value: 'missing-domain' },
   ]);
-  assert.match(text, /document\.cookie = parts\.join/);
-  assert.match(text, /"name": "X-OWA-CANARY"/);
-  assert.match(text, /"value": "abc123"/);
-  assert.match(text, /"domain": "\.outlook\.office\.com"/);
-  assert.match(text, /SameSite=\$\{c\.sameSite === "no_restriction" \? "None" : c\.sameSite\}/);
-  assert.match(text, /location\.href = "https:\/\/outlook\.office\.com\/mail\/inbox"/);
-  assert.match(text, /Refresh Outlook after this/);
+  const rows = JSON.parse(json);
+  assert.equal(Array.isArray(rows), true);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'ESTSAUTH');
+  assert.equal(rows[0].httpOnly, true);
+  assert.equal(rows[0].sameSite, 'no_restriction');
+  assert.equal(rows[0].secure, true);
+  assert.equal(rows[0].storeId, '0');
+});
+
+test('pickPrimaryCookieOrigin prefers Outlook inbox', () => {
+  const origin = pickPrimaryCookieOrigin([
+    { name: 'ESTSAUTH', value: 'x', domain: '.login.microsoftonline.com' },
+    { name: 'X-OWA-CANARY', value: 'y', domain: '.outlook.office.com' },
+  ]);
+  assert.equal(origin, 'https://outlook.office.com/mail/inbox');
+});
+
+test('cookiesToBrowserConsoleSnippet includes installer scaffold', () => {
+  const snippet = cookiesToBrowserConsoleSnippet(
+    [{ name: 'ESTSAUTH', value: 'x', domain: '.outlook.office.com', path: '/', secure: true }],
+    { email: 'tester@example.com', reload: true }
+  );
+  assert.match(snippet, /Watcher browser cookie installer/);
+  assert.match(snippet, /setTimeout\(function \(\) \{ location\.reload\(\); \}, 250\)/);
+  assert.match(snippet, /ESTSAUTH/);
 });

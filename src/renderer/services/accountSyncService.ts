@@ -552,7 +552,7 @@ export async function refreshAccountTokenViaCredential(accountId: string): Promi
 /** Opens Microsoft 365 Outlook on the web (OWA) in an Electron window. */
 export async function openOutlookWeb(
   accountId: string,
-  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' }
+  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
 ): Promise<void> {
   try {
     await window.electron.actions.openOutlook(accountId, options);
@@ -569,14 +569,24 @@ export async function openOutlookWeb(
   }
 }
 
-/** Opens an app-controlled OWA session that signs this mailbox in with the stored Microsoft refresh token. */
+/** Opens Microsoft OAuth authorize in the **default browser** (official redirect; complete MFA/CA in browser). */
 export async function openOwaExternalBrowserSession(accountId: string): Promise<void> {
-  const r = await window.electron.actions.openOutlook(accountId, { mode: 'owa', authPreference: 'token' });
+  const r = await window.electron.actions.openOwaExternalSignIn(accountId);
   if (!r || (r as { success?: boolean }).success !== true) {
-    throw new Error((r as { error?: string })?.error || 'Could not start one-click sign-in');
+    throw new Error((r as { error?: string })?.error || 'Could not start browser sign-in');
+  }
+  const typed = r as {
+    primaryOrigin?: string;
+    strongCount?: number;
+  };
+  if ((typed.strongCount ?? 0) === 0) {
+    console.warn(
+      '[Accounts] Browser sign-in opened without strong OWA cookies; fallback import may be required.',
+      { accountId, primaryOrigin: typed.primaryOrigin }
+    );
   }
   if ((r as { opened?: boolean }).opened === false) {
-    throw new Error('Sign-in was already opened a moment ago. Check the existing Outlook window.');
+    throw new Error('Browser sign-in was already opened a moment ago. Check your existing browser tab.');
   }
 }
 

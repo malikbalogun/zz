@@ -15,6 +15,7 @@ import AddAccountModal, { type AddAccountInitialTab } from '../AddAccountModal';
 import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
+import ExportOwaCookiesModal from '../ExportOwaCookiesModal';
 import ReAuthModal from '../ReAuthModal';
 import GrantAdminScopeModal from '../GrantAdminScopeModal';
 
@@ -42,6 +43,8 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [showEditTagsModal, setShowEditTagsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  /** Account whose OWA cookies are being exported (modal open). */
+  const [exportCookiesAccountId, setExportCookiesAccountId] = useState<string | null>(null);
   const [activeAccount, setActiveAccount] = useState<string | null>(null); // for single‑account actions
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
@@ -308,10 +311,6 @@ const AccountsView: FC<AccountsViewProps> = ({
     setLoading(true);
     try {
       await openOwaExternalBrowserSession(accountId);
-      alert(
-        'Opened Outlook with this account already signed in.\n\n' +
-        'No password or extra Microsoft sign-in steps should be needed.'
-      );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
     } finally {
@@ -319,45 +318,8 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  const handleExportCookieJson = async (
-    accountId: string,
-    copyOnly = false,
-    format: 'extension' | 'console' = 'extension'
-  ) => {
-    const account = accounts.find(a => a.id === accountId);
-    const label = account?.email || accountId;
-    setLoading(true);
-    try {
-      if (copyOnly) {
-        const result = await window.electron.accounts.copyOwaCookieJson(accountId, format);
-        if (!result.success) {
-          throw new Error(result.error || 'Copy failed');
-        }
-        alert(`Copied ${result.count ?? 0} ${format === 'console' ? 'console paste' : 'JSON'} cookies for ${label} to clipboard.`);
-        return;
-      }
-      const result = await window.electron.accounts.exportOwaCookieJson(accountId, format);
-      if (!result.success || !result.json) {
-        throw new Error(result.error || 'Export failed');
-      }
-      const safeEmail = (result.email || label || 'account').replace(/[^a-z0-9._-]+/gi, '_');
-      const isConsole = format === 'console';
-      const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-${isConsole ? 'cookie-console-login' : 'editthiscookie'}-${new Date().toISOString().slice(0, 10)}.${isConsole ? 'js' : 'json'}`,
-        content: result.json,
-        filters: [
-          { name: isConsole ? 'Console JavaScript' : 'EditThisCookie JSON', extensions: [isConsole ? 'js' : 'json'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
-      if (saved.ok) {
-        alert(`Exported ${result.count ?? 0} ${isConsole ? 'console paste' : 'JSON'} cookies for ${label} to ${saved.path}`);
-      }
-    } catch (error) {
-      alert(`Export cookie JSON failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
+  const handleExportOwaCookies = (accountId: string) => {
+    setExportCookiesAccountId(accountId);
   };
 
   // Panel admin mailbox page (separate from OWA)
@@ -965,47 +927,23 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="Open Outlook with this mailbox signed in through the app's token bridge."
+                          title="Open the official Microsoft sign-in page in your default browser for this mailbox."
                         >
                           <i className="fas fa-external-link-alt"></i> Sign in via browser
                         </div>
                       )}
-                      {(account.auth?.type === 'token' || account.auth?.type === 'cookie') && (
-                        <>
-                          <div
-                            className="act-dropdown-item"
-                            onClick={() => {
-                              setOpenDropdownId(null);
-                              setDropdownPosition(null);
-                              void handleExportCookieJson(account.id, false, 'extension');
-                            }}
-                            title="Export Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
-                          >
-                            <i className="fas fa-file-code"></i> Export cookie JSON
-                          </div>
-                          <div
-                            className="act-dropdown-item"
-                            onClick={() => {
-                              setOpenDropdownId(null);
-                              setDropdownPosition(null);
-                              void handleExportCookieJson(account.id, true, 'extension');
-                            }}
-                            title="Copy Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
-                          >
-                            <i className="fas fa-copy"></i> Copy cookie JSON
-                          </div>
-                          <div
-                            className="act-dropdown-item"
-                            onClick={() => {
-                              setOpenDropdownId(null);
-                              setDropdownPosition(null);
-                              void handleExportCookieJson(account.id, true, 'console');
-                            }}
-                            title="Copy a console paste script that sets accessible Outlook cookies and navigates to the inbox."
-                          >
-                            <i className="fas fa-terminal"></i> Copy console cookie login
-                          </div>
-                        </>
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            handleExportOwaCookies(account.id);
+                          }}
+                          title="Export browser-importable cookie JSON (EditThisCookie/Cookie-Editor) and Netscape text."
+                        >
+                          <i className="fas fa-file-code"></i> Export cookies JSON
+                        </div>
                       )}
                       {account.tags.includes('admin') && (
                         <>
@@ -1151,6 +1089,19 @@ const AccountsView: FC<AccountsViewProps> = ({
           }}
         />
       )}
+      {exportCookiesAccountId && (() => {
+        const target = accounts.find(a => a.id === exportCookiesAccountId);
+        if (!target) {
+          return null;
+        }
+        return (
+          <ExportOwaCookiesModal
+            accountId={target.id}
+            emailHint={target.email}
+            onClose={() => setExportCookiesAccountId(null)}
+          />
+        );
+      })()}
       {reAuthAccountId && (() => {
         const target = accounts.find(a => a.id === reAuthAccountId);
         if (!target) {

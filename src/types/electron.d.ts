@@ -12,21 +12,22 @@ export interface ElectronAPI {
     delete: (accountId: string) => Promise<unknown>;
     deleteBulk: (ids: string[]) => Promise<unknown>;
     exportJSON: (accountId: string) => Promise<unknown>;
-    exportBulkCSV: (ids: string[]) => Promise<unknown>;
-    exportOwaCookieJson: (
-      accountId: string,
-      format?: 'extension' | 'console'
+    exportOwaCookies: (
+      accountId: string
     ) => Promise<{
       success: boolean;
       count?: number;
+      strongCount?: number;
+      httpOnlyCount?: number;
+      weak?: boolean;
       email?: string;
-      json?: string;
+      primaryOrigin?: string;
+      netscape?: string;
+      cookieEditorJson?: string;
+      consoleSnippet?: string;
       error?: string;
     }>;
-    copyOwaCookieJson: (
-      accountId: string,
-      format?: 'extension' | 'console'
-    ) => Promise<{ success: boolean; count?: number; email?: string; error?: string }>;
+    exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
@@ -170,11 +171,18 @@ export interface ElectronAPI {
       accountId: string,
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => Promise<any>;
-    openOwaExternalSignIn: (accountId: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
-    exportOwaCookieJson: (
-      accountId: string,
-      action?: 'copy' | 'save'
-    ) => Promise<{ success: boolean; count?: number; email?: string; json?: string; path?: string; error?: string }>;
+    openOwaExternalSignIn: (accountId: string) => Promise<
+      | {
+          success: true;
+          opened: boolean;
+          count?: number;
+          strongCount?: number;
+          primaryOrigin?: string;
+          cookieEditorJson?: string;
+          consoleSnippet?: string;
+        }
+      | { success: false; error?: string }
+    >;
     /** Returns the list of accountIds for which Outlook BrowserWindows are currently open. */
     getOpenOutlookWindows: () => Promise<string[]>;
     telegramSendAlert: (bot: string, message: string) => Promise<{ success: boolean; error?: string }>;
