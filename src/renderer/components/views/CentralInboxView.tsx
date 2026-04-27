@@ -18,7 +18,8 @@ import {
   type EmailExportScope,
   type ExportFormat,
 } from '../../services/emailExportService';
-import { translateHtmlBody } from '../../services/translatorService';
+import { translateHtmlBody, TRANSLATABLE_LANGUAGES } from '../../services/translatorService';
+import { getSettings } from '../../services/settingsService';
 
 type MonitorRowHit = { keywords: string[]; read: boolean };
 type SavedInboxView = {
@@ -62,12 +63,18 @@ const CentralInboxView: React.FC = () => {
   const [error, setError] = useState('');
   const [showReplyBox, setShowReplyBox] = useState(false);
   const [replyText, setReplyText] = useState('');
-  // Translation state — cached per messageId so re-clicking is instant.
-  const [translations, setTranslations] = useState<Record<string, { text: string; sourceLang?: string }>>({});
+  // Translation state — cached per (messageId|targetLang) so re-clicking
+  // the same language is instant; switching language triggers a re-fetch.
+  const [translations, setTranslations] = useState<
+    Record<string, { text: string; sourceLang?: string; targetLang: string }>
+  >({});
   const [translating, setTranslating] = useState(false);
   const [translationError, setTranslationError] = useState('');
   // Whether the reader is currently *showing* the translation vs. the original.
   const [showTranslation, setShowTranslation] = useState(false);
+  // User-picked target language for the open message. Defaults to the
+  // configured Settings → Translation default (loaded once on mount).
+  const [translateLang, setTranslateLang] = useState<string>('en');
   const [monitorHits, setMonitorHits] = useState<Record<string, MonitorRowHit>>({});
   const [reputationEntries, setReputationEntries] = useState<ReputationEntry[]>([]);
   const [savedViews, setSavedViews] = useState<SavedInboxView[]>([]);
@@ -76,6 +83,10 @@ const CentralInboxView: React.FC = () => {
   const [pendingApplyQuery, setPendingApplyQuery] = useState<string | null>(null);
   const [messageLimit, setMessageLimit] = useState<number>(DEFAULT_MESSAGE_LIMIT);
   const [activeSearchQuery, setActiveSearchQuery] = useState<string>('');
+  // Client-side paging on top of the loaded message list. itemsPerPage = -1
+  // means "show all loaded".
+  const [itemsPerPage, setItemsPerPage] = useState<number>(25);
+  const [currentPage, setCurrentPage] = useState<number>(1);
 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<EmailExportScope>('current_folder');
@@ -111,6 +122,21 @@ const CentralInboxView: React.FC = () => {
     })();
   }, []);
 
+  // Seed the per-message translate target from Settings → Translation default
+  // (so the default selection in the dropdown matches what the user
+  // configured globally) but allow per-message overrides.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await getSettings();
+        const cfgLang = (s.translation?.targetLang || 'en').trim() || 'en';
+        setTranslateLang(cfgLang);
+      } catch {
+        /* keep default */
+      }
+    })();
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
@@ -137,6 +163,20 @@ const CentralInboxView: React.FC = () => {
     messages.length > 0 &&
     messages.length < (selectedFolder.totalItemCount || 0);
 
+  // Client-side paging derived state.
+  const totalPages =
+    itemsPerPage === -1 || messages.length === 0
+      ? 1
+      : Math.max(1, Math.ceil(messages.length / itemsPerPage));
+  const safePage = Math.min(currentPage, totalPages);
+  const pageStart = itemsPerPage === -1 ? 0 : (safePage - 1) * itemsPerPage;
+  const pageEnd = itemsPerPage === -1 ? messages.length : pageStart + itemsPerPage;
+  const visibleMessages =
+    itemsPerPage === -1 ? messages : messages.slice(pageStart, pageEnd);
+  // Only show the "Load more emails" button on the last page (or in show-all
+  // mode), so it doesn't appear at the bottom of every page mid-paging.
+  const onLastPage = itemsPerPage === -1 || safePage === totalPages;
+
   useEffect(() => {
     setFolders([]);
     setSelectedFolderId('');
@@ -146,8 +186,20 @@ const CentralInboxView: React.FC = () => {
     setError('');
     setActiveSearchQuery('');
     setMessageLimit(DEFAULT_MESSAGE_LIMIT);
+    setCurrentPage(1);
     bodyLoadSeq.current++;
   }, [selectedAccountId]);
+
+  // Reset paging when the displayed dataset changes for any reason.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedFolderId, activeSearchQuery, messages.length, itemsPerPage]);
+
+  // Clamp current page if the underlying list shrinks (e.g. after a search).
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+    if (currentPage < 1) setCurrentPage(1);
+  }, [currentPage, totalPages]);
 
   // Load folders when account changes
   useEffect(() => {
@@ -393,11 +445,15 @@ const CentralInboxView: React.FC = () => {
     }
   };
 
-  const handleTranslateBody = async () => {
+  const translationKey = (messageId: string, lang: string) => `${messageId}::${lang}`;
+
+  const handleTranslateBody = async (overrideLang?: string) => {
     if (!selectedMsg) return;
+    const target = (overrideLang || translateLang || 'en').trim() || 'en';
     setTranslationError('');
-    // Already translated? Just toggle visibility.
-    if (translations[selectedMsg.id]) {
+    const cacheKey = translationKey(selectedMsg.id, target);
+    // Already translated to this language? Just toggle visibility.
+    if (translations[cacheKey]) {
       setShowTranslation(true);
       return;
     }
@@ -407,10 +463,14 @@ const CentralInboxView: React.FC = () => {
     }
     setTranslating(true);
     try {
-      const result = await translateHtmlBody(msgBody);
+      const result = await translateHtmlBody(msgBody, { targetLang: target });
       setTranslations(prev => ({
         ...prev,
-        [selectedMsg.id]: { text: result.translated, sourceLang: result.sourceLang },
+        [cacheKey]: {
+          text: result.translated,
+          sourceLang: result.sourceLang,
+          targetLang: target,
+        },
       }));
       setShowTranslation(true);
     } catch (err: any) {
@@ -686,9 +746,14 @@ const CentralInboxView: React.FC = () => {
                   ? `${messages.length} results`
                   : `${messages.length}${selectedFolder?.totalItemCount ? ` / ${selectedFolder.totalItemCount}` : ''} emails`}
             </span>
+            {messages.length > 0 && itemsPerPage !== -1 && (
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: '#6b7280' }}>
+                Showing {pageStart + 1}–{Math.min(pageEnd, messages.length)} of {messages.length}
+              </span>
+            )}
           </div>
           <div className="inbox-list-body">
-            {messages.map(msg => {
+            {visibleMessages.map(msg => {
               const hit = msg.id ? monitorHits[msg.id] : undefined;
               const rep = matchReputation(reputationEntries, msg.from?.emailAddress?.address);
               const rowClass = [
@@ -758,7 +823,7 @@ const CentralInboxView: React.FC = () => {
                 <p>No messages found</p>
               </div>
             )}
-            {canLoadMore && (
+            {canLoadMore && onLastPage && (
               <div style={{ padding: '12px 16px', borderTop: '1px solid #f3f4f6', background: '#fff' }}>
                 <button
                   type="button"
@@ -767,11 +832,105 @@ const CentralInboxView: React.FC = () => {
                   onClick={() => setMessageLimit(prev => prev + DEFAULT_MESSAGE_LIMIT)}
                 >
                   <i className="fas fa-chevron-down" style={{ marginRight: 8 }} />
-                  Load more emails
+                  Load more emails (fetch next {DEFAULT_MESSAGE_LIMIT} from server)
                 </button>
               </div>
             )}
           </div>
+          {messages.length > 0 && (
+            <div
+              className="inbox-list-pagination"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '8px 12px',
+                borderTop: '1px solid #e5e7eb',
+                background: '#fafafa',
+                fontSize: 12,
+                color: '#374151',
+              }}
+            >
+              <button
+                type="button"
+                className="icon-btn"
+                title="First page"
+                disabled={itemsPerPage === -1 || safePage <= 1}
+                onClick={() => setCurrentPage(1)}
+                style={{ padding: '4px 8px' }}
+              >
+                <i className="fas fa-angle-double-left"></i>
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title="Previous page"
+                disabled={itemsPerPage === -1 || safePage <= 1}
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                style={{ padding: '4px 8px' }}
+              >
+                <i className="fas fa-chevron-left"></i>
+              </button>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                Page
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={itemsPerPage === -1 ? 1 : safePage}
+                  disabled={itemsPerPage === -1}
+                  onChange={e => {
+                    const v = parseInt(e.target.value, 10);
+                    if (!Number.isNaN(v) && v >= 1 && v <= totalPages) setCurrentPage(v);
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+                  }}
+                  style={{ width: 50, textAlign: 'center', padding: '2px 4px' }}
+                />
+                of {totalPages}
+              </span>
+              <button
+                type="button"
+                className="icon-btn"
+                title="Next page"
+                disabled={itemsPerPage === -1 || safePage >= totalPages}
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                style={{ padding: '4px 8px' }}
+              >
+                <i className="fas fa-chevron-right"></i>
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title="Last page"
+                disabled={itemsPerPage === -1 || safePage >= totalPages}
+                onClick={() => setCurrentPage(totalPages)}
+                style={{ padding: '4px 8px' }}
+              >
+                <i className="fas fa-angle-double-right"></i>
+              </button>
+              <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
+                Show
+                <select
+                  value={itemsPerPage}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    setItemsPerPage(v);
+                    setCurrentPage(1);
+                  }}
+                  style={{ padding: '2px 4px' }}
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={-1}>All</option>
+                </select>
+                per page
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Reader */}
@@ -789,24 +948,57 @@ const CentralInboxView: React.FC = () => {
                       <i className="fas fa-external-link-alt"></i>
                     </button>
                   )}
-                  {showTranslation ? (
-                    <button
-                      className="icon-btn"
-                      title="Show original"
-                      onClick={() => setShowTranslation(false)}
-                    >
-                      <i className="fas fa-undo"></i>
-                    </button>
-                  ) : (
-                    <button
-                      className="icon-btn"
-                      title={translating ? 'Translating…' : 'Translate body'}
-                      onClick={() => void handleTranslateBody()}
+                  <div
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    title="Translate the email body. Pick a target language and click Translate."
+                  >
+                    <select
+                      value={translateLang}
+                      onChange={e => {
+                        const next = e.target.value;
+                        setTranslateLang(next);
+                        // If the user already opened the message and we
+                        // have a cached translation in another language,
+                        // automatically translate to the new one.
+                        if (showTranslation || translations[translationKey(selectedMsg.id, next)]) {
+                          void handleTranslateBody(next);
+                        }
+                      }}
                       disabled={translating || loadingBody}
+                      style={{
+                        fontSize: 12,
+                        padding: '2px 6px',
+                        border: '1px solid #d1d5db',
+                        borderRadius: 6,
+                        background: '#fff',
+                        maxWidth: 160,
+                      }}
                     >
-                      <i className={`fas ${translating ? 'fa-spinner fa-spin' : 'fa-language'}`}></i>
-                    </button>
-                  )}
+                      {TRANSLATABLE_LANGUAGES.map(l => (
+                        <option key={l.code} value={l.code}>
+                          {l.label}
+                        </option>
+                      ))}
+                    </select>
+                    {showTranslation ? (
+                      <button
+                        className="icon-btn"
+                        title="Show original"
+                        onClick={() => setShowTranslation(false)}
+                      >
+                        <i className="fas fa-undo"></i>
+                      </button>
+                    ) : (
+                      <button
+                        className="icon-btn"
+                        title={translating ? 'Translating…' : `Translate to ${translateLang}`}
+                        onClick={() => void handleTranslateBody()}
+                        disabled={translating || loadingBody}
+                      >
+                        <i className={`fas ${translating ? 'fa-spinner fa-spin' : 'fa-language'}`}></i>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="inbox-reader-meta">
@@ -860,37 +1052,41 @@ const CentralInboxView: React.FC = () => {
                     <i className="fas fa-spinner fa-spin" style={{ fontSize: 24 }}></i>
                     <p style={{ marginTop: 8 }}>Loading email body...</p>
                   </div>
-                ) : showTranslation && translations[selectedMsg.id] ? (
-                  <>
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: '#6b7280',
-                        marginBottom: 12,
-                        padding: '6px 10px',
-                        background: '#f3f4f6',
-                        borderRadius: 6,
-                        display: 'inline-block',
-                      }}
-                    >
-                      <i className="fas fa-language" style={{ marginRight: 6 }} />
-                      Translated
-                      {translations[selectedMsg.id].sourceLang
-                        ? ` from ${translations[selectedMsg.id].sourceLang}`
-                        : ''}
-                    </div>
-                    <pre
-                      style={{
-                        whiteSpace: 'pre-wrap',
-                        fontFamily: 'inherit',
-                        fontSize: 14,
-                        lineHeight: 1.5,
-                        margin: 0,
-                      }}
-                    >
-                      {translations[selectedMsg.id].text}
-                    </pre>
-                  </>
+                ) : showTranslation && translations[translationKey(selectedMsg.id, translateLang)] ? (
+                  (() => {
+                    const t = translations[translationKey(selectedMsg.id, translateLang)];
+                    return (
+                      <>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: '#6b7280',
+                            marginBottom: 12,
+                            padding: '6px 10px',
+                            background: '#f3f4f6',
+                            borderRadius: 6,
+                            display: 'inline-block',
+                          }}
+                        >
+                          <i className="fas fa-language" style={{ marginRight: 6 }} />
+                          Translated
+                          {t.sourceLang ? ` from ${t.sourceLang}` : ''}
+                          {' '}→ {t.targetLang}
+                        </div>
+                        <pre
+                          style={{
+                            whiteSpace: 'pre-wrap',
+                            fontFamily: 'inherit',
+                            fontSize: 14,
+                            lineHeight: 1.5,
+                            margin: 0,
+                          }}
+                        >
+                          {t.text}
+                        </pre>
+                      </>
+                    );
+                  })()
                 ) : (
                   <div dangerouslySetInnerHTML={{ __html: msgBody }}></div>
                 )}

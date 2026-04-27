@@ -21,7 +21,10 @@ const TRANSLATE_TIMEOUT_MS = 20000;
  * We deliberately use the main-process api.request proxy so we don't have to
  * deal with CORS, fetch timeouts, or rendering-thread blocking.
  */
-export async function translateText(text: string): Promise<TranslationResult> {
+export async function translateText(
+  text: string,
+  options?: { targetLang?: string }
+): Promise<TranslationResult> {
   const trimmed = (text || '').trim();
   if (!trimmed) return { translated: '', endpoint: '(no input)' };
 
@@ -31,7 +34,11 @@ export async function translateText(text: string): Promise<TranslationResult> {
     throw new Error('Translation is disabled in Settings.');
   }
   const endpoint = (cfg.endpoint && cfg.endpoint.trim()) || DEFAULT_TRANSLATOR_ENDPOINT;
-  const target = (cfg.targetLang && cfg.targetLang.trim()) || 'en';
+  // Per-call override > Settings default > "en".
+  const target =
+    (options?.targetLang && options.targetLang.trim()) ||
+    (cfg.targetLang && cfg.targetLang.trim()) ||
+    'en';
   const apiKey = (cfg.apiKey && cfg.apiKey.trim()) || undefined;
 
   const body: Record<string, unknown> = {
@@ -81,11 +88,50 @@ export async function translateText(text: string): Promise<TranslationResult> {
  * translated plain text wrapped in a single <pre> block so the renderer's
  * dangerouslySetInnerHTML still works without losing whitespace.
  */
-export async function translateHtmlBody(html: string): Promise<TranslationResult> {
+export async function translateHtmlBody(
+  html: string,
+  options?: { targetLang?: string }
+): Promise<TranslationResult> {
   const stripped = stripHtmlPreserveBreaks(html);
-  const result = await translateText(stripped);
+  const result = await translateText(stripped, options);
   return result;
 }
+
+/**
+ * Curated list of languages we surface in the per-message picker. Covers
+ * everything Argos / LibreTranslate ships with by default. The free-form
+ * ISO 639-1 input in Settings still works for anything else.
+ */
+export const TRANSLATABLE_LANGUAGES: Array<{ code: string; label: string }> = [
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Español (Spanish)' },
+  { code: 'fr', label: 'Français (French)' },
+  { code: 'de', label: 'Deutsch (German)' },
+  { code: 'it', label: 'Italiano (Italian)' },
+  { code: 'pt', label: 'Português (Portuguese)' },
+  { code: 'nl', label: 'Nederlands (Dutch)' },
+  { code: 'sv', label: 'Svenska (Swedish)' },
+  { code: 'da', label: 'Dansk (Danish)' },
+  { code: 'nb', label: 'Norsk bokmål (Norwegian)' },
+  { code: 'fi', label: 'Suomi (Finnish)' },
+  { code: 'pl', label: 'Polski (Polish)' },
+  { code: 'cs', label: 'Čeština (Czech)' },
+  { code: 'hu', label: 'Magyar (Hungarian)' },
+  { code: 'ro', label: 'Română (Romanian)' },
+  { code: 'el', label: 'Ελληνικά (Greek)' },
+  { code: 'ru', label: 'Русский (Russian)' },
+  { code: 'uk', label: 'Українська (Ukrainian)' },
+  { code: 'tr', label: 'Türkçe (Turkish)' },
+  { code: 'ar', label: 'العربية (Arabic)' },
+  { code: 'he', label: 'עברית (Hebrew)' },
+  { code: 'hi', label: 'हिन्दी (Hindi)' },
+  { code: 'ja', label: '日本語 (Japanese)' },
+  { code: 'ko', label: '한국어 (Korean)' },
+  { code: 'zh', label: '中文 (Chinese)' },
+  { code: 'th', label: 'ไทย (Thai)' },
+  { code: 'vi', label: 'Tiếng Việt (Vietnamese)' },
+  { code: 'id', label: 'Bahasa Indonesia (Indonesian)' },
+];
 
 /** Naïve HTML→text: replace <br>/<p>/<div> closes with newlines, drop other tags. */
 function stripHtmlPreserveBreaks(html: string): string {
