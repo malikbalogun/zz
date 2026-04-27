@@ -10,6 +10,8 @@ import {
   filterMicrosoftRelatedCookies,
   cookiesToNetscape,
   cookiesToCookieEditorJson,
+  pickPrimaryCookieOrigin,
+  cookiesToBrowserConsoleSnippet,
   type ParsedCookie,
 } from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
@@ -3053,6 +3055,11 @@ function setupIpcHandlers() {
 
       const netscape = cookiesToNetscape(msCookies);
       const cookieEditorJson = cookiesToCookieEditorJson(msCookies);
+      const consoleSnippet = cookiesToBrowserConsoleSnippet(msCookies, {
+        email: account.email,
+        reload: true,
+      });
+      const primaryOrigin = pickPrimaryCookieOrigin(msCookies);
 
       appendOutlookDebug(
         `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter}, httpOnly=${httpOnlyCount})`
@@ -3064,8 +3071,10 @@ function setupIpcHandlers() {
         httpOnlyCount,
         weak: strongAfter === 0,
         email: account.email,
+        primaryOrigin,
         netscape,
         cookieEditorJson,
+        consoleSnippet,
       };
     } catch (error: any) {
       const msg = error?.message || String(error);
@@ -4067,6 +4076,134 @@ function setupIpcHandlers() {
       const accounts: any[] = store.accounts || [];
       const account = accounts.find((a: any) => a.id === accountId);
       if (!account?.email) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') {
+        throw new Error('Browser sign-in requires a token-based Microsoft account.');
+      }
+
+      const partitionName = `persist:outlook-${accountId}`;
+      const owaSession = session.fromPartition(partitionName);
+      const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
+        const all = await owaSession.cookies.get({});
+        const parsed: ParsedCookie[] = all.map((c) => {
+          const ssRaw = (c as { sameSite?: string }).sameSite || '';
+          let sameSite: ParsedCookie['sameSite'] | undefined;
+          if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
+          else if (ssRaw === 'lax') sameSite = 'lax';
+          else if (ssRaw === 'strict') sameSite = 'strict';
+          else if (ssRaw === 'unspecified') sameSite = undefined;
+          return {
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: c.secure !== false,
+            expirationDate: c.expirationDate,
+            httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
+            sameSite,
+          };
+        });
+        return filterMicrosoftRelatedCookies(parsed);
+      };
+
+      let msCookies = await readMicrosoftCookies();
+      let strongCount = countStrongMicrosoftSessionCookies(msCookies);
+
+      if (msCookies.length === 0 || strongCount === 0) {
+        appendOutlookDebug(`[ExternalSignIn] Priming OWA cookie jar for ${account.email}`);
+        const bundle = await loadOwaTokenBundle(accountId);
+        applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
+        installOutlookPartitionRequestHooks(owaSession);
+
+        const primer = new BrowserWindow({
+          width: 800,
+          height: 600,
+          show: false,
+          webPreferences: {
+            partition: partitionName,
+            contextIsolation: false,
+            nodeIntegration: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload-mailbox.js'),
+          },
+        });
+        windowToAccountMap.set(primer.webContents.id, accountId);
+        const PRIME_TIMEOUT_MS = 12000;
+        try {
+          await new Promise<void>((resolve) => {
+            const settled = { done: false };
+            const finish = () => {
+              if (settled.done) return;
+              settled.done = true;
+              clearInterval(pollTimer);
+              clearTimeout(hardTimeout);
+              resolve();
+            };
+            const pollTimer = setInterval(async () => {
+              try {
+                const probe = await readMicrosoftCookies();
+                if (probe.length > 0 && hasStrongMicrosoftSessionCookies(probe)) finish();
+              } catch {
+                /* keep polling */
+              }
+            }, 750);
+            const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
+            primer
+              .loadURL('https://outlook.office.com/mail/inbox?locale=en-US')
+              .catch((loadErr) => {
+                appendOutlookDebug(
+                  `[ExternalSignIn] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
+                );
+              });
+          });
+        } finally {
+          windowToAccountMap.delete(primer.webContents.id);
+          if (!primer.isDestroyed()) primer.destroy();
+        }
+
+        msCookies = await readMicrosoftCookies();
+        strongCount = countStrongMicrosoftSessionCookies(msCookies);
+      }
+
+      const primaryOrigin = pickPrimaryCookieOrigin(msCookies);
+      const cookieEditorJson = cookiesToCookieEditorJson(msCookies);
+      const consoleSnippet = cookiesToBrowserConsoleSnippet(msCookies, {
+        email: account.email,
+        reload: true,
+      });
+
+      if (msCookies.length > 0) {
+        try {
+          const payload = JSON.stringify(msCookies);
+          const encryptedPayload = safeStorage.isEncryptionAvailable()
+            ? safeStorage.encryptString(payload).toString('base64')
+            : payload;
+          const latestStore = await readStore();
+          const latestAccounts: any[] = latestStore.accounts || [];
+          const idx = latestAccounts.findIndex((a: any) => a.id === accountId);
+          if (idx >= 0 && latestAccounts[idx]?.auth?.type === 'token') {
+            latestAccounts[idx].auth = {
+              ...latestAccounts[idx].auth,
+              owaCookiesEncrypted: encryptedPayload,
+            };
+            latestStore.accounts = latestAccounts;
+            await writeStore(latestStore);
+          }
+        } catch (persistErr) {
+          appendOutlookDebug(
+            `[ExternalSignIn] Failed to persist bridged cookies for ${account.email}: ${
+              persistErr instanceof Error ? persistErr.message : String(persistErr)
+            }`
+          );
+        }
+      }
+
+      // Auto-copy the fastest fallback: one paste in DevTools then refresh.
+      // This still works even when a given browser blocks silent SSO continuation.
+      try {
+        clipboard.writeText(consoleSnippet);
+      } catch {
+        /* no-op */
+      }
 
       const settings = store.settings || {};
       const ms = settings.microsoftOAuth || {};
@@ -4080,7 +4217,7 @@ function setupIpcHandlers() {
         'common';
       const redirectUri =
         (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
-        'https://outlook.office.com/mail/';
+        primaryOrigin;
       const scopes =
         Array.isArray(ms.scopes) && ms.scopes.length > 0
           ? ms.scopes.filter((s: unknown) => typeof s === 'string' && s.trim())
@@ -4091,13 +4228,25 @@ function setupIpcHandlers() {
       url.searchParams.set('redirect_uri', redirectUri);
       url.searchParams.set('response_mode', 'query');
       url.searchParams.set('scope', scopes.join(' '));
-      // Prefer direct continuation for this account, but still allow Microsoft
-      // to fall back to interactive auth when MFA/CA/consent is required.
-      url.searchParams.set('prompt', 'select_account');
+      // Attempt true one-click continuation first when a browser session exists.
+      // Microsoft will still force interactive auth if MFA/CA/consent is needed.
+      url.searchParams.set('prompt', 'none');
       url.searchParams.set('login_hint', account.email);
+      url.searchParams.set('domain_hint', 'organizations');
 
       await shell.openExternal(url.toString());
-      return { success: true as const, opened: true as const };
+      appendOutlookDebug(
+        `[ExternalSignIn] Opened browser for ${account.email} (cookies=${msCookies.length}, strong=${strongCount})`
+      );
+      return {
+        success: true as const,
+        opened: true as const,
+        strongCount,
+        count: msCookies.length,
+        primaryOrigin,
+        cookieEditorJson,
+        consoleSnippet,
+      };
     } catch (error: any) {
       return { success: false as const, error: error?.message || String(error) };
     }

@@ -216,6 +216,108 @@ export function cookiesToCookieEditorJson(cookies: ParsedCookie[]): string {
   return JSON.stringify(rows, null, 2);
 }
 
+/**
+ * Pick the best browser URL where the exported cookies should be installed.
+ * Outlook inbox is preferred because it directly validates mailbox session.
+ */
+export function pickPrimaryCookieOrigin(cookies: ParsedCookie[]): string {
+  const hosts = new Set(
+    cookies
+      .map((c) => (c.domain || '').toLowerCase().replace(/^\./, '').trim())
+      .filter(Boolean)
+  );
+  if ([...hosts].some((h) => h.endsWith('outlook.office.com') || h.endsWith('outlook.office365.com'))) {
+    return 'https://outlook.office.com/mail/inbox';
+  }
+  if ([...hosts].some((h) => h.endsWith('outlook.cloud.microsoft'))) {
+    return 'https://outlook.cloud.microsoft/mail/inbox';
+  }
+  if ([...hosts].some((h) => h.endsWith('office.com'))) {
+    return 'https://office.com/';
+  }
+  if ([...hosts].some((h) => h.endsWith('login.microsoftonline.com'))) {
+    return 'https://login.microsoftonline.com/';
+  }
+  return 'https://outlook.office.com/mail/inbox';
+}
+
+/**
+ * Build a paste-ready DevTools console snippet that installs as many cookies as
+ * the browser allows from page JavaScript, then optionally reloads the tab.
+ *
+ * Note: HttpOnly cookies cannot be set via `document.cookie`, so for full
+ * fidelity users should prefer Cookie-Editor/EditThisCookie JSON import.
+ */
+export function cookiesToBrowserConsoleSnippet(
+  cookies: ParsedCookie[],
+  opts: { email?: string; reload?: boolean } = {}
+): string {
+  const settable: ParsedCookie[] = [];
+  const skippedHttpOnly: string[] = [];
+  for (const c of cookies) {
+    if (!c.name) continue;
+    if (c.httpOnly) {
+      skippedHttpOnly.push(c.name);
+      continue;
+    }
+    if (!(c.domain || '').trim()) continue;
+    settable.push(c);
+  }
+
+  const reload = opts.reload !== false;
+  const emailComment = opts.email ? ` for ${opts.email}` : '';
+  const httpOnlyComment = skippedHttpOnly.length
+    ? `// NOTE: ${skippedHttpOnly.length} HttpOnly cookies cannot be installed from\n` +
+      '//       this snippet (browsers block document.cookie writes for them).\n' +
+      '//       Use the Cookie-Editor / EditThisCookie extension with JSON\n' +
+      `//       import for full session: ${skippedHttpOnly.slice(0, 8).join(', ')}` +
+      (skippedHttpOnly.length > 8 ? ', ...' : '') +
+      '\n'
+    : '';
+
+  const payload = settable.map((c) => {
+    const domainAttr =
+      (c.domain || '').startsWith('.') ? c.domain : '.' + (c.domain || '').replace(/^\./, '');
+    return {
+      n: c.name,
+      v: c.value,
+      d: domainAttr,
+      p: c.path && c.path.startsWith('/') ? c.path : '/',
+      s: c.secure !== false,
+      e: c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : 0,
+    };
+  });
+
+  const lines: string[] = [];
+  lines.push('// Watcher browser cookie installer' + emailComment);
+  lines.push('// Paste in DevTools console on an Outlook/Office tab, press Enter, then reload.');
+  lines.push('// If login is still incomplete, use Cookie-Editor/EditThisCookie JSON import.');
+  if (httpOnlyComment) lines.push(httpOnlyComment.trimEnd());
+  lines.push('(function () {');
+  lines.push('  var cookies = ' + JSON.stringify(payload) + ';');
+  lines.push('  var installed = 0, skipped = 0;');
+  lines.push('  var pageHost = location.hostname.toLowerCase();');
+  lines.push('  function regDom(h){ h = (h||"").replace(/^\\./, "").toLowerCase(); if(!h) return ""; var p = h.split("."); return p.slice(-2).join("."); }');
+  lines.push('  var pageReg = regDom(pageHost);');
+  lines.push('  for (var i = 0; i < cookies.length; i++) {');
+  lines.push('    var c = cookies[i];');
+  lines.push('    var cookieReg = regDom(c.d);');
+  lines.push('    if (cookieReg && pageReg && cookieReg !== pageReg) { skipped++; continue; }');
+  lines.push('    var parts = [c.n + "=" + c.v, "path=" + (c.p || "/")];');
+  lines.push('    if (c.d) parts.push("domain=" + c.d);');
+  lines.push('    if (c.s) parts.push("secure");');
+  lines.push('    parts.push("samesite=None");');
+  lines.push('    if (c.e) parts.push("expires=" + new Date(c.e * 1000).toUTCString());');
+  lines.push('    try { document.cookie = parts.join("; "); installed++; } catch (e) { skipped++; }');
+  lines.push('  }');
+  lines.push('  console.log("[Watcher] Installed " + installed + " cookies, skipped " + skipped + ".");');
+  if (reload) {
+    lines.push('  setTimeout(function () { location.reload(); }, 250);');
+  }
+  lines.push('})();');
+  return lines.join('\n') + '\n';
+}
+
 /** Base URL for Electron session.cookies.set */
 export function cookieToSetUrl(c: ParsedCookie): string {
   let host = (c.domain || '').replace(/^\./, '').trim();

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-type FormatKind = 'editor' | 'netscape';
+type FormatKind = 'editor' | 'console' | 'netscape';
 
 interface ExportOwaCookiesModalProps {
   accountId: string;
@@ -14,8 +14,10 @@ interface ExportPayload {
   httpOnlyCount: number;
   weak: boolean;
   email: string;
+  primaryOrigin: string;
   netscape: string;
   cookieEditorJson: string;
+  consoleSnippet: string;
 }
 
 /**
@@ -50,8 +52,10 @@ const ExportOwaCookiesModal: React.FC<ExportOwaCookiesModalProps> = ({
           httpOnlyCount: result.httpOnlyCount ?? 0,
           weak: !!result.weak,
           email: result.email || emailHint || '',
+          primaryOrigin: result.primaryOrigin || 'https://outlook.office.com/mail/inbox',
           netscape: result.netscape || '',
           cookieEditorJson: result.cookieEditorJson || '',
+          consoleSnippet: result.consoleSnippet || '',
         });
       } catch (err) {
         if (cancelled) return;
@@ -65,7 +69,14 @@ const ExportOwaCookiesModal: React.FC<ExportOwaCookiesModalProps> = ({
     };
   }, [accountId, emailHint]);
 
-  const currentText = !data ? '' : format === 'editor' ? data.cookieEditorJson : data.netscape;
+  const currentText =
+    !data
+      ? ''
+      : format === 'editor'
+        ? data.cookieEditorJson
+        : format === 'console'
+          ? data.consoleSnippet
+          : data.netscape;
 
   const handleCopy = async () => {
     if (!currentText) return;
@@ -85,6 +96,8 @@ const ExportOwaCookiesModal: React.FC<ExportOwaCookiesModalProps> = ({
     const meta =
       format === 'editor'
         ? { ext: 'json', label: 'Cookie JSON', filters: [{ name: 'JSON', extensions: ['json'] }] }
+        : format === 'console'
+          ? { ext: 'js', label: 'Browser Console Script', filters: [{ name: 'JavaScript', extensions: ['js'] }] }
         : { ext: 'txt', label: 'Netscape Cookie File', filters: [{ name: 'Netscape Cookie File', extensions: ['txt', 'cookies'] }] };
 
     try {
@@ -199,6 +212,13 @@ const ExportOwaCookiesModal: React.FC<ExportOwaCookiesModalProps> = ({
                 Cookie JSON
               </button>
               <button
+                style={tabBtnStyle(format === 'console')}
+                onClick={() => setFormat('console')}
+                title="Paste this script into browser DevTools console."
+              >
+                Console script
+              </button>
+              <button
                 style={tabBtnStyle(format === 'netscape')}
                 onClick={() => setFormat('netscape')}
                 title="curl / Netscape HTTP Cookie File."
@@ -218,6 +238,11 @@ const ExportOwaCookiesModal: React.FC<ExportOwaCookiesModalProps> = ({
               {format === 'editor' && (
                 <span>
                   Import this JSON with browser extensions like <strong>EditThisCookie</strong> or <strong>Cookie-Editor</strong>.
+                </span>
+              )}
+              {format === 'console' && (
+                <span>
+                  Open <code>{data.primaryOrigin}</code>, paste into DevTools console, press Enter (snippet auto-reloads tab).
                 </span>
               )}
               {format === 'netscape' && (

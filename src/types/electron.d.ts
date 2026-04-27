@@ -21,8 +21,10 @@ export interface ElectronAPI {
       httpOnlyCount?: number;
       weak?: boolean;
       email?: string;
+      primaryOrigin?: string;
       netscape?: string;
       cookieEditorJson?: string;
+      consoleSnippet?: string;
       error?: string;
     }>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;

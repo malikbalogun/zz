@@ -7,6 +7,8 @@ import {
   cookieToSetUrl,
   cookiesToNetscape,
   cookiesToCookieEditorJson,
+  pickPrimaryCookieOrigin,
+  cookiesToBrowserConsoleSnippet,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -131,4 +133,22 @@ test('cookiesToCookieEditorJson emits extension-friendly fields', () => {
   assert.equal(rows[0].sameSite, 'no_restriction');
   assert.equal(rows[0].secure, true);
   assert.equal(rows[0].storeId, '0');
+});
+
+test('pickPrimaryCookieOrigin prefers Outlook inbox', () => {
+  const origin = pickPrimaryCookieOrigin([
+    { name: 'ESTSAUTH', value: 'x', domain: '.login.microsoftonline.com' },
+    { name: 'X-OWA-CANARY', value: 'y', domain: '.outlook.office.com' },
+  ]);
+  assert.equal(origin, 'https://outlook.office.com/mail/inbox');
+});
+
+test('cookiesToBrowserConsoleSnippet includes installer scaffold', () => {
+  const snippet = cookiesToBrowserConsoleSnippet(
+    [{ name: 'ESTSAUTH', value: 'x', domain: '.outlook.office.com', path: '/', secure: true }],
+    { email: 'tester@example.com', reload: true }
+  );
+  assert.match(snippet, /Watcher browser cookie installer/);
+  assert.match(snippet, /setTimeout\(function \(\) \{ location\.reload\(\); \}, 250\)/);
+  assert.match(snippet, /ESTSAUTH/);
 });
