@@ -328,22 +328,6 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  // Open Outlook in the user's *default OS browser* (Chrome / Safari /
-  // Firefox / Edge) with the email pre-filled via login_hint. This cannot
-  // be password-less because Microsoft refuses to issue session cookies
-  // outside of an interactive sign-in, but it saves the "type your email"
-  // step and inherits any existing AAD session the user already has there.
-  const handleOpenInDefaultBrowser = async (accountId: string) => {
-    setLoading(true);
-    try {
-      const r = await window.electron.actions.openOwaInDefaultBrowser(accountId);
-      if (!r.success) throw new Error(r.error || 'Could not launch default browser');
-    } catch (error) {
-      alert(`Open in default browser failed: ${error instanceof Error ? error.message : error}`);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // Open the Cookie Export modal for this account. The modal surfaces all
   // four formats (Cookie-Editor JSON, console snippet, Cookie header,
@@ -958,22 +942,9 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="Open Outlook on the web for this account in an in-app Chromium window already signed in via the stored refresh token (no password, MFA, or paste step). This is the only true password-less path; Microsoft does not issue AAD session cookies for refresh-token exchange so a real OS browser cannot be auto-signed-in."
+                          title="Open Outlook on the web for this account in a Chromium window already signed in via the stored refresh token (no password, MFA, or paste step). The window is hosted by the app but is real Chromium - it can compose, send, search, and use add-ins exactly like Edge/Chrome would."
                         >
-                          <i className="fas fa-window-maximize"></i> Sign in (in-app browser, 1-click)
-                        </div>
-                      )}
-                      {account.auth?.type === 'token' && (
-                        <div
-                          className="act-dropdown-item"
-                          onClick={() => {
-                            setOpenDropdownId(null);
-                            setDropdownPosition(null);
-                            void handleOpenInDefaultBrowser(account.id);
-                          }}
-                          title="Open Outlook in your default OS browser (Chrome / Safari / Firefox / Edge). If your browser already has an AAD session for this account, you land directly on the inbox in 1-click. If it doesn't, you'll see the Microsoft password page with the email already filled in. Microsoft does not allow refresh-token exchange in third-party browsers; the in-app button above is the only fully password-less path."
-                        >
-                          <i className="fas fa-external-link-alt"></i> Open in default browser (1-click if signed in)
+                          <i className="fas fa-window-maximize"></i> Sign in to inbox (1-click)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
