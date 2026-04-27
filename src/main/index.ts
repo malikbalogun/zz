@@ -2574,15 +2574,27 @@ function setupIpcHandlers() {
             message: 'Polling too fast, slow down'
           };
         }
-        if (error.error === 'expired_token') {
+        const rawDetail = String(error.error_description || error.error || tokenResponse.status);
+        const diagnostic = diagnoseMicrosoftAuthError(rawDetail);
+        if (error.error === 'expired_token' || diagnostic.aadstsCode === 'AADSTS70019') {
           return {
             success: false,
             expired: true,
             error: 'expired_token',
-            message: 'Device code expired'
+            message: diagnostic.title || 'Device code expired',
+            detail: rawDetail,
+            authDiagnostic: diagnostic,
           };
         }
-        throw new Error(`Token poll failed: ${error.error_description || tokenResponse.status}`);
+        // Bubble up a structured error so the UI can render category +
+        // title + suggestions instead of a raw AADSTS string.
+        return {
+          success: false,
+          error: error.error || 'token_poll_failed',
+          message: diagnostic.title,
+          detail: rawDetail,
+          authDiagnostic: diagnostic,
+        };
       }
 
       const tokenData = await tokenResponse.json();
@@ -2610,9 +2622,14 @@ function setupIpcHandlers() {
       };
     } catch (error: any) {
       console.error('[OAuth] Token poll failed:', error);
+      const detail = error?.message || String(error);
+      const diagnostic = diagnoseMicrosoftAuthError(detail);
       return {
         success: false,
-        error: error.message || 'Token poll failed'
+        error: error?.message || 'Token poll failed',
+        message: diagnostic.title,
+        detail,
+        authDiagnostic: diagnostic,
       };
     }
   });
@@ -3615,6 +3632,42 @@ function setupIpcHandlers() {
         );
       }
 
+      // If we have a stored password for this email, autofill it on the AAD
+      // password page so the only required step is approving MFA / passkey
+      // (or nothing if the account has no MFA). We look both on the token
+      // account itself (some flows persist a password alongside the token)
+      // and on any other account in the store with the same email (so a
+      // user can `Add Account → Credentials` to seed the password and then
+      // Capture Cookies on the existing token row).
+      let autofillPassword: string | null = null;
+      try {
+        const candidatePasswords: string[] = [];
+        const collect = (a: any) => {
+          const enc = a?.auth?.passwordEncrypted;
+          if (typeof enc === 'string' && enc.trim()) {
+            try {
+              const pw = safeStorage.isEncryptionAvailable()
+                ? safeStorage.decryptString(Buffer.from(enc, 'base64'))
+                : enc;
+              if (pw) candidatePasswords.push(pw);
+            } catch {
+              /* ignore decrypt failures */
+            }
+          }
+        };
+        collect(account);
+        const lowerEmail = String(account.email).trim().toLowerCase();
+        for (const a of accountsList) {
+          if (a === account) continue;
+          if (String(a.email || '').trim().toLowerCase() === lowerEmail) collect(a);
+        }
+        autofillPassword = candidatePasswords[0] || null;
+      } catch (err) {
+        appendOutlookDebug(
+          `[CaptureCookies] password autofill probe failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
       const win = new BrowserWindow({
         width: 520,
         height: 760,
@@ -3627,6 +3680,57 @@ function setupIpcHandlers() {
           sandbox: true,
         },
       });
+
+      // AAD password page autofill. Runs every dom-ready while the window
+      // is alive (AAD navigates between several pages: email → password →
+      // MFA → consent). The script is idempotent — it only fills the first
+      // empty input that looks like a password field and only clicks the
+      // primary submit when the field is freshly populated.
+      if (autofillPassword) {
+        win.webContents.on('dom-ready', () => {
+          const passwordLiteral = JSON.stringify(autofillPassword);
+          const emailLiteral = JSON.stringify(account.email);
+          win.webContents
+            .executeJavaScript(
+              `(() => {
+                try {
+                  // AAD's email step (rarely needed: login_hint usually
+                  // skips it) — fill the email if present.
+                  const emailInput = document.querySelector('input[type="email"], input[name="loginfmt"]');
+                  if (emailInput && !emailInput.value) {
+                    emailInput.value = ${emailLiteral};
+                    emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    const next = document.querySelector('#idSIButton9, input[type="submit"]');
+                    if (next) next.click();
+                    return 'email-filled';
+                  }
+                  const pwd = document.querySelector('input[type="password"][name="passwd"], input[type="password"]');
+                  if (pwd && !pwd.value) {
+                    pwd.value = ${passwordLiteral};
+                    pwd.dispatchEvent(new Event('input', { bubbles: true }));
+                    pwd.dispatchEvent(new Event('change', { bubbles: true }));
+                    const next = document.querySelector('#idSIButton9, input[type="submit"]');
+                    if (next) next.click();
+                    return 'password-filled';
+                  }
+                  // "Stay signed in?" / KMSI — clicking "Yes" gets us
+                  // ESTSAUTHPERSISTENT (90-day cookie) instead of
+                  // ESTSAUTH (session-only). That is exactly what we
+                  // want for export reuse, so always click yes.
+                  const kmsiYes = document.querySelector('#idSIButton9');
+                  const kmsiHeader = document.querySelector('#KmsiDescription, [data-bind*="KMSI"]');
+                  if (kmsiHeader && kmsiYes) { kmsiYes.click(); return 'kmsi-yes'; }
+                  return 'noop';
+                } catch (e) {
+                  return 'autofill-error: ' + (e && e.message ? e.message : String(e));
+                }
+              })();`
+            )
+            .then((r) => appendOutlookDebug(`[CaptureCookies] autofill: ${r}`))
+            .catch(() => {});
+        });
+      }
 
       const result = await new Promise<{
         cookies: ParsedCookie[];

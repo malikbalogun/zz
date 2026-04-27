@@ -59,7 +59,125 @@ const AADSTS_HINTS: Record<string, { title: string; suggestions: string[] }> = {
   },
   AADSTS50126: {
     title: 'Invalid username or password',
-    suggestions: ['Check credentials; password-based flows are not used by this bridge.'],
+    suggestions: [
+      'The password is wrong (or the account uses passkey / SSO and has no password).',
+      'Update the saved credentials, or use Device Code instead.',
+    ],
+  },
+  AADSTS50034: {
+    title: 'Account does not exist in tenant',
+    suggestions: [
+      'Double-check the email address.',
+      'For multi-tenant flows, set tenant = `common` in Settings → Microsoft OAuth.',
+    ],
+  },
+  AADSTS50053: {
+    title: 'Account is locked',
+    suggestions: [
+      'Microsoft has locked the account due to too many failed sign-in attempts (smart lockout).',
+      'Wait ~15 minutes, or have the admin unlock it in Entra ID.',
+    ],
+  },
+  AADSTS50055: {
+    title: 'Password expired',
+    suggestions: [
+      'Sign in interactively in a browser and set a new password.',
+      'Saved-credential autofill cannot recover from this — Microsoft will force a password reset.',
+    ],
+  },
+  AADSTS50056: {
+    title: 'Password is missing or invalid for this account',
+    suggestions: [
+      'The account exists but has no password set in Microsoft (passkey / SSO / federated only).',
+      'Use Device Code or interactive sign-in instead.',
+    ],
+  },
+  AADSTS50057: {
+    title: 'User account is disabled',
+    suggestions: [
+      'The admin disabled this account in Entra ID. It must be re-enabled before sign-in.',
+    ],
+  },
+  AADSTS50058: {
+    title: 'Sign-in session not found',
+    suggestions: [
+      'AAD does not see an active session — usually means cookies were cleared.',
+      'Run an interactive sign-in (Capture browser cookies) to re-establish the session.',
+    ],
+  },
+  AADSTS50059: {
+    title: 'Tenant identifier missing',
+    suggestions: [
+      'Add the email or tenant GUID to the request — set Tenant in Settings → Microsoft OAuth.',
+    ],
+  },
+  AADSTS50128: {
+    title: 'Invalid domain',
+    suggestions: [
+      'The email\u2019s domain is not registered in any AAD tenant.',
+      'Confirm the email is a real Microsoft 365 / Entra ID account.',
+    ],
+  },
+  AADSTS50173: {
+    title: 'Stale credentials — fresh sign-in required',
+    suggestions: [
+      'Microsoft revoked the session because the password / MFA / device state changed.',
+      'Run an interactive sign-in to refresh the session.',
+    ],
+  },
+  AADSTS65004: {
+    title: 'User declined consent',
+    suggestions: [
+      'On the AAD consent screen the user clicked "No" / "Cancel".',
+      'Run the flow again and approve the requested permissions.',
+    ],
+  },
+  AADSTS70008: {
+    title: 'Refresh token expired or revoked',
+    suggestions: [
+      'Re-authenticate via Device Code or Cookie → Token.',
+      'This is normal after ~90 days of inactivity, password reset, or admin "sign out everywhere".',
+    ],
+  },
+  AADSTS70016: {
+    title: 'Authorization pending — user has not finished sign-in',
+    suggestions: [
+      'Open the verification URL in a browser and enter the device code shown on the Add Account screen.',
+      'Polling will keep retrying for ~15 minutes; complete the sign-in before then.',
+    ],
+  },
+  AADSTS70019: {
+    title: 'Device code expired',
+    suggestions: [
+      'The verification code only lives for ~15 minutes from when it was issued.',
+      'Click "Start Over" to generate a fresh code, then complete the AAD sign-in faster.',
+    ],
+  },
+  AADSTS70020: {
+    title: 'Device code already redeemed',
+    suggestions: [
+      'A previous poll already used this code. Click "Start Over" for a new one.',
+    ],
+  },
+  AADSTS70043: {
+    title: 'Refresh token has reached its maximum lifetime',
+    suggestions: [
+      'Refresh tokens have a hard ~90-day cap. Re-authenticate via Device Code.',
+    ],
+  },
+  AADSTS900023: {
+    title: 'Invalid grant type',
+    suggestions: [
+      'The token endpoint rejected the grant — usually means the request body is malformed.',
+      'Update the app to the latest version and try again.',
+    ],
+  },
+  AADSTS9002313: {
+    title: 'Invalid client request',
+    suggestions: [
+      'The request was malformed (often happens when tenant is set wrong for this client).',
+      'Try Tenant = `common` in Settings → Microsoft OAuth.',
+    ],
   },
 };
 
@@ -78,7 +196,25 @@ export function diagnoseMicrosoftAuthError(raw: string): MicrosoftAuthDiagnostic
     };
   }
 
-  if (lower.includes('invalid_grant') || lower.includes('refresh_token_expired') || code === 'AADSTS70008') {
+  if (
+    lower.includes('verification code expired') ||
+    lower.includes('expired_token') ||
+    code === 'AADSTS70019' ||
+    code === 'AADSTS70020'
+  ) {
+    return {
+      category: 'invalid_grant',
+      title: hint?.title || 'Device code expired',
+      detail: text,
+      aadstsCode: code,
+      suggestions: hint?.suggestions || [
+        'Verification codes expire ~15 minutes after they are issued.',
+        'Click "Start Over" to generate a fresh code, then sign in faster.',
+      ],
+    };
+  }
+
+  if (lower.includes('invalid_grant') || lower.includes('refresh_token_expired') || code === 'AADSTS70008' || code === 'AADSTS70043') {
     return {
       category: 'invalid_grant',
       title: 'Token expired or revoked',

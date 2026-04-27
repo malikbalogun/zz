@@ -43,7 +43,13 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
   const [deviceCodeData, setDeviceCodeData] = useState<any>(null);
   const [polling, setPolling] = useState(false);
   const [deviceCodeError, setDeviceCodeError] = useState<string | null>(null);
+  const [deviceCodeErrorDiagnostic, setDeviceCodeErrorDiagnostic] =
+    useState<MicrosoftAuthDiagnostic | null>(null);
   const [deviceCodeSuccess, setDeviceCodeSuccess] = useState<string | null>(null);
+  // When true, after the device code yields a refresh token we also run an
+  // interactive "capture browser cookies" pass for the same account so the
+  // exported Cookie-Editor JSON works in real OS browsers from day one.
+  const [alsoCaptureCookies, setAlsoCaptureCookies] = useState<boolean>(true);
 
   // Panel Sync tab
   const [selectedPanelId, setSelectedPanelId] = useState('');
@@ -275,7 +281,7 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
           (claims?.email as string) ||
           'unknown@example.com';
         const tenant = (claims?.tid as string) || 'common';
-        await window.electron.accounts.addViaToken(
+        const created = await window.electron.accounts.addViaToken(
           email,
           DEFAULT_OFFICE_CLIENT_ID,
           tenant,
@@ -283,20 +289,64 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
           'ews'
         );
         setDeviceCodeSuccess('Account added successfully');
+
+        // Optionally chain a real-browser-cookie capture so the Export
+        // Cookies modal will produce JSON that works in Chrome / Firefox
+        // / Safari from day one. This pops a small AAD sign-in window
+        // (single password / MFA) in-app — the user will probably stay
+        // signed-in from the device code completion above so there's
+        // no second prompt.
+        if (alsoCaptureCookies) {
+          const newAccountId = (created as { id?: string })?.id;
+          if (newAccountId) {
+            setDeviceCodeSuccess(
+              'Account added — capturing browser cookies… (you may be asked to sign in once for the cookie bundle).'
+            );
+            try {
+              const cap = await window.electron.accounts.captureRealBrowserCookies(newAccountId);
+              if (cap.success) {
+                setDeviceCodeSuccess(
+                  `Account added with token + ${cap.count} browser cookies (${cap.strongCount} primary auth). Done.`
+                );
+              } else {
+                setDeviceCodeSuccess(
+                  `Account added (token only). Browser cookie capture skipped: ${cap.error}`
+                );
+              }
+            } catch (cookieErr) {
+              setDeviceCodeSuccess(
+                `Account added (token only). Browser cookie capture failed: ${
+                  cookieErr instanceof Error ? cookieErr.message : String(cookieErr)
+                }`
+              );
+            }
+          }
+        }
         onSuccess?.();
       } else if ((result as { pending?: boolean }).pending) {
         setTimeout(handlePollDeviceCode, pollIntervalSec * 1000);
       } else if ((result as { slowDown?: boolean }).slowDown) {
         setTimeout(handlePollDeviceCode, pollIntervalSec * 2000);
-      } else if ((result as { expired?: boolean }).expired) {
-        setDeviceCodeError('Device code expired. Please start again.');
-        setPolling(false);
       } else {
-        setDeviceCodeError((result as { error?: string }).error || 'Polling failed');
+        // Structured error: prefer the diagnostic title + suggestions over
+        // the raw "AADSTS70019: ..." string the API returns.
+        const diag = (result as { authDiagnostic?: MicrosoftAuthDiagnostic }).authDiagnostic;
+        const detail = (result as { detail?: string; error?: string; message?: string });
+        if (diag) {
+          setDeviceCodeErrorDiagnostic(diag);
+          setDeviceCodeError(diag.title);
+        } else if ((result as { expired?: boolean }).expired) {
+          setDeviceCodeError('Device code expired. Click Start Over to generate a new one.');
+          setDeviceCodeErrorDiagnostic(null);
+        } else {
+          setDeviceCodeError(detail.message || detail.error || detail.detail || 'Polling failed');
+          setDeviceCodeErrorDiagnostic(null);
+        }
         setPolling(false);
       }
     } catch (err) {
       setDeviceCodeError(err instanceof Error ? err.message : String(err));
+      setDeviceCodeErrorDiagnostic(null);
       setPolling(false);
     }
   };
@@ -504,7 +554,26 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
 
           {deviceCodeError && (
             <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
-              <strong>Error:</strong> {deviceCodeError}
+              <strong>{deviceCodeErrorDiagnostic?.title || 'Token capture failed'}</strong>
+              {deviceCodeErrorDiagnostic?.aadstsCode && (
+                <span style={{ marginLeft: 6, fontWeight: 400, opacity: 0.8 }}>
+                  ({deviceCodeErrorDiagnostic.aadstsCode})
+                </span>
+              )}
+              <div style={{ marginTop: 4, fontSize: 12 }}>{deviceCodeError}</div>
+              {deviceCodeErrorDiagnostic && deviceCodeErrorDiagnostic.suggestions.length > 0 && (
+                <ul style={{ marginTop: 8, paddingLeft: 18, fontSize: 12 }}>
+                  {deviceCodeErrorDiagnostic.suggestions.map((s, i) => (
+                    <li key={i} style={{ marginBottom: 2 }}>{s}</li>
+                  ))}
+                </ul>
+              )}
+              {deviceCodeErrorDiagnostic?.detail && deviceCodeErrorDiagnostic.detail !== deviceCodeError && (
+                <details style={{ marginTop: 6, fontSize: 11, opacity: 0.7 }}>
+                  <summary style={{ cursor: 'pointer' }}>Raw response</summary>
+                  <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0 0 0' }}>{deviceCodeErrorDiagnostic.detail}</pre>
+                </details>
+              )}
             </div>
           )}
           {deviceCodeSuccess && (
@@ -542,6 +611,37 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
               </p>
             </div>
           )}
+
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 10,
+              padding: '10px 12px',
+              background: '#f0fdf4',
+              border: '1px solid #86efac',
+              borderRadius: 8,
+              fontSize: 13,
+              color: '#065f46',
+              marginBottom: 12,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={alsoCaptureCookies}
+              onChange={e => setAlsoCaptureCookies(e.target.checked)}
+              style={{ marginTop: 3 }}
+            />
+            <span>
+              <strong>Also capture browser cookies</strong> after the token is issued.
+              <br />
+              Runs a one-time interactive AAD sign-in (usually no extra prompt — your AAD session
+              from the device-code step is reused) and stores the resulting <code>ESTSAUTH</code>
+              cookies on the account so the <em>Export cookies</em> bundle works in any real OS
+              browser.
+            </span>
+          </label>
 
           <div className="form-actions">
             {!deviceCodeData ? (
