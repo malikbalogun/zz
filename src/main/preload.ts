@@ -64,8 +64,13 @@ contextBridge.exposeInMainWorld('electron', {
     delete: (accountId: string) => ipcRenderer.invoke('account:delete', accountId),
     deleteBulk: (ids: string[]) => ipcRenderer.invoke('account:deleteBulk', ids),
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
-    /** Token account → Netscape cookie file (round-trip with the cookie import path). */
+    /** Capture this token account's OWA cookies in multiple formats (Netscape + Cookie-Editor JSON). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
+    /**
+     * One-click browser sign-in: capture cookies, copy Cookie-Editor JSON to
+     * clipboard, and open outlook.office.com in the default browser.
+     */
+    browserSignInOneClick: (accountId: string) => ipcRenderer.invoke('account:browserSignInOneClick', accountId),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
     /** Replace primary auth on a token account after re-authentication. */
@@ -116,6 +121,10 @@ contextBridge.exposeInMainWorld('electron', {
   files: {
     saveTextWithDialog: (opts: { defaultFilename: string; content: string; filters?: { name: string; extensions: string[] }[] }) =>
       ipcRenderer.invoke('files:saveTextWithDialog', opts),
+  },
+
+  clipboard: {
+    writeText: (text: string) => ipcRenderer.invoke('clipboard:writeText', text),
   },
 
   // Monitoring
@@ -200,6 +209,7 @@ contextBridge.exposeInMainWorld('electron', {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => ipcRenderer.invoke('mailbox:openOutlook', accountId, options ?? {}),
     /** Official OAuth authorize URL in system browser (login_hint + tenant from Settings). */
+    openOwaExternalSignIn: (accountId: string) => ipcRenderer.invoke('owa:openExternalSignIn', accountId),
 
     getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),
     telegramSendSearchResults: (bot: string, results: any[]) => ipcRenderer.invoke('telegram:sendSearchResults', bot, results),

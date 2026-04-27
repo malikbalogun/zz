@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { UIAccount, MonitoringAlert } from '../../../types/store';
 import { getAccounts } from '../../services/accountService';
 import { getMonitoringAlerts } from '../../services/monitoringService';
-import { OutlookService } from '../../services/outlookService';
+import { OutlookService, getOutlookService } from '../../services/outlookService';
 import type { OutlookMessage, OutlookFolder } from '../../services/outlookService';
 import {
   getReputationEntries,
@@ -29,6 +29,8 @@ type SavedInboxView = {
   query: string;
 };
 const SAVED_VIEWS_KEY = 'inboxSavedViews';
+const DEFAULT_MESSAGE_LIMIT = 100;
+const MESSAGE_PAGE_SIZE = 100;
 
 function buildMonitorHitMap(alerts: MonitoringAlert[], accountId: string): Record<string, MonitorRowHit> {
   const map: Record<string, MonitorRowHit> = {};
@@ -72,6 +74,8 @@ const CentralInboxView: React.FC = () => {
   const [preferredFolderId, setPreferredFolderId] = useState<string | null>(null);
   const [pendingApplyAccountId, setPendingApplyAccountId] = useState<string | null>(null);
   const [pendingApplyQuery, setPendingApplyQuery] = useState<string | null>(null);
+  const [messageLimit, setMessageLimit] = useState<number>(DEFAULT_MESSAGE_LIMIT);
+  const [activeSearchQuery, setActiveSearchQuery] = useState<string>('');
 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<EmailExportScope>('current_folder');
@@ -81,6 +85,8 @@ const CentralInboxView: React.FC = () => {
   const [exportAccountIds, setExportAccountIds] = useState<Set<string>>(new Set());
   const [exportBusy, setExportBusy] = useState(false);
   const [exportStatus, setExportStatus] = useState('');
+  const messageLoadSeq = useRef(0);
+  const bodyLoadSeq = useRef(0);
 
   useEffect(() => {
     setExportAccountIds(new Set(accounts.map(a => a.id)));
@@ -123,6 +129,25 @@ const CentralInboxView: React.FC = () => {
   }, []);
 
   const selectedAccount = accounts.find(a => a.id === selectedAccountId);
+  const selectedFolder = folders.find(f => f.id === selectedFolderId);
+  const canLoadMore =
+    !loadingMessages &&
+    !activeSearchQuery &&
+    !!selectedFolder &&
+    messages.length > 0 &&
+    messages.length < (selectedFolder.totalItemCount || 0);
+
+  useEffect(() => {
+    setFolders([]);
+    setSelectedFolderId('');
+    setMessages([]);
+    setSelectedMsg(null);
+    setMsgBody('');
+    setError('');
+    setActiveSearchQuery('');
+    setMessageLimit(DEFAULT_MESSAGE_LIMIT);
+    bodyLoadSeq.current++;
+  }, [selectedAccountId]);
 
   // Load folders when account changes
   useEffect(() => {
@@ -172,9 +197,9 @@ const CentralInboxView: React.FC = () => {
 
   // Load messages when folder changes
   useEffect(() => {
-    if (!selectedAccount || !selectedFolderId) return;
-    loadMessages();
-  }, [selectedFolderId, selectedAccountId]);
+    if (!selectedAccount || !selectedFolderId || activeSearchQuery) return;
+    void loadMessages();
+  }, [selectedFolderId, selectedAccountId, messageLimit, activeSearchQuery]);
 
   useEffect(() => {
     if (!pendingApplyAccountId || pendingApplyAccountId !== selectedAccountId || !selectedFolderId) return;
@@ -189,43 +214,70 @@ const CentralInboxView: React.FC = () => {
 
   const loadMessages = async () => {
     if (!selectedAccount) return;
+    const requestId = ++messageLoadSeq.current;
+    bodyLoadSeq.current++;
     setLoadingMessages(true);
     setError('');
+    setActiveSearchQuery('');
     setSelectedMsg(null);
     setMsgBody('');
     try {
-      const msgs = await OutlookService.fetchMessages(selectedAccount, selectedFolderId, undefined, 25);
+      const Outlook = getOutlookService();
+      const msgs = await Outlook.fetchAllMessagesInFolderPaginated(selectedAccount, selectedFolderId, {
+        maxPerFolder: messageLimit,
+        pageSize: MESSAGE_PAGE_SIZE,
+      });
+      if (requestId !== messageLoadSeq.current) return;
       setMessages(msgs);
       try {
         const alerts = await getMonitoringAlerts();
+        if (requestId !== messageLoadSeq.current) return;
         setMonitorHits(buildMonitorHitMap(alerts, selectedAccountId));
       } catch {
         /* keep prior highlights */
       }
     } catch (err: any) {
+      if (requestId !== messageLoadSeq.current) return;
       setError(`Failed to load messages: ${err.message}`);
       setMessages([]);
     } finally {
+      if (requestId !== messageLoadSeq.current) return;
       setLoadingMessages(false);
     }
   };
 
   const handleSearch = async () => {
-    if (!selectedAccount || !searchQuery.trim()) return;
+    if (!selectedAccount) return;
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setMessageLimit(DEFAULT_MESSAGE_LIMIT);
+      await loadMessages();
+      return;
+    }
+    const requestId = ++messageLoadSeq.current;
+    bodyLoadSeq.current++;
     setLoadingMessages(true);
     setError('');
+    setActiveSearchQuery(trimmed);
+    setSelectedMsg(null);
+    setMsgBody('');
     try {
-      const results = await OutlookService.searchMessages(selectedAccount, searchQuery, undefined, 40);
+      const Outlook = getOutlookService();
+      const results = await Outlook.searchMessages(selectedAccount, trimmed, selectedFolderId, 100, 250);
+      if (requestId !== messageLoadSeq.current) return;
       setMessages(results);
       try {
         const alerts = await getMonitoringAlerts();
+        if (requestId !== messageLoadSeq.current) return;
         setMonitorHits(buildMonitorHitMap(alerts, selectedAccountId));
       } catch {
         /* keep prior highlights */
       }
     } catch (err: any) {
+      if (requestId !== messageLoadSeq.current) return;
       setError(`Search failed: ${err.message}`);
     } finally {
+      if (requestId !== messageLoadSeq.current) return;
       setLoadingMessages(false);
     }
   };
@@ -262,6 +314,7 @@ const CentralInboxView: React.FC = () => {
   };
 
   const handleSelectMessage = async (msg: OutlookMessage) => {
+    const requestId = ++bodyLoadSeq.current;
     setSelectedMsg(msg);
     setShowReplyBox(false);
     setMsgBody('');
@@ -270,11 +323,15 @@ const CentralInboxView: React.FC = () => {
     if (!selectedAccount) return;
     setLoadingBody(true);
     try {
-      const details = await OutlookService.getMessageDetails(selectedAccount, msg.id);
+      const Outlook = getOutlookService();
+      const details = await Outlook.getMessageDetails(selectedAccount, msg.id);
+      if (requestId !== bodyLoadSeq.current) return;
       setMsgBody(details.body.content);
     } catch (err: any) {
+      if (requestId !== bodyLoadSeq.current) return;
       setMsgBody(`<p style="color:#ef4444">Failed to load body: ${err.message}</p>`);
     } finally {
+      if (requestId !== bodyLoadSeq.current) return;
       setLoadingBody(false);
     }
   };
@@ -622,7 +679,13 @@ const CentralInboxView: React.FC = () => {
         {/* Email List */}
         <div className="inbox-list">
           <div className="inbox-list-header">
-            <span>{loadingMessages ? 'Loading...' : `${messages.length} emails`}</span>
+            <span>
+              {loadingMessages
+                ? 'Loading...'
+                : activeSearchQuery
+                  ? `${messages.length} results`
+                  : `${messages.length}${selectedFolder?.totalItemCount ? ` / ${selectedFolder.totalItemCount}` : ''} emails`}
+            </span>
           </div>
           <div className="inbox-list-body">
             {messages.map(msg => {
@@ -693,6 +756,19 @@ const CentralInboxView: React.FC = () => {
               <div className="inbox-empty">
                 <i className="fas fa-inbox"></i>
                 <p>No messages found</p>
+              </div>
+            )}
+            {canLoadMore && (
+              <div style={{ padding: '12px 16px', borderTop: '1px solid #f3f4f6', background: '#fff' }}>
+                <button
+                  type="button"
+                  className="action-btn secondary"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  onClick={() => setMessageLimit(prev => prev + DEFAULT_MESSAGE_LIMIT)}
+                >
+                  <i className="fas fa-chevron-down" style={{ marginRight: 8 }} />
+                  Load more emails
+                </button>
               </div>
             )}
           </div>

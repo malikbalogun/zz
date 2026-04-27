@@ -14,20 +14,46 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
-     * Export the Microsoft OWA session cookies for a token-typed account as a
-     * Netscape HTTP Cookie File string. The returned string is round-tripable
-     * through the existing cookie-import path.
+     * Capture this token account's current OWA session cookies in every
+     * supported format: Cookie-Editor / EditThisCookie JSON
+     * (`extensionJson`), Netscape file (`netscape`), raw `Cookie:` header
+     * (`header`), and a DevTools console snippet (`browserSnippet`) that
+     * signs the user in on paste + refresh.
      */
     exportOwaCookies: (
       accountId: string
-    ) => Promise<{
-      success: boolean;
-      count?: number;
-      strongAuthCount?: number;
-      email?: string;
-      netscape?: string;
-      error?: string;
-    }>;
+    ) => Promise<
+      | {
+          success: true;
+          count: number;
+          strongCount: number;
+          email: string;
+          netscape: string;
+          header: string;
+          extensionJson: string;
+          browserSnippet: string;
+          quality: 'strong' | 'weak';
+        }
+      | { success: false; error?: string }
+    >;
+    /**
+     * One-click "Sign in via browser": exchange the refresh token for OWA
+     * cookies and open `outlook.office.com/mail/inbox` in a Chromium window
+     * with those cookies already injected. The user lands directly on the
+     * inbox signed in — no password, MFA, or paste step.
+     */
+    browserSignInOneClick: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          email: string;
+          count: number;
+          strongCount: number;
+          quality: 'strong' | 'weak';
+        }
+      | { success: false; error?: string }
+    >;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
@@ -231,6 +257,9 @@ export interface ElectronAPI {
       content: string;
       filters?: { name: string; extensions: string[] }[];
     }) => Promise<{ ok: true; path: string } | { ok: false }>;
+  };
+  clipboard: {
+    writeText: (text: string) => Promise<{ success: boolean; error?: string }>;
   };
 }
 
