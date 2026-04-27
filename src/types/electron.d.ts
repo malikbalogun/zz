@@ -25,6 +25,16 @@ export interface ElectronAPI {
     ) => Promise<
       | {
           success: true;
+          /**
+           * `realBrowser`: cookies were captured from a real interactive
+           * sign-in (work in any OS browser via Cookie-Editor).
+           * `tokenPartition`: cookies came from the in-app token partition
+           * (only fully sign you in inside the in-app window because of
+           * the per-request Bearer header injection).
+           */
+          source: 'realBrowser' | 'tokenPartition';
+          /** ISO timestamp of the capture (only set for realBrowser). */
+          capturedAt?: string;
           count: number;
           strongCount: number;
           email: string;
@@ -33,6 +43,24 @@ export interface ElectronAPI {
           extensionJson: string;
           browserSnippet: string;
           quality: 'strong' | 'weak';
+        }
+      | { success: false; error?: string }
+    >;
+    /**
+     * Open an in-app AAD sign-in window so the user completes one
+     * interactive sign-in (password / MFA / passkey). The real ESTSAUTH
+     * cookies AAD sets are captured and persisted on the account so the
+     * user can later export them for use in any OS browser.
+     */
+    captureRealBrowserCookies: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          email: string;
+          count: number;
+          strongCount: number;
+          capturedAt: string;
         }
       | { success: false; error?: string }
     >;

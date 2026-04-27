@@ -67,6 +67,15 @@ contextBridge.exposeInMainWorld('electron', {
     /** Capture this token account's OWA cookies in multiple formats (Netscape + Cookie-Editor JSON). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
     /**
+     * Open an in-app sign-in window so the user completes one interactive
+     * AAD sign-in (password / MFA / passkey). The real ESTSAUTH-class
+     * cookies AAD sets are captured and persisted on the account so the
+     * user can later export them and paste into a real OS browser via
+     * Cookie-Editor / EditThisCookie / DevTools.
+     */
+    captureRealBrowserCookies: (accountId: string) =>
+      ipcRenderer.invoke('account:captureRealBrowserCookies', accountId),
+    /**
      * One-click browser sign-in: capture cookies, copy Cookie-Editor JSON to
      * clipboard, and open outlook.office.com in the default browser.
      */

@@ -23,6 +23,18 @@ export interface UIAccount {
      * independently.
      */
     adminGraphRefreshToken?: string;
+    /**
+     * Encrypted JSON snapshot of the AAD ESTSAUTH-class browser cookies
+     * captured during an interactive sign-in run by the user. Optional —
+     * absent until the user runs "Capture browser cookies" in the
+     * Accounts dropdown. When set, "Export cookies" surfaces these as the
+     * real-browser-importable bundle (Cookie-Editor / EditThisCookie /
+     * console snippet) so the user can sign into OWA in Chrome / Firefox /
+     * Safari without typing a password again until AAD revokes them
+     * (~90 days for ESTSAUTHPERSISTENT, until-tab-close otherwise).
+     */
+    realBrowserCookiesEncrypted?: string;
+    realBrowserCookiesCapturedAt?: string;
   } | {
     type: 'cookie';
     /** Encrypted cookie paste (renderer) or main-process `cookiesEncrypted` — both supported when loading OWA. */

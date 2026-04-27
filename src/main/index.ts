@@ -3264,27 +3264,288 @@ function setupIpcHandlers() {
   });
 
   /**
-   * Capture the current OWA cookies for a token account and return them in
-   * every format we know about: Cookie-Editor / EditThisCookie JSON, Netscape
-   * file, raw `Cookie:` header, and a self-contained DevTools console
-   * snippet that signs the user in on paste + refresh.
+   * Open an in-app sign-in window pointed at AAD's `/oauth2/v2.0/authorize`,
+   * wait for the user to complete the interactive sign-in (password / MFA /
+   * passkey / etc.), and then read the real ESTSAUTH-class browser cookies
+   * AAD set during the flow. Persist them on the account so the user can
+   * later export and paste them into Cookie-Editor / EditThisCookie /
+   * the DevTools console in their real OS browser to be signed into OWA
+   * without typing a password again.
+   *
+   * This is the only architecturally-valid path: AAD does not mint
+   * ESTSAUTH cookies in response to a refresh-token exchange, only inside
+   * an interactive sign-in. We use a fresh persist:auth-capture-<id>
+   * partition so the captured cookies are pristine and not contaminated
+   * by our own per-request Bearer hook.
    */
-  ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
+  ipcMain.handle('account:captureRealBrowserCookies', async (_, accountId: string) => {
     try {
-      const snapshot = await captureTokenBackedOwaCookies(accountId);
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') {
+        throw new Error('Capture browser cookies only applies to Microsoft token accounts.');
+      }
+
+      const settings = storeData.settings || {};
+      const ms = settings.microsoftOAuth || {};
+      const clientId =
+        (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+        account.auth?.clientId ||
+        'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const authority =
+        (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+        normalizeAuthorityTenant(account.auth?.authorityEndpoint || 'common') ||
+        'common';
+      const redirectUri =
+        (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+        'https://outlook.office.com/mail/';
+
+      const authUrl = new URL(
+        `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`
+      );
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_mode', 'query');
+      authUrl.searchParams.set('scope', 'openid profile offline_access https://outlook.office.com/.default');
+      authUrl.searchParams.set('login_hint', account.email);
+      authUrl.searchParams.set('prompt', 'login');
+      const domainHint = account.email.split('@')[1];
+      if (domainHint) authUrl.searchParams.set('domain_hint', domainHint);
+
+      // Fresh, isolated partition: no Bearer hook, no MSAL preload, no
+      // cookies from other accounts. We persist it (instead of using a
+      // temp: partition) so a captured ESTSAUTHPERSISTENT survives across
+      // app restarts during a user's debugging session.
+      const partitionName = `persist:auth-capture-${accountId}`;
+      const captureSession = session.fromPartition(partitionName);
+      try {
+        await captureSession.clearStorageData({ storages: ['cookies'] });
+      } catch (err) {
+        appendOutlookDebug(
+          `[CaptureCookies] clearStorageData failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      const win = new BrowserWindow({
+        width: 520,
+        height: 760,
+        show: true,
+        title: `Sign in to capture browser cookies — ${account.email}`,
+        webPreferences: {
+          partition: partitionName,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
+      });
+
+      const result = await new Promise<{
+        cookies: ParsedCookie[];
+        strongCount: number;
+      } | { error: string }>((resolve) => {
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          try { if (!win.isDestroyed()) win.destroy(); } catch { /* noop */ }
+          resolve({ error: 'Sign-in capture timed out after 5 minutes.' });
+        }, 5 * 60 * 1000);
+
+        const finishWithCookies = async () => {
+          if (settled) return;
+          // Give AAD a moment to flush any final Set-Cookie headers
+          await new Promise(r => setTimeout(r, 800));
+          try {
+            const all = await captureSession.cookies.get({});
+            const parsed: ParsedCookie[] = all.map((c) => ({
+              name: c.name,
+              value: c.value,
+              domain: c.domain,
+              path: c.path || '/',
+              secure: c.secure !== false,
+              httpOnly: c.httpOnly === true,
+              hostOnly: c.hostOnly === true,
+              sameSite:
+                c.sameSite === 'lax'
+                  ? 'lax'
+                  : c.sameSite === 'strict'
+                    ? 'strict'
+                    : c.sameSite === 'no_restriction'
+                      ? 'none'
+                      : undefined,
+              session: c.session === true,
+              expirationDate: c.expirationDate,
+            }));
+            const filtered = filterMicrosoftRelatedCookies(parsed);
+            const strongCount = countStrongMicrosoftSessionCookies(filtered);
+            settled = true;
+            clearTimeout(timeout);
+            try { if (!win.isDestroyed()) win.destroy(); } catch { /* noop */ }
+            resolve({ cookies: filtered, strongCount });
+          } catch (err) {
+            settled = true;
+            clearTimeout(timeout);
+            try { if (!win.isDestroyed()) win.destroy(); } catch { /* noop */ }
+            resolve({ error: err instanceof Error ? err.message : String(err) });
+          }
+        };
+
+        const isRedirectArrival = (pageUrl: string) => {
+          try {
+            const u = new URL(pageUrl);
+            const r = new URL(redirectUri);
+            // Match host + path prefix; AAD usually appends ?code=...
+            return u.hostname === r.hostname && u.pathname.startsWith(r.pathname);
+          } catch {
+            return false;
+          }
+        };
+
+        win.webContents.on('did-navigate', (_e, url) => {
+          if (isRedirectArrival(url)) void finishWithCookies();
+        });
+        win.webContents.on('did-navigate-in-page', (_e, url) => {
+          if (isRedirectArrival(url)) void finishWithCookies();
+        });
+        win.webContents.on('will-redirect', (_e, url) => {
+          if (isRedirectArrival(url)) void finishWithCookies();
+        });
+        win.on('closed', () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          resolve({ error: 'Sign-in window was closed before completion.' });
+        });
+
+        win.loadURL(authUrl.toString()).catch((loadErr) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          try { if (!win.isDestroyed()) win.destroy(); } catch { /* noop */ }
+          resolve({ error: `Failed to load AAD sign-in page: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}` });
+        });
+      });
+
+      if ('error' in result) {
+        appendOutlookDebug(`[CaptureCookies] Failed for ${account.email}: ${result.error}`);
+        return { success: false as const, error: result.error };
+      }
+      if (!result.cookies.length || result.strongCount === 0) {
+        appendOutlookDebug(
+          `[CaptureCookies] Sign-in completed for ${account.email} but no strong cookies found (count=${result.cookies.length}, strong=${result.strongCount})`
+        );
+        return {
+          success: false as const,
+          error:
+            'Sign-in completed but no AAD ESTSAUTH cookies were captured. ' +
+            'This usually means the redirect_uri in Settings does not match what AAD redirected to. ' +
+            `Got ${result.cookies.length} cookies (${result.strongCount} primary auth).`,
+        };
+      }
+
+      // Persist on the account so Export Cookies can surface them later.
+      const payload = JSON.stringify(result.cookies);
+      const encrypted = safeStorage.isEncryptionAvailable()
+        ? safeStorage.encryptString(payload).toString('base64')
+        : payload;
+      const capturedAt = new Date().toISOString();
+      account.auth = {
+        ...account.auth,
+        realBrowserCookiesEncrypted: encrypted,
+        realBrowserCookiesCapturedAt: capturedAt,
+      };
+      await writeStore(storeData);
+
       appendOutlookDebug(
-        `[ExportCookies] Captured ${snapshot.cookies.length} cookies for ${snapshot.account.email} (strong=${snapshot.strongCount})`
+        `[CaptureCookies] Stored ${result.cookies.length} real-browser cookies for ${account.email} (strong=${result.strongCount})`
       );
       return {
         success: true as const,
-        count: snapshot.cookies.length,
-        strongCount: snapshot.strongCount,
-        email: snapshot.account.email,
-        netscape: snapshot.netscape,
-        header: snapshot.header,
-        extensionJson: snapshot.extensionJson,
-        browserSnippet: snapshot.browserSnippet,
-        quality: snapshot.quality,
+        email: account.email,
+        count: result.cookies.length,
+        strongCount: result.strongCount,
+        capturedAt,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[CaptureCookies] Top-level failure: ${msg}`);
+      return { success: false as const, error: msg };
+    }
+  });
+
+  /**
+   * Capture / surface OWA cookies for export. Two sources:
+   *
+   * 1. If the account has `realBrowserCookiesEncrypted` (set by
+   *    `account:captureRealBrowserCookies`), use those — they were captured
+   *    during a real interactive sign-in and include AAD's ESTSAUTH
+   *    cookies, so they actually authenticate when imported into a real
+   *    OS browser via Cookie-Editor / EditThisCookie / DevTools.
+   * 2. Otherwise fall back to the in-app token partition's cookies, which
+   *    are useful for diagnostics but only really sign you in inside the
+   *    in-app window (because of the Bearer-injection hook).
+   *
+   * Returns Cookie-Editor / EditThisCookie JSON, Netscape file, raw
+   * `Cookie:` header, and a DevTools console snippet — every format the
+   * UI cares about.
+   */
+  ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
+    try {
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+
+      let cookies: ParsedCookie[] = [];
+      let source: 'realBrowser' | 'tokenPartition' = 'tokenPartition';
+      let capturedAt: string | undefined;
+
+      if (
+        account.auth?.type === 'token' &&
+        typeof account.auth?.realBrowserCookiesEncrypted === 'string' &&
+        account.auth.realBrowserCookiesEncrypted.trim()
+      ) {
+        try {
+          const decrypted = safeStorage.isEncryptionAvailable()
+            ? safeStorage.decryptString(Buffer.from(account.auth.realBrowserCookiesEncrypted, 'base64'))
+            : account.auth.realBrowserCookiesEncrypted;
+          const parsed = JSON.parse(decrypted) as ParsedCookie[];
+          if (Array.isArray(parsed) && parsed.length) {
+            cookies = parsed;
+            source = 'realBrowser';
+            capturedAt = account.auth.realBrowserCookiesCapturedAt;
+          }
+        } catch (err) {
+          appendOutlookDebug(
+            `[ExportCookies] Failed to decrypt stored real cookies: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      if (cookies.length === 0) {
+        const snapshot = await captureTokenBackedOwaCookies(accountId);
+        cookies = snapshot.cookies;
+      }
+
+      const strongCount = countStrongMicrosoftSessionCookies(cookies);
+      appendOutlookDebug(
+        `[ExportCookies] source=${source} count=${cookies.length} strong=${strongCount} email=${account.email}`
+      );
+      return {
+        success: true as const,
+        source,
+        capturedAt,
+        count: cookies.length,
+        strongCount,
+        email: account.email,
+        netscape: cookiesToNetscape(cookies),
+        header: cookiesToHeaderString(cookies),
+        extensionJson: cookiesToExtensionImportJson(cookies),
+        browserSnippet: cookiesToBrowserConsoleSnippet(cookies),
+        quality: strongCount > 0 ? ('strong' as const) : ('weak' as const),
       };
     } catch (error: any) {
       const msg = error?.message || String(error);

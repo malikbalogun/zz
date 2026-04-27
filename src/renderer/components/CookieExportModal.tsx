@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 
 type ExportSnapshot = {
   success: true;
+  source: 'realBrowser' | 'tokenPartition';
+  capturedAt?: string;
   count: number;
   strongCount: number;
   email: string;
@@ -84,6 +86,37 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
   const [snapshot, setSnapshot] = useState<ExportSnapshot | null>(null);
   const [activeFormat, setActiveFormat] = useState<FormatId>('extensionJson');
   const [copiedFormat, setCopiedFormat] = useState<FormatId | null>(null);
+  const [capturing, setCapturing] = useState(false);
+
+  const reload = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success) throw new Error(result.error || 'Export failed');
+      setSnapshot(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCaptureRealBrowserCookies = async () => {
+    if (capturing) return;
+    setCapturing(true);
+    setError(null);
+    try {
+      const r = await window.electron.accounts.captureRealBrowserCookies(accountId);
+      if (!r.success) throw new Error(r.error || 'Capture failed');
+      // Refresh the snapshot so the UI now shows the real-browser cookies.
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCapturing(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -262,29 +295,61 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
               {activeMeta.hint}
             </div>
 
-            <div
-              className="form-helper"
-              style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8, padding: 10, color: '#991b1b', marginBottom: 12, fontSize: 12 }}
-            >
-              <i className="fas fa-exclamation-triangle" style={{ marginRight: 6 }}></i>
-              <strong>Important — what these formats can and cannot do:</strong>
-              <br />
-              The cookies were captured from the in-app token partition where OWA only stays signed
-              in because a <code>webRequest.onBeforeSendHeaders</code> hook in the main process
-              injects an OAuth Bearer header on every outbound request. AAD itself does <em>not</em>
-              issue ESTSAUTH session cookies in exchange for a refresh token, so a different browser
-              that imports these cookies will still get bounced to the sign-in page when it tries to
-              hit OWA's session APIs.
-              <br />
-              <br />
-              For a true 1-click sign-in into the inbox, use the in-app{' '}
-              <strong>Sign in (in-app browser)</strong> button — it opens a Chromium window with the
-              cookies <em>and</em> the Bearer hook installed.
-              <br />
-              <br />
-              The exports here remain useful for: (1) diagnosing the cookie set, (2) replaying
-              individual requests with <code>curl --cookie</code>, and (3) seeding a Cookie-Editor
-              import so the user only has to provide a fresh password (not full MFA + device code).</div>
+            {snapshot.source === 'realBrowser' ? (
+              <div
+                className="form-helper"
+                style={{ background: '#ecfdf5', border: '1px solid #86efac', borderRadius: 8, padding: 10, color: '#065f46', marginBottom: 12, fontSize: 12 }}
+              >
+                <i className="fas fa-check-circle" style={{ marginRight: 6 }}></i>
+                <strong>Real browser cookies</strong> — captured during an interactive AAD sign-in
+                {snapshot.capturedAt ? <> on <strong>{new Date(snapshot.capturedAt).toLocaleString()}</strong></> : null}.
+                These include the AAD <code>ESTSAUTH</code> / <code>ESTSAUTHPERSISTENT</code>{' '}
+                cookies and will sign you into OWA in any real OS browser via Cookie-Editor /
+                EditThisCookie / DevTools, without typing a password again until AAD revokes them
+                (typically ~90 days for <code>ESTSAUTHPERSISTENT</code>).
+                <br />
+                <button
+                  type="button"
+                  className="action-btn secondary"
+                  style={{ marginTop: 8, fontSize: 12 }}
+                  onClick={() => void handleCaptureRealBrowserCookies()}
+                  disabled={capturing}
+                >
+                  <i className={`fas ${capturing ? 'fa-spinner fa-spin' : 'fa-redo'}`} style={{ marginRight: 6 }} />
+                  {capturing ? 'Capturing…' : 'Refresh capture (re-sign-in)'}
+                </button>
+              </div>
+            ) : (
+              <div
+                className="form-helper"
+                style={{ background: '#fef3c7', border: '1px solid #fbbf24', borderRadius: 8, padding: 10, color: '#92400e', marginBottom: 12, fontSize: 12 }}
+              >
+                <i className="fas fa-exclamation-triangle" style={{ marginRight: 6 }}></i>
+                <strong>Token-partition cookies</strong> — these came from the in-app token jar.
+                AAD does <em>not</em> mint <code>ESTSAUTH</code> cookies in exchange for a refresh
+                token, so importing these into a real OS browser will bounce back to the sign-in
+                page.
+                <br />
+                <br />
+                <strong>To get cookies that sign you into OWA in a real browser:</strong> click
+                "Capture browser cookies" below to do a one-time interactive sign-in. We open an
+                in-app AAD page; you complete password / MFA / passkey once; we capture the
+                resulting <code>ESTSAUTH</code> cookies and persist them on this account. From then
+                on this dialog will show those cookies (which work everywhere) until AAD revokes
+                them.
+                <br />
+                <button
+                  type="button"
+                  className="form-btn save"
+                  style={{ marginTop: 8 }}
+                  onClick={() => void handleCaptureRealBrowserCookies()}
+                  disabled={capturing}
+                >
+                  <i className={`fas ${capturing ? 'fa-spinner fa-spin' : 'fa-key'}`} style={{ marginRight: 6 }} />
+                  {capturing ? 'Waiting for sign-in…' : 'Capture browser cookies (one-time sign-in)'}
+                </button>
+              </div>
+            )}
 
             <textarea
               className="form-input"
