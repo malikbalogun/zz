@@ -2657,7 +2657,55 @@ function setupIpcHandlers() {
       outlookSession.protocol.handle('https', async (request) => {
         const u = request.url;
 
-        // 1. Intercept POST /token only for our own synthetic code exchanges.
+        // 1. Satisfy OWA/MSAL authorize requests with a synthetic auth code.
+        // Without this, Outlook can reach Microsoft's login page, pre-fill the
+        // mailbox, and then ask for a password even though we already have a
+        // valid refresh/access token for the account.
+        if (
+          request.method === 'GET' &&
+          u.includes('login.microsoftonline.com') &&
+          u.includes('/oauth2/') &&
+          u.includes('/authorize')
+        ) {
+          try {
+            const authUrl = new URL(u);
+            const redirectUri = authUrl.searchParams.get('redirect_uri');
+            const stateParam = authUrl.searchParams.get('state') || '';
+            const nonce = authUrl.searchParams.get('nonce') || crypto.randomUUID();
+            const responseMode = (authUrl.searchParams.get('response_mode') || 'fragment').toLowerCase();
+            if (redirectUri) {
+              const code = `INTERCEPTED:${nonce}`;
+              appendOutlookDebug(
+                `[ProtocolIntercept] Authorize intercepted mode=${responseMode} client=${authUrl.searchParams.get('client_id') || 'unknown'}`
+              );
+              if (responseMode === 'form_post') {
+                const html = `<!doctype html><html><body><form method="post" action="${redirectUri.replace(/"/g, '&quot;')}"><input type="hidden" name="code" value="${code.replace(/"/g, '&quot;')}"><input type="hidden" name="state" value="${stateParam.replace(/"/g, '&quot;')}"></form><script>document.forms[0].submit();</script></body></html>`;
+                return new Response(html, {
+                  status: 200,
+                  headers: { 'content-type': 'text/html; charset=utf-8' },
+                });
+              }
+
+              const redirect = new URL(redirectUri);
+              const params = new URLSearchParams();
+              params.set('code', code);
+              if (stateParam) params.set('state', stateParam);
+              if (responseMode === 'query') {
+                for (const [key, value] of params) redirect.searchParams.set(key, value);
+              } else {
+                redirect.hash = params.toString();
+              }
+              return new Response(null, {
+                status: 302,
+                headers: { location: redirect.toString() },
+              });
+            }
+          } catch (err) {
+            appendOutlookDebug(`[ProtocolIntercept] Authorize intercept failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        // 2. Intercept POST /token only for our own synthetic code exchanges.
         // Do NOT hijack normal Microsoft refresh-token flows; let those hit
         // AAD so OWA can establish/renew first-party browser session state.
         if (request.method === 'POST' && u.includes('login.microsoftonline.com') &&
@@ -2685,7 +2733,7 @@ function setupIpcHandlers() {
           }
         }
 
-        // 2. For OWA API calls - inject Bearer + anchor headers before forwarding.
+        // 3. For OWA API calls - inject Bearer + anchor headers before forwarding.
         //    protocol.handle bypasses webRequest hooks, so we must add auth here.
         //    request.body is a ReadableStream; we must drain it to a Buffer before re-sending.
         const isOwaApi =
