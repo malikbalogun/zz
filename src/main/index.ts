@@ -458,6 +458,111 @@ function cookiesToExtensionImportJson(cookies: ParsedCookie[]): string {
   return JSON.stringify(cookiesToExtensionImportRows(cookies), null, 2);
 }
 
+/**
+ * Build a self-contained DevTools console snippet. The user pastes it into
+ * the JS console on `outlook.office.com` (or any Microsoft host); it walks
+ * through every relevant host, writes each non-HttpOnly cookie via
+ * `document.cookie`, and finally navigates to the inbox. After the
+ * navigation completes the user is signed in.
+ *
+ * HttpOnly cookies cannot be set through `document.cookie`, so the snippet
+ * also surfaces them on `window.__owaCookieMap` for any extension that
+ * supports manual injection. For maximum reliability, prefer the
+ * Cookie-Editor / EditThisCookie JSON path.
+ */
+function cookiesToBrowserConsoleSnippet(cookies: ParsedCookie[]): string {
+  const serializable = cookiesToExtensionImportRows(cookies);
+  const httpOnlySkipped = serializable
+    .filter((cookie) => cookie.httpOnly)
+    .map((cookie) => cookie.name);
+  const cookieWritable = serializable.filter((cookie) => !cookie.httpOnly);
+  const cookieHeader = cookiesToHeaderString(cookies);
+  const normalizeHost = (domain?: string) => String(domain || '').replace(/^\./, '').toLowerCase();
+  const writableHosts = Array.from(
+    new Set(
+      cookieWritable
+        .map((cookie) => normalizeHost(typeof cookie.domain === 'string' ? cookie.domain : undefined))
+        .filter(Boolean)
+    )
+  ).sort((a, b) => {
+    const preferred = [
+      'login.microsoftonline.com',
+      'login.live.com',
+      'outlook.office.com',
+      'outlook.office365.com',
+      'outlook.cloud.microsoft',
+    ];
+    const ai = preferred.indexOf(a);
+    const bi = preferred.indexOf(b);
+    if (ai !== -1 || bi !== -1) {
+      return (ai === -1 ? preferred.length : ai) - (bi === -1 ? preferred.length : bi);
+    }
+    return a.localeCompare(b);
+  });
+  const outlookHost =
+    writableHosts.find((host) => host.includes('outlook')) || 'outlook.office.com';
+  const targetUrl = `https://${outlookHost}/mail/`;
+  const payload = JSON.stringify(cookieWritable);
+  const skippedComment = httpOnlySkipped.length
+    ? `/* HttpOnly cookies omitted from document.cookie path: ${httpOnlySkipped.join(', ')} */\n`
+    : '';
+  return (
+    `${skippedComment};(() => {\n` +
+    `  const cookies = JSON.parse(${JSON.stringify(payload)});\n` +
+    `  const hosts = ${JSON.stringify(writableHosts)};\n` +
+    `  const stateKey = '__OWA_COOKIE_BOOTSTRAP__:';\n` +
+    `  const targetUrl = ${JSON.stringify(targetUrl)};\n` +
+    `  const normalizeHost = (domain) => String(domain || '').replace(/^\\./, '').toLowerCase();\n` +
+    `  const matchesHost = (cookie, host) => { const d = normalizeHost(cookie.domain); return !!d && (host === d || host.endsWith('.' + d)); };\n` +
+    `  const writableForHost = (host) => cookies.filter((cookie) => matchesHost(cookie, host));\n` +
+    `  let state = null;\n` +
+    `  try { if (typeof window.name === 'string' && window.name.startsWith(stateKey)) state = JSON.parse(window.name.slice(stateKey.length)); } catch (_) { state = null; }\n` +
+    `  if (!state || !Array.isArray(state.cookies) || !Array.isArray(state.hosts)) {\n` +
+    `    state = { cookies, hosts, step: 0, targetUrl };\n` +
+    `    window.name = stateKey + JSON.stringify(state);\n` +
+    `  }\n` +
+    `  const currentHost = location.hostname.toLowerCase();\n` +
+    `  const currentTargetHost = state.hosts[state.step];\n` +
+    `  if (!currentTargetHost) {\n` +
+    `    window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
+    `    window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
+    `    if (${JSON.stringify(httpOnlySkipped)}.length) console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
+    `    window.name = '';\n` +
+    `    if (location.href !== state.targetUrl) location.href = state.targetUrl;\n` +
+    `    return;\n` +
+    `  }\n` +
+    `  if (!(currentHost === currentTargetHost || currentHost.endsWith('.' + currentTargetHost))) {\n` +
+    `    location.href = 'https://' + currentTargetHost + '/';\n` +
+    `    return;\n` +
+    `  }\n` +
+    `  window.__owaCookieHeader = ${JSON.stringify(cookieHeader)};\n` +
+    `  window.__owaCookieMap = ${JSON.stringify(serializable, null, 2)};\n` +
+    `  for (const o of writableForHost(currentHost)) {\n` +
+    `    const parts = [\`\${o.name}=\${o.value}\`];\n` +
+    `    if (o.session !== true && typeof o.expirationDate === 'number') parts.push(\`Expires=\${new Date(o.expirationDate * 1000).toUTCString()}\`);\n` +
+    `    else parts.push('Max-Age=31536000');\n` +
+    `    parts.push(o.path ? \`path=\${o.path}\` : 'path=/');\n` +
+    `    if (o.domain) parts.push(\`domain=\${o.domain}\`);\n` +
+    `    if (o.secure !== false) parts.push('Secure');\n` +
+    `    parts.push(\`SameSite=\${o.sameSite || 'None'}\`);\n` +
+    `    document.cookie = parts.join(';');\n` +
+    `  }\n` +
+    `  if (${JSON.stringify(httpOnlySkipped)}.length) {\n` +
+    `    console.warn('Skipped HttpOnly cookies:', ${JSON.stringify(httpOnlySkipped)});\n` +
+    `  }\n` +
+    `  state.step += 1;\n` +
+    `  window.name = stateKey + JSON.stringify(state);\n` +
+    `  const nextHost = state.hosts[state.step];\n` +
+    `  if (nextHost) {\n` +
+    `    location.href = 'https://' + nextHost + '/';\n` +
+    `    return;\n` +
+    `  }\n` +
+    `  window.name = '';\n` +
+    `  location.href = state.targetUrl;\n` +
+    `})();`
+  );
+}
+
 type CapturedOwaCookieSnapshot = {
   account: any;
   cookies: ParsedCookie[];
@@ -465,6 +570,7 @@ type CapturedOwaCookieSnapshot = {
   netscape: string;
   header: string;
   extensionJson: string;
+  browserSnippet: string;
   quality: 'strong' | 'weak';
 };
 
@@ -589,6 +695,7 @@ async function captureTokenBackedOwaCookies(accountId: string): Promise<Captured
     netscape: cookiesToNetscape(msCookies),
     header: cookiesToHeaderString(msCookies),
     extensionJson: cookiesToExtensionImportJson(msCookies),
+    browserSnippet: cookiesToBrowserConsoleSnippet(msCookies),
     quality: strongCount > 0 ? 'strong' : 'weak',
   };
 }
@@ -3129,9 +3236,9 @@ function setupIpcHandlers() {
 
   /**
    * Capture the current OWA cookies for a token account and return them in
-   * multiple formats. Used by both the "Export cookies (JSON)" menu item and
-   * the one-click "Sign in via browser" flow which copies the JSON to the
-   * clipboard and opens outlook.office.com in the user's default browser.
+   * every format we know about: Cookie-Editor / EditThisCookie JSON, Netscape
+   * file, raw `Cookie:` header, and a self-contained DevTools console
+   * snippet that signs the user in on paste + refresh.
    */
   ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
     try {
@@ -3147,6 +3254,7 @@ function setupIpcHandlers() {
         netscape: snapshot.netscape,
         header: snapshot.header,
         extensionJson: snapshot.extensionJson,
+        browserSnippet: snapshot.browserSnippet,
         quality: snapshot.quality,
       };
     } catch (error: any) {
@@ -3157,19 +3265,29 @@ function setupIpcHandlers() {
   });
 
   /**
-   * One-click "Sign in via browser": capture this token account's OWA
-   * cookies, copy the Cookie-Editor / EditThisCookie JSON to the clipboard,
-   * then open outlook.office.com in the user's default browser. The user only
-   * needs to click "Import" in their cookie-editor extension to be signed in.
+   * One-click "Sign in via browser": exchange the account's refresh token
+   * for OWA session cookies, then open the inbox in a Chromium BrowserWindow
+   * with those cookies already injected. The user lands directly on
+   * `outlook.office.com/mail/inbox` signed in — no password, MFA, or paste
+   * step.
+   *
+   * Implementation: capture cookies into a Netscape blob (the same path
+   * `Reapply cookies now` uses), then route through `openOwaWithCookieSession`,
+   * which already owns the cookie-mode BrowserWindow + popup policy used by
+   * Play (cookie accounts).
    */
   ipcMain.handle('account:browserSignInOneClick', async (_, accountId: string) => {
     try {
       const snapshot = await captureTokenBackedOwaCookies(accountId);
-      clipboard.writeText(snapshot.extensionJson);
-      const targetUrl = 'https://outlook.office.com/mail/';
-      await shell.openExternal(targetUrl);
+      if (snapshot.quality === 'weak') {
+        throw new Error(
+          `Only helper cookies were captured for ${snapshot.account.email} (no primary auth markers). ` +
+          `Open Outlook (the play button) once first to populate the auth cookies, then retry.`
+        );
+      }
+      await openOwaWithCookieSession(accountId, snapshot.account, snapshot.netscape, 'owa');
       appendOutlookDebug(
-        `[BrowserSignIn] One-click for ${snapshot.account.email}: copied ${snapshot.cookies.length} cookies (strong=${snapshot.strongCount}) and opened ${targetUrl}`
+        `[BrowserSignIn] One-click for ${snapshot.account.email}: opened cookie window with ${snapshot.cookies.length} cookies (strong=${snapshot.strongCount})`
       );
       return {
         success: true as const,
@@ -3177,7 +3295,6 @@ function setupIpcHandlers() {
         count: snapshot.cookies.length,
         strongCount: snapshot.strongCount,
         quality: snapshot.quality,
-        targetUrl,
       };
     } catch (error: any) {
       const msg = error?.message || String(error);
