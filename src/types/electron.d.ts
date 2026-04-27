@@ -14,9 +14,11 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
-     * Capture this token account's current OWA session cookies in multiple
-     * formats. The `extensionJson` field is the Cookie-Editor /
-     * EditThisCookie compatible JSON payload.
+     * Capture this token account's current OWA session cookies in every
+     * supported format: Cookie-Editor / EditThisCookie JSON
+     * (`extensionJson`), Netscape file (`netscape`), raw `Cookie:` header
+     * (`header`), and a DevTools console snippet (`browserSnippet`) that
+     * signs the user in on paste + refresh.
      */
     exportOwaCookies: (
       accountId: string
@@ -29,15 +31,16 @@ export interface ElectronAPI {
           netscape: string;
           header: string;
           extensionJson: string;
+          browserSnippet: string;
           quality: 'strong' | 'weak';
         }
       | { success: false; error?: string }
     >;
     /**
-     * One-click browser sign-in: captures the account's cookies, copies the
-     * Cookie-Editor JSON to the clipboard, and opens outlook.office.com in
-     * the default browser. The user only has to click "Import" in their
-     * cookie-editor extension to be signed in.
+     * One-click "Sign in via browser": exchange the refresh token for OWA
+     * cookies and open `outlook.office.com/mail/inbox` in a Chromium window
+     * with those cookies already injected. The user lands directly on the
+     * inbox signed in — no password, MFA, or paste step.
      */
     browserSignInOneClick: (
       accountId: string
@@ -48,7 +51,6 @@ export interface ElectronAPI {
           count: number;
           strongCount: number;
           quality: 'strong' | 'weak';
-          targetUrl: string;
         }
       | { success: false; error?: string }
     >;
