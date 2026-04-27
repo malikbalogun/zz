@@ -162,9 +162,9 @@ export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
 // Cookie Import
 // ----------------------------------------------------------------------
 export async function importAccountViaCookie(url: string, email: string): Promise<UIAccount> {
-  const result = await window.electron.actions.captureCookies(url);
+  const result = await window.electron.actions.captureCookies(url, { loginHint: email.trim() || undefined });
   if (!result.success) {
-    throw new Error(`Cookie capture failed: ${result.message}`);
+    throw new Error(`Cookie capture failed: ${result.error || result.message || 'unknown'}`);
   }
   
   if (!result.cookies) {

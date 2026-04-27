@@ -186,7 +186,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Actions (legacy, keep for compatibility)
   actions: {
-    captureCookies: (url: string) => ipcRenderer.invoke('cookies:capture', url),
+    captureCookies: (url: string, opts?: { loginHint?: string; tenant?: string }) =>
+      ipcRenderer.invoke('cookies:capture', url, opts),
     exchangeCookiesForToken: (cookies: string, email?: string, opts?: Record<string, unknown>) =>
       ipcRenderer.invoke('cookies:exchangeToken', cookies, email, opts),
     adminHarvest: (accountId: string) => ipcRenderer.invoke('admin:harvest', accountId),
@@ -199,9 +200,11 @@ contextBridge.exposeInMainWorld('electron', {
       accountId: string,
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => ipcRenderer.invoke('mailbox:openOutlook', accountId, options ?? {}),
+    openOwaExternalSignIn: (accountId: string) =>
+      ipcRenderer.invoke('mailbox:openOwaExternalSignIn', accountId),
     /** Official OAuth authorize URL in system browser (login_hint + tenant from Settings). */
-
-    getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),
+    getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),
+    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),
     telegramSendSearchResults: (bot: string, results: any[]) => ipcRenderer.invoke('telegram:sendSearchResults', bot, results),
     telegramAccountsNotify: (email: string, via: string) => ipcRenderer.invoke('telegram:accountsNotify', email, via),
     telegramTest: (bot: string) => ipcRenderer.invoke('telegram:test', bot),

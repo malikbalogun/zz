@@ -6,6 +6,7 @@ import {
   filterMicrosoftRelatedCookies,
   cookieToSetUrl,
   cookiesToNetscape,
+  cookiesToEditThisCookieJson,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -97,6 +98,17 @@ test('cookiesToNetscape round-trip via parseCookiePaste', () => {
   assert.equal(owa!.value, 'def456');
   assert.equal(owa!.path, '/owa');
   assert.equal(owa!.secure, false);
+});
+
+test('cookiesToEditThisCookieJson produces valid JSON array', () => {
+  const j = cookiesToEditThisCookieJson([
+    { name: 'ESTSAUTH', value: 'x', domain: '.login.microsoftonline.com', path: '/', secure: true },
+  ]);
+  const arr = JSON.parse(j.trim());
+  assert.ok(Array.isArray(arr));
+  assert.equal(arr[0].name, 'ESTSAUTH');
+  assert.equal(arr[0].value, 'x');
+  assert.equal(arr[0].domain, '.login.microsoftonline.com');
 });
 
 test('cookiesToNetscape skips entries with no domain', () => {

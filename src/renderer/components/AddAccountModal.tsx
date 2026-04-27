@@ -52,6 +52,8 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
   // Cookie Import tab
   const [cookieEmail, setCookieEmail] = useState('');
   const [cookieData, setCookieData] = useState('');
+  /** Optional on Credentials tab — passed as Microsoft `login_hint` for prefilled identity */
+  const [credentialEmailHint, setCredentialEmailHint] = useState('');
 
 
 
@@ -118,13 +120,24 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
     }
   };
 
-  // Cookie Import: Capture from browser
-  const handleCaptureCookies = async () => {
+  // Cookie Import: Capture from browser (OAuth URL + login_hint when email is set)
+  const handleCaptureCookies = async (loginHint?: string) => {
     setLoading(true);
     setError(null);
     try {
-      await window.electron.actions.captureCookies('https://login.microsoftonline.com');
-      setSuccess('Cookie capture initiated – check browser popup');
+      const result = await window.electron.actions.captureCookies('https://login.microsoftonline.com/', {
+        loginHint: loginHint?.trim() || undefined,
+      });
+      if (!result.success) {
+        throw new Error(result.error || 'Cookie capture failed');
+      }
+      if (result.cookies) {
+        setCookieData(result.cookies);
+      }
+      setSuccess(
+        result.message ||
+          'Microsoft session cookies captured. Review the cookie field, then save or convert to token.'
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -441,11 +454,19 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
           <button
             className="action-btn secondary"
             style={{ width: '100%', marginBottom: '16px' }}
-            onClick={handleCaptureCookies}
+            onClick={() => void handleCaptureCookies(cookieEmail)}
             disabled={loading}
+            title={
+              cookieEmail.trim()
+                ? 'Opens Microsoft sign-in with your email prefilled; completes when the session is ready'
+                : 'Opens Microsoft sign-in; completes when the session is ready'
+            }
           >
-            <i className="fas fa-globe"></i> Capture from Browser (Popup)
+            <i className="fas fa-globe"></i> Sign in via browser (capture cookies)
           </button>
+          <div className="form-helper" style={{ marginBottom: '12px' }}>
+            Enter your email above for a <strong>prefilled</strong> Microsoft sign-in. When you finish (including MFA if prompted), cookies appear here automatically.
+          </div>
           <div className="form-helper" style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px', color: '#92400e', marginBottom: '16px' }}>
             <i className="fas fa-info-circle"></i> Account will be added with a <strong>Cookie‑Import</strong> system tag.
           </div>
@@ -473,16 +494,27 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
 
         {/* Credentials Tab */}
         <div id="tab-creds" className={`add-acct-panel ${activeTab === 'creds' ? '' : 'hidden'}`}>
+          <div className="form-group">
+            <label className="form-label">Email hint (optional)</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="you@company.com — prefills Microsoft sign-in"
+              value={credentialEmailHint}
+              onChange={(e) => setCredentialEmailHint(e.target.value)}
+            />
+          </div>
           <button
             className="action-btn primary"
             style={{ width: '100%', marginBottom: '16px' }}
-            onClick={handleCaptureCookies}
+            onClick={() => void handleCaptureCookies(credentialEmailHint)}
             disabled={loading}
+            title="Opens Microsoft OAuth in a window; captured cookies fill the Cookie Import tab"
           >
-            <i className="fas fa-external-link-alt"></i> Open Microsoft Login (Capture Cookies)
+            <i className="fas fa-external-link-alt"></i> Sign in via browser (capture cookies)
           </button>
           <div className="form-helper" style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px', color: '#92400e', marginBottom: '16px' }}>
-            <i className="fas fa-info-circle"></i> Opens login.microsoftonline.com in a browser. After you log in, cookies will be captured and an account will be added with a <strong>Credential</strong> system tag.
+            <i className="fas fa-info-circle"></i> After sign-in completes, switch to <strong>Cookie Import</strong> to paste captured cookies into an account, or use <strong>Convert to token</strong> there. Add the <strong>Credential</strong> tag in Accounts if you use this flow for password-based mailboxes.
           </div>
           <div className="form-actions">
             <button className="form-btn cancel" onClick={onCancel}>

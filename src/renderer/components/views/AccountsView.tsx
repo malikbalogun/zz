@@ -2,6 +2,7 @@ import { useState, useEffect, type FC } from 'react';
 import {
   refreshAccountToken,
   openOutlookWeb,
+  openOwaExternalBrowserSession,
   openPanelAdminDashboard,
   harvestAssociatedAccounts,
   pullOwaCookiesFromPanel,
@@ -73,7 +74,7 @@ const AccountsView: FC<AccountsViewProps> = ({
       // opening
       const rect = button.getBoundingClientRect();
       const dropdownWidth = 180;
-      const dropdownHeight = 300; // approximate
+        const dropdownHeight = 380; // approximate (token row actions)
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
       let left = rect.left;
@@ -332,7 +333,7 @@ const AccountsView: FC<AccountsViewProps> = ({
         ],
       });
       if (saved.ok) {
-        const quality = result.quality || 'unknown';
+        const quality = result.quality || (result.weak ? 'weak' : 'strong');
         const weakHint =
           quality === 'weak'
             ? '\n\nWarning: export appears weak (missing primary auth cookies). It may not restore a full browser session.'
@@ -341,6 +342,60 @@ const AccountsView: FC<AccountsViewProps> = ({
       }
     } catch (error) {
       alert(`Export OWA cookies failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExportOwaCookiesJson = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const account = accounts.find(a => a.id === accountId);
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success || !result.json) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (account?.email || result.email || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const saved = await window.electron.files.saveTextWithDialog({
+        defaultFilename: `${safeEmail}-cookies-${new Date().toISOString().slice(0, 10)}.json`,
+        content: result.json,
+        filters: [
+          { name: 'JSON', extensions: ['json'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (saved.ok) {
+        alert(`Exported ${result.count} cookies as JSON (EditThisCookie-compatible) to ${saved.path}`);
+      }
+    } catch (error) {
+      alert(`Export OWA cookies (JSON) failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopyOwaCookiesJson = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success || !result.json) {
+        throw new Error(result.error || 'Export failed');
+      }
+      await navigator.clipboard.writeText(result.json);
+      alert(`Copied ${result.count} cookies as JSON to the clipboard (import in EditThisCookie or similar).`);
+    } catch (error) {
+      alert(`Copy OWA cookies (JSON) failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenOwaInSystemBrowser = async (accountId: string) => {
+    setLoading(true);
+    try {
+      await openOwaExternalBrowserSession(accountId);
+    } catch (error) {
+      alert(`Open in browser failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -813,15 +868,25 @@ const AccountsView: FC<AccountsViewProps> = ({
                     onChange={() => toggleAccountSelection(account.id)}
                   />
                 </div>
-                <div className="act-play">
+                <div className="act-play" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   <button
                     className="icon-btn"
-                    title="Open Outlook on the web (OWA) for this account"
+                    title="Open Outlook on the web (OWA) in-app for this account"
                     onClick={() => handleOpenOutlookWeb(account.id)}
                     disabled={loading}
                   >
                     <i className="fas fa-play"></i>
                   </button>
+                  {account.auth?.type === 'token' && (
+                    <button
+                      className="icon-btn"
+                      title="Open Microsoft 365 in your default browser with this mailbox prefilled (complete MFA there if required)"
+                      onClick={() => void handleOpenOwaInSystemBrowser(account.id)}
+                      disabled={loading}
+                    >
+                      <i className="fas fa-external-link-alt"></i>
+                    </button>
+                  )}
                 </div>
                 <div className="act-account">
                   <div className="avatar" style={{ background: account.avatarColor || `linear-gradient(135deg, #3b82f6, #2563eb)` }}>
@@ -982,6 +1047,32 @@ const AccountsView: FC<AccountsViewProps> = ({
                           title="Token \u2192 Cookies. Save Microsoft session cookies in Netscape format (round-trips with Add Account \u2192 Cookie)."
                         >
                           <i className="fas fa-cookie"></i> Export OWA cookies (Netscape)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleExportOwaCookiesJson(account.id);
+                          }}
+                          title="JSON array for EditThisCookie and similar extensions"
+                        >
+                          <i className="fas fa-file-code"></i> Export OWA cookies (JSON)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleCopyOwaCookiesJson(account.id);
+                          }}
+                          title="Copy JSON to clipboard for EditThisCookie import"
+                        >
+                          <i className="fas fa-clipboard"></i> Copy OWA cookies (JSON)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

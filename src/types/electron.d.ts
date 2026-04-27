@@ -24,8 +24,13 @@ export interface ElectronAPI {
       success: boolean;
       count?: number;
       strongAuthCount?: number;
+      strongCount?: number;
       email?: string;
       netscape?: string;
+      /** EditThisCookie-style JSON array for browser extensions */
+      json?: string;
+      quality?: 'strong' | 'weak';
+      weak?: boolean;
       error?: string;
     }>;
     /**
@@ -155,7 +160,10 @@ export interface ElectronAPI {
     pollDeviceCode: (deviceCode: string, clientId?: string, authority?: string) => Promise<any>;
   };
   actions: {
-    captureCookies: (url: string) => Promise<{ success: boolean; cookies?: string; message?: string }>;
+    captureCookies: (
+      url: string,
+      opts?: { loginHint?: string; tenant?: string }
+    ) => Promise<{ success: boolean; cookies?: string; message?: string; error?: string }>;
     exchangeCookiesForToken: (
       cookies: string,
       email?: string,
