@@ -13,6 +13,23 @@ export interface ElectronAPI {
     deleteBulk: (ids: string[]) => Promise<unknown>;
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
+    exportOwaCookieJson: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      count?: number;
+      email?: string;
+      json?: string;
+      error?: string;
+    }>;
+    copyOwaCookieJson: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      count?: number;
+      email?: string;
+      error?: string;
+    }>;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
@@ -157,6 +174,10 @@ export interface ElectronAPI {
       options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
     ) => Promise<any>;
     openOwaExternalSignIn: (accountId: string) => Promise<{ success: true; opened: boolean } | { success: false; error?: string }>;
+    exportOwaCookieJson: (
+      accountId: string,
+      action?: 'copy' | 'save'
+    ) => Promise<{ success: boolean; count?: number; email?: string; json?: string; path?: string; error?: string }>;
     /** Returns the list of accountIds for which Outlook BrowserWindows are currently open. */
     getOpenOutlookWindows: () => Promise<string[]>;
     telegramSendAlert: (bot: string, message: string) => Promise<{ success: boolean; error?: string }>;

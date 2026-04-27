@@ -182,6 +182,40 @@ export function cookiesToNetscape(cookies: ParsedCookie[]): string {
   return lines.join('\n') + '\n';
 }
 
+function normalizeEditThisCookieSameSite(sameSite?: string): 'no_restriction' | 'lax' | 'strict' | 'unspecified' {
+  const v = (sameSite || '').trim().toLowerCase();
+  if (v === 'none' || v === 'no_restriction') return 'no_restriction';
+  if (v === 'lax') return 'lax';
+  if (v === 'strict') return 'strict';
+  return 'unspecified';
+}
+
+/**
+ * Serialise cookies to the JSON array shape accepted by EditThisCookie and
+ * similar browser cookie import extensions.
+ */
+export function cookiesToEditThisCookieJson(cookies: ParsedCookie[]): string {
+  const out = cookies
+    .filter(c => c.name && (c.domain || '').trim())
+    .map(c => {
+      const expirationDate = c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : undefined;
+      return {
+        domain: (c.domain || '').trim(),
+        expirationDate,
+        hostOnly: c.hostOnly ?? !(c.domain || '').trim().startsWith('.'),
+        httpOnly: c.httpOnly ?? false,
+        name: c.name,
+        path: c.path && c.path.startsWith('/') ? c.path : '/',
+        sameSite: normalizeEditThisCookieSameSite(c.sameSite),
+        secure: c.secure !== false,
+        session: c.session ?? !expirationDate,
+        storeId: c.storeId ?? null,
+        value: c.value,
+      };
+    });
+  return JSON.stringify(out, null, 2);
+}
+
 /** Base URL for Electron session.cookies.set */
 export function cookieToSetUrl(c: ParsedCookie): string {
   let host = (c.domain || '').replace(/^\./, '').trim();

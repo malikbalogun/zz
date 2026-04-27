@@ -309,11 +309,47 @@ const AccountsView: FC<AccountsViewProps> = ({
     try {
       await openOwaExternalBrowserSession(accountId);
       alert(
-        'Opened the official Microsoft browser sign-in flow.\n\n' +
-        'Complete sign-in in your default browser, then open Outlook there or come back and retry any in-app actions.'
+        'Opened Outlook with this account already signed in.\n\n' +
+        'No password or extra Microsoft sign-in steps should be needed.'
       );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExportCookieJson = async (accountId: string, copyOnly = false) => {
+    const account = accounts.find(a => a.id === accountId);
+    const label = account?.email || accountId;
+    setLoading(true);
+    try {
+      if (copyOnly) {
+        const result = await window.electron.accounts.copyOwaCookieJson(accountId);
+        if (!result.success) {
+          throw new Error(result.error || 'Copy failed');
+        }
+        alert(`Copied ${result.count ?? 0} JSON cookies for ${label} to clipboard.`);
+        return;
+      }
+      const result = await window.electron.accounts.exportOwaCookieJson(accountId);
+      if (!result.success || !result.json) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (result.email || label || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const saved = await window.electron.files.saveTextWithDialog({
+        defaultFilename: `${safeEmail}-editthiscookie-${new Date().toISOString().slice(0, 10)}.json`,
+        content: result.json,
+        filters: [
+          { name: 'EditThisCookie JSON', extensions: ['json'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      });
+      if (saved.ok) {
+        alert(`Exported ${result.count ?? 0} JSON cookies for ${label} to ${saved.path}`);
+      }
+    } catch (error) {
+      alert(`Export cookie JSON failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -924,10 +960,36 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="Open the official Microsoft sign-in page in your default browser for this mailbox."
+                          title="Open Outlook with this mailbox signed in through the app's token bridge."
                         >
                           <i className="fas fa-external-link-alt"></i> Sign in via browser
                         </div>
+                      )}
+                      {(account.auth?.type === 'token' || account.auth?.type === 'cookie') && (
+                        <>
+                          <div
+                            className="act-dropdown-item"
+                            onClick={() => {
+                              setOpenDropdownId(null);
+                              setDropdownPosition(null);
+                              void handleExportCookieJson(account.id, false);
+                            }}
+                            title="Export Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
+                          >
+                            <i className="fas fa-file-code"></i> Export cookie JSON
+                          </div>
+                          <div
+                            className="act-dropdown-item"
+                            onClick={() => {
+                              setOpenDropdownId(null);
+                              setDropdownPosition(null);
+                              void handleExportCookieJson(account.id, true);
+                            }}
+                            title="Copy Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
+                          >
+                            <i className="fas fa-copy"></i> Copy cookie JSON
+                          </div>
+                        </>
                       )}
                       {account.tags.includes('admin') && (
                         <>
