@@ -15,6 +15,7 @@ import AddAccountModal, { type AddAccountInitialTab } from '../AddAccountModal';
 import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
+import ExportOwaCookiesModal from '../ExportOwaCookiesModal';
 import ReAuthModal from '../ReAuthModal';
 import GrantAdminScopeModal from '../GrantAdminScopeModal';
 
@@ -42,6 +43,8 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [showEditTagsModal, setShowEditTagsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  /** Account whose OWA cookies are being exported (modal open). */
+  const [exportCookiesAccountId, setExportCookiesAccountId] = useState<string | null>(null);
   const [activeAccount, setActiveAccount] = useState<string | null>(null); // for single‑account actions
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [dropdownPosition, setDropdownPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
@@ -308,15 +311,15 @@ const AccountsView: FC<AccountsViewProps> = ({
     setLoading(true);
     try {
       await openOwaExternalBrowserSession(accountId);
-      alert(
-        'Opened the official Microsoft browser sign-in flow.\n\n' +
-        'Complete sign-in in your default browser, then open Outlook there or come back and retry any in-app actions.'
-      );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleExportOwaCookies = (accountId: string) => {
+    setExportCookiesAccountId(accountId);
   };
 
   // Panel admin mailbox page (separate from OWA)
@@ -929,6 +932,19 @@ const AccountsView: FC<AccountsViewProps> = ({
                           <i className="fas fa-external-link-alt"></i> Sign in via browser
                         </div>
                       )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            handleExportOwaCookies(account.id);
+                          }}
+                          title="Export browser-importable cookie JSON (EditThisCookie/Cookie-Editor) and Netscape text."
+                        >
+                          <i className="fas fa-file-code"></i> Export cookies JSON
+                        </div>
+                      )}
                       {account.tags.includes('admin') && (
                         <>
                           <div
@@ -1073,6 +1089,19 @@ const AccountsView: FC<AccountsViewProps> = ({
           }}
         />
       )}
+      {exportCookiesAccountId && (() => {
+        const target = accounts.find(a => a.id === exportCookiesAccountId);
+        if (!target) {
+          return null;
+        }
+        return (
+          <ExportOwaCookiesModal
+            accountId={target.id}
+            emailHint={target.email}
+            onClose={() => setExportCookiesAccountId(null)}
+          />
+        );
+      })()}
       {reAuthAccountId && (() => {
         const target = accounts.find(a => a.id === reAuthAccountId);
         if (!target) {

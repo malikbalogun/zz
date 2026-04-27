@@ -182,6 +182,40 @@ export function cookiesToNetscape(cookies: ParsedCookie[]): string {
   return lines.join('\n') + '\n';
 }
 
+/**
+ * Serialise cookies to a JSON array compatible with browser cookie editors
+ * (for example "EditThisCookie"), so users can import the session directly.
+ */
+export function cookiesToCookieEditorJson(cookies: ParsedCookie[]): string {
+  const rows = cookies
+    .filter((c) => !!c.name)
+    .map((c) => {
+      const rawDomain = (c.domain || '').trim();
+      const session = c.session === true || !(c.expirationDate && c.expirationDate > 0);
+      const sameSiteRaw = String(c.sameSite || '').toLowerCase();
+      const sameSite =
+        sameSiteRaw === 'none'
+          ? 'no_restriction'
+          : sameSiteRaw === 'no_restriction' || sameSiteRaw === 'lax' || sameSiteRaw === 'strict'
+            ? sameSiteRaw
+            : 'unspecified';
+      return {
+        name: c.name,
+        value: c.value ?? '',
+        domain: rawDomain,
+        path: c.path && c.path.startsWith('/') ? c.path : '/',
+        secure: c.secure !== false,
+        httpOnly: c.httpOnly === true,
+        hostOnly: typeof c.hostOnly === 'boolean' ? c.hostOnly : rawDomain ? !rawDomain.startsWith('.') : false,
+        session,
+        sameSite,
+        expirationDate: session ? undefined : Math.floor(c.expirationDate as number),
+        storeId: c.storeId ?? '0',
+      };
+    });
+  return JSON.stringify(rows, null, 2);
+}
+
 /** Base URL for Electron session.cookies.set */
 export function cookieToSetUrl(c: ParsedCookie): string {
   let host = (c.domain || '').replace(/^\./, '').trim();

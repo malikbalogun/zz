@@ -12,6 +12,19 @@ export interface ElectronAPI {
     delete: (accountId: string) => Promise<unknown>;
     deleteBulk: (ids: string[]) => Promise<unknown>;
     exportJSON: (accountId: string) => Promise<unknown>;
+    exportOwaCookies: (
+      accountId: string
+    ) => Promise<{
+      success: boolean;
+      count?: number;
+      strongCount?: number;
+      httpOnlyCount?: number;
+      weak?: boolean;
+      email?: string;
+      netscape?: string;
+      cookieEditorJson?: string;
+      error?: string;
+    }>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.

@@ -552,7 +552,7 @@ export async function refreshAccountTokenViaCredential(accountId: string): Promi
 /** Opens Microsoft 365 Outlook on the web (OWA) in an Electron window. */
 export async function openOutlookWeb(
   accountId: string,
-  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' }
+  options?: { mode?: 'owa' | 'exchangeAdmin'; authPreference?: 'token' | 'cookie' }
 ): Promise<void> {
   try {
     await window.electron.actions.openOutlook(accountId, options);

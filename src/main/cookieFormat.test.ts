@@ -6,6 +6,7 @@ import {
   filterMicrosoftRelatedCookies,
   cookieToSetUrl,
   cookiesToNetscape,
+  cookiesToCookieEditorJson,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -107,4 +108,27 @@ test('cookiesToNetscape skips entries with no domain', () => {
   const dataLines = text.split('\n').filter(l => l && !l.startsWith('#'));
   assert.equal(dataLines.length, 1);
   assert.ok(dataLines[0].endsWith('\tok\tv'));
+});
+
+test('cookiesToCookieEditorJson emits extension-friendly fields', () => {
+  const json = cookiesToCookieEditorJson([
+    {
+      name: 'ESTSAUTH',
+      value: 'abc123',
+      domain: '.login.microsoftonline.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+      expirationDate: 1893456000,
+    },
+  ]);
+  const rows = JSON.parse(json);
+  assert.equal(Array.isArray(rows), true);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'ESTSAUTH');
+  assert.equal(rows[0].httpOnly, true);
+  assert.equal(rows[0].sameSite, 'no_restriction');
+  assert.equal(rows[0].secure, true);
+  assert.equal(rows[0].storeId, '0');
 });

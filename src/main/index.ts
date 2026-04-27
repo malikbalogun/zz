@@ -5,7 +5,13 @@ import path from 'path';
 import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
-import { parseCookiePaste, filterMicrosoftRelatedCookies } from '../shared/cookieFormat';
+import {
+  parseCookiePaste,
+  filterMicrosoftRelatedCookies,
+  cookiesToNetscape,
+  cookiesToCookieEditorJson,
+  type ParsedCookie,
+} from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
 
 // --------------------------------------------------------------------------
@@ -363,7 +369,44 @@ function getMicrosoftCookiePasteFromAccount(account: any): string | null {
     const raw = decryptStoredCookiePayload(enc).trim();
     return raw || null;
   }
+  if (auth.type === 'token' && typeof auth.owaCookiesEncrypted === 'string' && auth.owaCookiesEncrypted.trim()) {
+    const raw = decryptStoredCookiePayload(auth.owaCookiesEncrypted.trim()).trim();
+    return raw || null;
+  }
   return null;
+}
+
+// Session cookie sets that only include helper cookies are not enough for
+// durable browser session imports. We require at least one strong auth cookie.
+const STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS: RegExp[] = [
+  /^ESTSAUTH/i,
+  /^ESTSSC$/i,
+  /^OpenIdConnect\.(token|id_token|nonce)/i,
+  /^X-OWA-CANARY$/i,
+  /^Canary$/i,
+  /^rtFa$/i,
+  /^FedAuth$/i,
+  /^RPSAuth$/i,
+  /^MSP(Auth|Requ|OK|Prof|CID|TC)$/i,
+  /^esctx$/i,
+];
+
+function hasStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): boolean {
+  return cookies.some((c) => {
+    const name = String(c.name || '').trim();
+    if (!name) return false;
+    return STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name));
+  });
+}
+
+function countStrongMicrosoftSessionCookies(cookies: ParsedCookie[]): number {
+  let n = 0;
+  for (const c of cookies) {
+    const name = String(c.name || '').trim();
+    if (!name) continue;
+    if (STRONG_MICROSOFT_AUTH_COOKIE_PATTERNS.some((re) => re.test(name))) n++;
+  }
+  return n;
 }
 
 /**
@@ -2391,18 +2434,34 @@ function setupIpcHandlers() {
       const acc = accountsList.find((a: any) => a.id === accountId);
       if (!acc?.email) throw new Error('Account not found');
 
-      const useCookiesPath = acc.auth?.type === 'cookie' || options?.authPreference === 'cookie';
+      const explicitToken = options?.authPreference === 'token';
+      const useCookiesPath =
+        !explicitToken &&
+        (acc.auth?.type === 'cookie' ||
+          options?.authPreference === 'cookie' ||
+          (acc.auth?.type === 'token' && acc.auth?.owaMailboxMode === 'cookie'));
 
       if (useCookiesPath) {
         const paste = getMicrosoftCookiePasteFromAccount(acc);
         if (!paste) {
           throw new Error(
-            'OWA cookie mode needs stored Microsoft session cookies. Add cookies to this account with Add Account -> Cookie, or use a token account for OAuth.'
+            'OWA cookie mode needs stored Microsoft session cookies. On Accounts, use "Pull OWA cookies from panel" (your panel must implement GET /api/mailbox/{email}/export-cookies), or add cookies to this account, or switch OWA mode back to OAuth tokens.'
           );
         }
-        await openOwaWithCookieSession(accountId, acc, paste, mode);
-        appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
-        return { success: true as const, session: 'cookie' as const };
+        // Token accounts can carry stale/partial cookie exports. If the stored
+        // payload lacks strong auth-cookie markers, avoid cookie mode and fall
+        // back to the token path for a stable login.
+        const parsed = filterMicrosoftRelatedCookies(parseCookiePaste(paste));
+        const strong = hasStrongMicrosoftSessionCookies(parsed);
+        if (acc.auth?.type === 'token' && !strong) {
+          appendOutlookDebug(
+            `[OutlookCookie] Stored cookies for ${acc.email} look weak (no auth markers); falling back to token mode`
+          );
+        } else {
+          await openOwaWithCookieSession(accountId, acc, paste, mode);
+          appendOutlookDebug(`[OutlookCookie] Window opened (cookie session) account=${accountId}`);
+          return { success: true as const, session: 'cookie' as const };
+        }
       }
 
       const bundle = await loadOwaTokenBundle(accountId);
@@ -2853,6 +2912,169 @@ function setupIpcHandlers() {
   });
 
   /**
+   * Export Microsoft session cookies from this account's OWA partition.
+   * Returns both Netscape text and cookie-editor JSON so users can import
+   * into extensions like EditThisCookie directly.
+   */
+  ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') {
+        throw new Error('Cookie export only applies to token-based Microsoft accounts.');
+      }
+
+      // Must match the partition used by mailbox:openOutlook (token path) so
+      // we read cookies from the same jar OWA actually populated.
+      const partitionName = `persist:outlook-${accountId}`;
+      const owaSession = session.fromPartition(partitionName);
+
+      const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
+        const all = await owaSession.cookies.get({});
+        const parsed: ParsedCookie[] = all.map((c) => {
+          const ssRaw = (c as { sameSite?: string }).sameSite || '';
+          let sameSite: ParsedCookie['sameSite'] | undefined;
+          if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
+          else if (ssRaw === 'lax') sameSite = 'lax';
+          else if (ssRaw === 'strict') sameSite = 'strict';
+          else if (ssRaw === 'unspecified') sameSite = undefined;
+          return {
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: c.secure !== false,
+            expirationDate: c.expirationDate,
+            httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
+            sameSite,
+          };
+        });
+        return filterMicrosoftRelatedCookies(parsed);
+      };
+
+      let msCookies = await readMicrosoftCookies();
+
+      if (msCookies.length === 0) {
+        // First fallback: if this token account already has a stored cookie
+        // payload (pulled/imported earlier), use that directly.
+        const storedPaste = getMicrosoftCookiePasteFromAccount(account);
+        if (storedPaste) {
+          const parsedStored = filterMicrosoftRelatedCookies(parseCookiePaste(storedPaste));
+          if (parsedStored.length > 0) {
+            appendOutlookDebug(
+              `[ExportCookies] Using stored payload fallback for ${account.email} (${parsedStored.length} cookies)`
+            );
+            msCookies = parsedStored;
+          }
+        }
+      }
+
+      if (msCookies.length === 0) {
+        // Prime the partition: ensure a fresh token bundle is staged and load
+        // OWA in a hidden BrowserWindow long enough for the auth cookies to
+        // settle. Capped at PRIME_TIMEOUT_MS to avoid hanging the IPC.
+        appendOutlookDebug(`[ExportCookies] Partition empty, priming for ${accountId}`);
+        try {
+          const bundle = await loadOwaTokenBundle(accountId);
+          applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
+          installOutlookPartitionRequestHooks(owaSession);
+        } catch (err) {
+          throw new Error(
+            `Could not stage tokens for ${account.email}: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+
+        const primer = new BrowserWindow({
+          width: 800,
+          height: 600,
+          show: false,
+          webPreferences: {
+            partition: partitionName,
+            contextIsolation: false,
+            nodeIntegration: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload-mailbox.js'),
+          },
+        });
+        windowToAccountMap.set(primer.webContents.id, accountId);
+
+        const PRIME_TIMEOUT_MS = 12000;
+        try {
+          await new Promise<void>((resolve) => {
+            const settled = { done: false };
+            const finish = () => {
+              if (settled.done) return;
+              settled.done = true;
+              clearInterval(pollTimer);
+              clearTimeout(hardTimeout);
+              resolve();
+            };
+            const pollTimer = setInterval(async () => {
+              try {
+                const probe = await readMicrosoftCookies();
+                if (probe.length > 0) finish();
+              } catch {
+                /* keep polling */
+              }
+            }, 750);
+            const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
+            primer
+              .loadURL('https://outlook.office.com/mail/inbox?locale=en-US')
+              .catch((loadErr) => {
+                appendOutlookDebug(
+                  `[ExportCookies] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
+                );
+              });
+          });
+        } finally {
+          windowToAccountMap.delete(primer.webContents.id);
+          if (!primer.isDestroyed()) primer.destroy();
+        }
+
+        msCookies = await readMicrosoftCookies();
+      }
+
+      if (msCookies.length === 0) {
+        throw new Error(
+          `No Microsoft cookies could be captured for ${account.email}. Try opening Outlook (the play button) once first; the session needs to settle before cookies can be exported.`
+        );
+      }
+
+      if (!hasStrongMicrosoftSessionCookies(msCookies)) {
+        throw new Error(
+          `Only helper cookies were captured for ${account.email} (no strong Microsoft auth cookies yet). Open Outlook for this account, complete the in-window Sign in flow once, then export again.`
+        );
+      }
+
+      const strongAfter = countStrongMicrosoftSessionCookies(msCookies);
+      const httpOnlyCount = msCookies.filter((c) => c.httpOnly === true).length;
+
+      const netscape = cookiesToNetscape(msCookies);
+      const cookieEditorJson = cookiesToCookieEditorJson(msCookies);
+
+      appendOutlookDebug(
+        `[ExportCookies] Exported ${msCookies.length} cookies for ${account.email} (strong=${strongAfter}, httpOnly=${httpOnlyCount})`
+      );
+      return {
+        success: true,
+        count: msCookies.length,
+        strongCount: strongAfter,
+        httpOnlyCount,
+        weak: strongAfter === 0,
+        email: account.email,
+        netscape,
+        cookieEditorJson,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[ExportCookies] Failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+
+  /**
    * Re-apply the stored cookie paste for a cookie-typed account to its OWA
    * partition. Useful as a manual "did the cookies actually take?" check.
    *
@@ -2869,7 +3091,7 @@ function setupIpcHandlers() {
       const paste = getMicrosoftCookiePasteFromAccount(account);
       if (!paste) {
         throw new Error(
-          'No stored cookies for this account. Add cookies in Add Account -> Cookie first.'
+          'No stored cookies for this account. For cookie accounts add cookies in Add Account → Cookie. For token accounts pull cookies from the panel first.'
         );
       }
 
@@ -2880,7 +3102,13 @@ function setupIpcHandlers() {
         throw new Error('Stored cookie payload could not be parsed.');
       }
 
-      const partitionName = `persist:outlook-cookie-${accountId}`;
+      // Cookie accounts use the cookie partition; token accounts with
+      // owaCookiesEncrypted use the regular OWA partition. Re-apply to whichever
+      // is active so the next "Open Outlook" picks them up.
+      const isCookieAccount = account.auth?.type === 'cookie';
+      const partitionName = isCookieAccount
+        ? `persist:outlook-cookie-${accountId}`
+        : `persist:outlook-${accountId}`;
       const owaSession = session.fromPartition(partitionName);
 
       const applied = await applyParsedCookiesToSession(owaSession, toApply);
@@ -3863,6 +4091,8 @@ function setupIpcHandlers() {
       url.searchParams.set('redirect_uri', redirectUri);
       url.searchParams.set('response_mode', 'query');
       url.searchParams.set('scope', scopes.join(' '));
+      // Prefer direct continuation for this account, but still allow Microsoft
+      // to fall back to interactive auth when MFA/CA/consent is required.
       url.searchParams.set('prompt', 'select_account');
       url.searchParams.set('login_hint', account.email);
 
