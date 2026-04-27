@@ -210,6 +210,8 @@ contextBridge.exposeInMainWorld('electron', {
     ) => ipcRenderer.invoke('mailbox:openOutlook', accountId, options ?? {}),
     /** Official OAuth authorize URL in system browser (login_hint + tenant from Settings). */
     openOwaExternalSignIn: (accountId: string) => ipcRenderer.invoke('owa:openExternalSignIn', accountId),
+    /** Open Outlook on the web in the user's default OS browser with email pre-filled. */
+    openOwaInDefaultBrowser: (accountId: string) => ipcRenderer.invoke('owa:openInDefaultBrowser', accountId),
 
     getOpenOutlookWindows: () => ipcRenderer.invoke('mailbox:getOpenOutlookWindows'),    telegramSendAlert: (bot: string, message: string) => ipcRenderer.invoke('telegram:sendAlert', bot, message),
     telegramSendSearchResults: (bot: string, results: any[]) => ipcRenderer.invoke('telegram:sendSearchResults', bot, results),

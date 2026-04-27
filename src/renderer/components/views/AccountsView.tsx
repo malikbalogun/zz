@@ -305,23 +305,41 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  // True 1-click "Sign in via browser": opens the inbox in an in-app
+  // True 1-click "Sign in (in-app browser)": opens the inbox in an in-app
   // Chromium window using the same engine Play uses (token-mode OWA window
   // with refresh-token bundle + Bearer header injection + MSAL cache + the
   // DefaultAnchorMailbox cookies). The user lands directly on the inbox
   // signed in — no password, MFA, or paste step.
   //
-  // We deliberately use the proven Play engine instead of any
-  // cookies-only path: OWA's session cookies (X-OWA-CANARY, etc.) only
-  // authenticate when paired with the Bearer header the partition's
-  // webRequest hook injects on every outbound request. Without that hook
-  // OWA has no AAD identity and bounces straight to the sign-in page.
+  // We deliberately use the proven Play engine instead of any cookies-only
+  // path: OWA's session cookies (X-OWA-CANARY, etc.) only authenticate when
+  // paired with the Bearer header the partition's webRequest hook injects
+  // on every outbound request, and AAD itself never gives ESTSAUTH cookies
+  // out for a refresh-token exchange. Without the hook OWA bounces straight
+  // to login.
   const handleBrowserSignIn = async (accountId: string) => {
     setLoading(true);
     try {
       await openOutlookWeb(accountId, { authPreference: 'token' });
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Open Outlook in the user's *default OS browser* (Chrome / Safari /
+  // Firefox / Edge) with the email pre-filled via login_hint. This cannot
+  // be password-less because Microsoft refuses to issue session cookies
+  // outside of an interactive sign-in, but it saves the "type your email"
+  // step and inherits any existing AAD session the user already has there.
+  const handleOpenInDefaultBrowser = async (accountId: string) => {
+    setLoading(true);
+    try {
+      const r = await window.electron.actions.openOwaInDefaultBrowser(accountId);
+      if (!r.success) throw new Error(r.error || 'Could not launch default browser');
+    } catch (error) {
+      alert(`Open in default browser failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -940,9 +958,22 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="Open Outlook on the web for this account in a Chromium window already signed in via the stored refresh token (no password, MFA, or paste step)."
+                          title="Open Outlook on the web for this account in an in-app Chromium window already signed in via the stored refresh token (no password, MFA, or paste step). This is the only true password-less path; Microsoft does not issue AAD session cookies for refresh-token exchange so a real OS browser cannot be auto-signed-in."
                         >
-                          <i className="fas fa-external-link-alt"></i> Sign in via browser (1-click)
+                          <i className="fas fa-window-maximize"></i> Sign in (in-app browser, 1-click)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleOpenInDefaultBrowser(account.id);
+                          }}
+                          title="Open Outlook in your default OS browser (Chrome / Safari / Firefox / Edge) with the email pre-filled. You will still be prompted for the password unless your browser already has an AAD session — Microsoft does not allow refresh-token exchange in third-party browsers."
+                        >
+                          <i className="fas fa-external-link-alt"></i> Open in default browser
                         </div>
                       )}
                       {account.auth?.type === 'token' && (

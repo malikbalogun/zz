@@ -4482,6 +4482,34 @@ function setupIpcHandlers() {
   // Back-compat alias for older renderer builds / branches.
   ipcMain.handle('openOwaExternalSignIn', handleOpenOwaExternalSignIn);
 
+  /**
+   * Open Outlook on the web in the user's *default OS browser* (Chrome /
+   * Safari / Firefox / Edge — whatever is registered as the system browser),
+   * with the email pre-filled via `login_hint` so the user only has to
+   * complete the password / MFA step. We cannot exchange a refresh token
+   * for AAD session cookies in someone else's browser, so a true
+   * password-less land-in-inbox path requires using the in-app window.
+   */
+  ipcMain.handle('owa:openInDefaultBrowser', async (_, accountId: string) => {
+    try {
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+      // Outlook on the web honours `login_hint` on the OWA bootstrap URL,
+      // so the user lands on the AAD password page with their email already
+      // populated. If they're already signed into AAD in their browser
+      // (different tenant or persistent session) AAD picks the right
+      // account automatically and forwards them to the inbox.
+      const url =
+        `https://outlook.office.com/owa/?bO=1&login_hint=${encodeURIComponent(account.email)}#path=/mail/inbox`;
+      await shell.openExternal(url);
+      return { success: true as const, email: account.email, url };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
+    }
+  });
+
   ipcMain.handle(
     'files:saveTextWithDialog',
     async (

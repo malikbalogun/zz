@@ -264,17 +264,27 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
 
             <div
               className="form-helper"
-              style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: 10, color: '#92400e', marginBottom: 12, fontSize: 12 }}
+              style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8, padding: 10, color: '#991b1b', marginBottom: 12, fontSize: 12 }}
             >
               <i className="fas fa-exclamation-triangle" style={{ marginRight: 6 }}></i>
-              <strong>Note:</strong> these cookies were captured from the in-app token partition.
-              Some ESTSAUTH-class auth cookies are <code>HttpOnly</code> and cannot be written from
-              <code>document.cookie</code>, so the browser-console snippet is best-effort. The
-              Cookie-Editor / EditThisCookie extension <em>can</em> write HttpOnly cookies and is the
-              most reliable path. If the imported session still bounces to the sign-in page on a real
-              browser, use the in-app <strong>Sign in via browser (1-click)</strong> button instead —
-              it opens an in-app Chromium window with the same cookies <em>plus</em> the Bearer
-              header that OWA's session APIs require.</div>
+              <strong>Important — what these formats can and cannot do:</strong>
+              <br />
+              The cookies were captured from the in-app token partition where OWA only stays signed
+              in because a <code>webRequest.onBeforeSendHeaders</code> hook in the main process
+              injects an OAuth Bearer header on every outbound request. AAD itself does <em>not</em>
+              issue ESTSAUTH session cookies in exchange for a refresh token, so a different browser
+              that imports these cookies will still get bounced to the sign-in page when it tries to
+              hit OWA's session APIs.
+              <br />
+              <br />
+              For a true 1-click sign-in into the inbox, use the in-app{' '}
+              <strong>Sign in (in-app browser)</strong> button — it opens a Chromium window with the
+              cookies <em>and</em> the Bearer hook installed.
+              <br />
+              <br />
+              The exports here remain useful for: (1) diagnosing the cookie set, (2) replaying
+              individual requests with <code>curl --cookie</code>, and (3) seeding a Cookie-Editor
+              import so the user only has to provide a fresh password (not full MFA + device code).</div>
 
             <textarea
               className="form-input"
