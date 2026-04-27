@@ -14,6 +14,45 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
+     * Capture this token account's current OWA session cookies in multiple
+     * formats. The `extensionJson` field is the Cookie-Editor /
+     * EditThisCookie compatible JSON payload.
+     */
+    exportOwaCookies: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          count: number;
+          strongCount: number;
+          email: string;
+          netscape: string;
+          header: string;
+          extensionJson: string;
+          quality: 'strong' | 'weak';
+        }
+      | { success: false; error?: string }
+    >;
+    /**
+     * One-click browser sign-in: captures the account's cookies, copies the
+     * Cookie-Editor JSON to the clipboard, and opens outlook.office.com in
+     * the default browser. The user only has to click "Import" in their
+     * cookie-editor extension to be signed in.
+     */
+    browserSignInOneClick: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          email: string;
+          count: number;
+          strongCount: number;
+          quality: 'strong' | 'weak';
+          targetUrl: string;
+        }
+      | { success: false; error?: string }
+    >;
+    /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".
      */
@@ -216,6 +255,9 @@ export interface ElectronAPI {
       content: string;
       filters?: { name: string; extensions: string[] }[];
     }) => Promise<{ ok: true; path: string } | { ok: false }>;
+  };
+  clipboard: {
+    writeText: (text: string) => Promise<{ success: boolean; error?: string }>;
   };
 }
 

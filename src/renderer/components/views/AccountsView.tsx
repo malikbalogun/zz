@@ -2,7 +2,6 @@ import { useState, useEffect, type FC } from 'react';
 import {
   refreshAccountToken,
   openOutlookWeb,
-  openOwaExternalBrowserSession,
   openPanelAdminDashboard,
   harvestAssociatedAccounts,
 } from '../../services/accountSyncService';
@@ -304,16 +303,77 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
+  // One-click "Sign in via browser": captures this account's OWA cookies,
+  // copies the Cookie-Editor / EditThisCookie JSON to the clipboard, and
+  // opens outlook.office.com in the default browser. The user just has to
+  // click "Import" in their cookie-editor extension and they're signed in
+  // — no password / MFA / "select account" prompts.
   const handleBrowserSignIn = async (accountId: string) => {
     setLoading(true);
     try {
-      await openOwaExternalBrowserSession(accountId);
+      const result = await window.electron.accounts.browserSignInOneClick(accountId);
+      if (!result.success) {
+        throw new Error(result.error || 'Browser sign-in failed');
+      }
+      const weakHint =
+        result.quality === 'weak'
+          ? '\n\nWarning: only helper cookies were captured. Open Outlook (the play button) once first to populate the auth cookies, then try again.'
+          : '';
       alert(
-        'Opened the official Microsoft browser sign-in flow.\n\n' +
-        'Complete sign-in in your default browser, then open Outlook there or come back and retry any in-app actions.'
+        `Opened ${result.targetUrl} for ${result.email}.\n\n` +
+        `Cookie-Editor / EditThisCookie JSON (${result.count} cookies, ${result.strongCount} primary auth) copied to your clipboard.\n\n` +
+        `In your browser: open the Cookie-Editor extension on outlook.office.com, click "Import", paste, then refresh the page — you'll be signed in without entering a password.${weakHint}`
       );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Export the captured OWA cookies as Cookie-Editor / EditThisCookie JSON.
+  // Auto-copies the JSON to the clipboard (the most common action) and then
+  // offers to also save it as a .json file the user can import directly.
+  const handleExportCookiesJson = async (accountId: string) => {
+    const account = accounts.find(a => a.id === accountId);
+    const label = account?.email || accountId;
+    setLoading(true);
+    try {
+      const result = await window.electron.accounts.exportOwaCookies(accountId);
+      if (!result.success) {
+        throw new Error(result.error || 'Export failed');
+      }
+      const safeEmail = (result.email || label).replace(/[^a-z0-9._-]+/gi, '_');
+      const weakHint =
+        result.quality === 'weak'
+          ? '\n\nWarning: only helper cookies were captured. Open Outlook (the play button) once first to populate the auth cookies, then export again.'
+          : '';
+      const summary =
+        `Captured ${result.count} cookies for ${result.email} ` +
+        `(${result.strongCount} primary auth, quality: ${result.quality}).`;
+      const copy = await window.electron.clipboard.writeText(result.extensionJson);
+      if (!copy.success) throw new Error(copy.error || 'Could not copy to clipboard');
+      const saveToo = window.confirm(
+        `${summary}\n\n` +
+        `Cookie-Editor / EditThisCookie JSON copied to clipboard.\n\n` +
+        `Click OK to also save it to a .json file you can import directly, ` +
+        `or Cancel to keep just the clipboard copy.${weakHint}`
+      );
+      if (saveToo) {
+        const saved = await window.electron.files.saveTextWithDialog({
+          defaultFilename: `${safeEmail}-cookies-${new Date().toISOString().slice(0, 10)}.json`,
+          content: result.extensionJson,
+          filters: [
+            { name: 'Cookie-Editor JSON', extensions: ['json'] },
+            { name: 'All files', extensions: ['*'] },
+          ],
+        });
+        if (saved.ok) {
+          alert(`Saved Cookie-Editor / EditThisCookie JSON to ${saved.path}`);
+        }
+      }
+    } catch (error) {
+      alert(`Export cookies failed for ${label}: ${error instanceof Error ? error.message : error}`);
     } finally {
       setLoading(false);
     }
@@ -924,9 +984,22 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             void handleBrowserSignIn(account.id);
                           }}
-                          title="Open the official Microsoft sign-in page in your default browser for this mailbox."
+                          title="One-click: copies this account's session cookies to clipboard (Cookie-Editor / EditThisCookie JSON) and opens Outlook in your default browser. Paste into the extension to sign in without a password."
                         >
-                          <i className="fas fa-external-link-alt"></i> Sign in via browser
+                          <i className="fas fa-external-link-alt"></i> Sign in via browser (1-click)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
+                            void handleExportCookiesJson(account.id);
+                          }}
+                          title="Export this account's OWA cookies as Cookie-Editor / EditThisCookie JSON. Copy to clipboard or save to a .json file for browser import."
+                        >
+                          <i className="fas fa-file-export"></i> Export cookies (JSON)
                         </div>
                       )}
                       {account.tags.includes('admin') && (
