@@ -76,6 +76,13 @@ contextBridge.exposeInMainWorld('electron', {
     captureRealBrowserCookies: (accountId: string) =>
       ipcRenderer.invoke('account:captureRealBrowserCookies', accountId),
     /**
+     * Silently refresh the previously-captured ESTSAUTH cookies for one
+     * account using the existing AAD session in the capture partition.
+     * No password / MFA as long as ESTSAUTHPERSISTENT is still valid.
+     */
+    refreshRealBrowserCookies: (accountId: string) =>
+      ipcRenderer.invoke('account:refreshRealBrowserCookies', accountId),
+    /**
      * One-click browser sign-in: capture cookies, copy Cookie-Editor JSON to
      * clipboard, and open outlook.office.com in the default browser.
      */

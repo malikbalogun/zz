@@ -1732,6 +1732,225 @@ let lastTokenRefresh: { ranAt: string; result: RefreshAllResult } | null = null;
 /** Reason the last run started — 'startup' | 'interval' | 'settings' | 'manual'. */
 let lastTokenRefreshReason: string | null = null;
 
+/**
+ * Silently refresh the previously-captured AAD browser cookies for a token
+ * account. We re-use the `persist:auth-capture-<accountId>` partition (which
+ * already holds the user's ESTSAUTHPERSISTENT cookie from the one-time
+ * interactive sign-in) to make a `prompt=none` `/oauth2/v2.0/authorize` hit
+ * inside a hidden BrowserWindow. AAD recognises the existing session, sets
+ * fresh ESTSAUTH cookies, and redirects to the redirect_uri — at which
+ * point we re-read the partition's cookie jar and update the stored
+ * snapshot.
+ *
+ * Returns:
+ *   - { ok: true, count, strongCount } on success
+ *   - { ok: false, error, requiresInteractive: true } if AAD insists on
+ *     interaction (typically because ESTSAUTHPERSISTENT has expired). The
+ *     caller is responsible for surfacing this to the user so they can
+ *     re-run the interactive capture.
+ */
+async function silentlyRefreshCapturedBrowserCookies(
+  account: any
+): Promise<
+  | { ok: true; count: number; strongCount: number }
+  | { ok: false; error: string; requiresInteractive: boolean }
+> {
+  if (account?.auth?.type !== 'token') {
+    return { ok: false, error: 'Not a token account', requiresInteractive: false };
+  }
+  if (!account.auth.realBrowserCookiesEncrypted) {
+    return { ok: false, error: 'No captured cookies to refresh', requiresInteractive: true };
+  }
+
+  const partitionName = `persist:auth-capture-${account.id}`;
+  const captureSession = session.fromPartition(partitionName);
+  // Confirm the partition still has *something* before we bother spinning
+  // up a window. If it doesn't, the user wiped Electron storage and we
+  // cannot recover silently.
+  try {
+    const probe = await captureSession.cookies.get({ domain: '.login.microsoftonline.com' });
+    if (!probe || probe.length === 0) {
+      return {
+        ok: false,
+        error: 'Capture partition has no AAD cookies. Run the interactive sign-in again.',
+        requiresInteractive: true,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Could not read capture partition: ${err instanceof Error ? err.message : String(err)}`,
+      requiresInteractive: true,
+    };
+  }
+
+  const storeData = await readStore();
+  const settings = storeData.settings || {};
+  const ms = settings.microsoftOAuth || {};
+  const clientId =
+    (typeof ms.clientId === 'string' && ms.clientId.trim()) ||
+    account.auth?.clientId ||
+    'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+  const authority =
+    (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+    normalizeAuthorityTenant(account.auth?.authorityEndpoint || 'common') ||
+    'common';
+  const redirectUri =
+    (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+    'https://outlook.office.com/mail/';
+
+  const authUrl = new URL(
+    `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/v2.0/authorize`
+  );
+  authUrl.searchParams.set('client_id', clientId);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('response_mode', 'query');
+  authUrl.searchParams.set('scope', 'openid profile offline_access https://outlook.office.com/.default');
+  authUrl.searchParams.set('login_hint', account.email);
+  authUrl.searchParams.set('prompt', 'none');
+
+  const win = new BrowserWindow({
+    width: 520,
+    height: 720,
+    show: false,
+    webPreferences: {
+      partition: partitionName,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  type Outcome =
+    | { kind: 'redirected' }
+    | { kind: 'interactionRequired'; detail: string }
+    | { kind: 'error'; detail: string };
+
+  const outcome: Outcome = await new Promise<Outcome>((resolve) => {
+    let settled = false;
+    const finish = (o: Outcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(o);
+    };
+    const timeout = setTimeout(() => finish({ kind: 'error', detail: 'Silent refresh timed out (30s)' }), 30000);
+
+    const isRedirectArrival = (pageUrl: string) => {
+      try {
+        const u = new URL(pageUrl);
+        const r = new URL(redirectUri);
+        return u.hostname === r.hostname && u.pathname.startsWith(r.pathname);
+      } catch {
+        return false;
+      }
+    };
+    const isInteractionRequired = (pageUrl: string) => {
+      try {
+        const u = new URL(pageUrl);
+        const err =
+          u.searchParams.get('error') ||
+          new URLSearchParams(u.hash.replace(/^#/, '')).get('error') ||
+          '';
+        return /interaction_required|login_required|consent_required/i.test(err);
+      } catch {
+        return false;
+      }
+    };
+    const inspect = (url: string) => {
+      if (isInteractionRequired(url)) {
+        finish({ kind: 'interactionRequired', detail: 'AAD reports interaction_required' });
+        return true;
+      }
+      if (isRedirectArrival(url)) {
+        finish({ kind: 'redirected' });
+        return true;
+      }
+      return false;
+    };
+
+    win.webContents.on('did-navigate', (_e, url) => inspect(url));
+    win.webContents.on('did-navigate-in-page', (_e, url) => inspect(url));
+    win.webContents.on('will-redirect', (_e, url) => inspect(url));
+    win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      if (!inspect(url)) finish({ kind: 'error', detail: `did-fail-load ${code}: ${desc}` });
+    });
+
+    win.loadURL(authUrl.toString()).catch((loadErr) => {
+      finish({ kind: 'error', detail: `loadURL: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}` });
+    });
+    void timeout; // satisfy eslint
+  });
+
+  const cleanup = () => {
+    try { if (!win.isDestroyed()) win.destroy(); } catch { /* noop */ }
+  };
+
+  if (outcome.kind === 'interactionRequired') {
+    cleanup();
+    return { ok: false, error: outcome.detail, requiresInteractive: true };
+  }
+  if (outcome.kind === 'error') {
+    cleanup();
+    return { ok: false, error: outcome.detail, requiresInteractive: false };
+  }
+
+  // Give AAD a tick to flush Set-Cookie before reading.
+  await new Promise(r => setTimeout(r, 500));
+  let allCookies: any[] = [];
+  try {
+    allCookies = await captureSession.cookies.get({});
+  } catch (err) {
+    cleanup();
+    return {
+      ok: false,
+      error: `Cookie read failed: ${err instanceof Error ? err.message : String(err)}`,
+      requiresInteractive: false,
+    };
+  }
+  cleanup();
+
+  const parsed: ParsedCookie[] = allCookies.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path || '/',
+    secure: c.secure !== false,
+    httpOnly: c.httpOnly === true,
+    hostOnly: c.hostOnly === true,
+    sameSite:
+      c.sameSite === 'lax'
+        ? 'lax'
+        : c.sameSite === 'strict'
+          ? 'strict'
+          : c.sameSite === 'no_restriction'
+            ? 'none'
+            : undefined,
+    session: c.session === true,
+    expirationDate: c.expirationDate,
+  }));
+  const filtered = filterMicrosoftRelatedCookies(parsed);
+  const strongCount = countStrongMicrosoftSessionCookies(filtered);
+  if (strongCount === 0) {
+    return {
+      ok: false,
+      error: 'Silent refresh produced no strong cookies; ESTSAUTHPERSISTENT may be expired.',
+      requiresInteractive: true,
+    };
+  }
+
+  const payload = JSON.stringify(filtered);
+  const encrypted = safeStorage.isEncryptionAvailable()
+    ? safeStorage.encryptString(payload).toString('base64')
+    : payload;
+  account.auth = {
+    ...account.auth,
+    realBrowserCookiesEncrypted: encrypted,
+    realBrowserCookiesCapturedAt: new Date().toISOString(),
+  };
+  return { ok: true, count: filtered.length, strongCount };
+}
+
 async function refreshAllTokens(): Promise<RefreshAllResult> {
   try {
     const store = await readStore();
@@ -1789,6 +2008,32 @@ async function refreshAllTokens(): Promise<RefreshAllResult> {
           if (account.lastError) account.lastError = '';
           results.success++;
           recordOutcome(account, 'success');
+
+          // If this account has previously-captured browser cookies,
+          // silently refresh them in the same sweep so the exported
+          // ESTSAUTH bundle never goes stale. Failures are logged and
+          // surfaced via account.realBrowserCookiesNeedReauth but do NOT
+          // mark the token refresh itself as failed.
+          if (account.auth.realBrowserCookiesEncrypted) {
+            try {
+              const cookieRes = await silentlyRefreshCapturedBrowserCookies(account);
+              if (cookieRes.ok) {
+                account.realBrowserCookiesNeedReauth = false;
+                appendOutlookDebug(
+                  `[BrowserCookieRefresh] ${account.email}: refreshed ${cookieRes.count} cookies (strong=${cookieRes.strongCount})`
+                );
+              } else {
+                account.realBrowserCookiesNeedReauth = cookieRes.requiresInteractive;
+                appendOutlookDebug(
+                  `[BrowserCookieRefresh] ${account.email}: ${cookieRes.error}`
+                );
+              }
+            } catch (cookieErr: any) {
+              appendOutlookDebug(
+                `[BrowserCookieRefresh] ${account.email}: ${cookieErr?.message || String(cookieErr)}`
+              );
+            }
+          }
         } catch (error: any) {
           if (error.code === 'REFRESH_TOKEN_EXPIRED') {
             account.status = 'expired';
@@ -3278,6 +3523,47 @@ function setupIpcHandlers() {
    * partition so the captured cookies are pristine and not contaminated
    * by our own per-request Bearer hook.
    */
+  /**
+   * Silently refresh the previously-captured ESTSAUTH cookies for one
+   * account. Uses the persist:auth-capture-<id> partition's existing
+   * AAD session to mint fresh cookies via /authorize?prompt=none — no
+   * password / MFA prompt as long as ESTSAUTHPERSISTENT is still valid
+   * (typically 90 days).
+   */
+  ipcMain.handle('account:refreshRealBrowserCookies', async (_, accountId: string) => {
+    try {
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+      const result = await silentlyRefreshCapturedBrowserCookies(account);
+      if (!result.ok) {
+        // Persist the requires-interactive hint so the UI can surface a
+        // re-capture CTA without needing another round-trip.
+        if (result.requiresInteractive) {
+          account.realBrowserCookiesNeedReauth = true;
+          await writeStore(storeData);
+        }
+        return {
+          success: false as const,
+          error: result.error,
+          requiresInteractive: result.requiresInteractive,
+        };
+      }
+      account.realBrowserCookiesNeedReauth = false;
+      await writeStore(storeData);
+      return {
+        success: true as const,
+        email: account.email,
+        count: result.count,
+        strongCount: result.strongCount,
+        capturedAt: account.auth.realBrowserCookiesCapturedAt,
+      };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
+    }
+  });
+
   ipcMain.handle('account:captureRealBrowserCookies', async (_, accountId: string) => {
     try {
       const storeData = await readStore();

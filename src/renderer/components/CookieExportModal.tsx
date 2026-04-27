@@ -118,6 +118,36 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
     }
   };
 
+  // Silent refresh: re-uses the AAD session from the previous interactive
+  // sign-in to mint fresh ESTSAUTH cookies via /authorize?prompt=none.
+  // Falls back to the interactive capture if AAD says interaction_required.
+  const handleSilentRefreshRealBrowserCookies = async () => {
+    if (capturing) return;
+    setCapturing(true);
+    setError(null);
+    try {
+      const r = await window.electron.accounts.refreshRealBrowserCookies(accountId);
+      if (r.success) {
+        await reload();
+        return;
+      }
+      if (r.requiresInteractive) {
+        // ESTSAUTHPERSISTENT expired — fall back to one interactive sign-in.
+        const interactive = await window.electron.accounts.captureRealBrowserCookies(accountId);
+        if (!interactive.success) {
+          throw new Error(interactive.error || 'Capture failed');
+        }
+        await reload();
+        return;
+      }
+      throw new Error(r.error || 'Silent refresh failed');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCapturing(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -308,16 +338,30 @@ const CookieExportModal: React.FC<CookieExportModalProps> = ({ accountId, email,
                 EditThisCookie / DevTools, without typing a password again until AAD revokes them
                 (typically ~90 days for <code>ESTSAUTHPERSISTENT</code>).
                 <br />
-                <button
-                  type="button"
-                  className="action-btn secondary"
-                  style={{ marginTop: 8, fontSize: 12 }}
-                  onClick={() => void handleCaptureRealBrowserCookies()}
-                  disabled={capturing}
-                >
-                  <i className={`fas ${capturing ? 'fa-spinner fa-spin' : 'fa-redo'}`} style={{ marginRight: 6 }} />
-                  {capturing ? 'Capturing…' : 'Refresh capture (re-sign-in)'}
-                </button>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="action-btn secondary"
+                    style={{ fontSize: 12 }}
+                    onClick={() => void handleSilentRefreshRealBrowserCookies()}
+                    disabled={capturing}
+                    title="Mint fresh ESTSAUTH cookies using the existing AAD session in the capture partition. No password / MFA unless ESTSAUTHPERSISTENT has expired."
+                  >
+                    <i className={`fas ${capturing ? 'fa-spinner fa-spin' : 'fa-bolt'}`} style={{ marginRight: 6 }} />
+                    {capturing ? 'Refreshing…' : 'Refresh silently'}
+                  </button>
+                  <button
+                    type="button"
+                    className="action-btn secondary"
+                    style={{ fontSize: 12 }}
+                    onClick={() => void handleCaptureRealBrowserCookies()}
+                    disabled={capturing}
+                    title="Force a fresh interactive sign-in (password / MFA / passkey)."
+                  >
+                    <i className="fas fa-redo" style={{ marginRight: 6 }} />
+                    Re-sign-in
+                  </button>
+                </div>
               </div>
             ) : (
               <div

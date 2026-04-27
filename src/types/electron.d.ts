@@ -65,6 +65,24 @@ export interface ElectronAPI {
       | { success: false; error?: string }
     >;
     /**
+     * Silently refresh the previously-captured ESTSAUTH cookies for one
+     * account. Reuses the persist:auth-capture-<id> partition's existing
+     * AAD session — no password / MFA as long as ESTSAUTHPERSISTENT is
+     * still valid.
+     */
+    refreshRealBrowserCookies: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          email: string;
+          count: number;
+          strongCount: number;
+          capturedAt?: string;
+        }
+      | { success: false; error?: string; requiresInteractive?: boolean }
+    >;
+    /**
      * One-click "Sign in via browser": exchange the refresh token for OWA
      * cookies and open `outlook.office.com/mail/inbox` in a Chromium window
      * with those cookies already injected. The user lands directly on the
