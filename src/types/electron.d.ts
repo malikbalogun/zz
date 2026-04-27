@@ -14,7 +14,8 @@ export interface ElectronAPI {
     exportJSON: (accountId: string) => Promise<unknown>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     exportOwaCookieJson: (
-      accountId: string
+      accountId: string,
+      format?: 'extension' | 'console'
     ) => Promise<{
       success: boolean;
       count?: number;
@@ -23,13 +24,9 @@ export interface ElectronAPI {
       error?: string;
     }>;
     copyOwaCookieJson: (
-      accountId: string
-    ) => Promise<{
-      success: boolean;
-      count?: number;
-      email?: string;
-      error?: string;
-    }>;
+      accountId: string,
+      format?: 'extension' | 'console'
+    ) => Promise<{ success: boolean; count?: number; email?: string; error?: string }>;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
      * Returns counts so the UI can show "applied X of Y cookies".

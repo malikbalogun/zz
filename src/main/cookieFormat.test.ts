@@ -7,6 +7,7 @@ import {
   cookieToSetUrl,
   cookiesToNetscape,
   cookiesToEditThisCookieJson,
+  cookiesToConsoleScript,
 } from '../shared/cookieFormat';
 
 test('parse semicolon header', () => {
@@ -139,4 +140,26 @@ test('cookiesToEditThisCookieJson emits browser-importable cookie JSON', () => {
     storeId: null,
     value: 'secret',
   });
+});
+
+test('cookiesToConsoleScript emits pasteable document.cookie commands', () => {
+  const text = cookiesToConsoleScript([
+    {
+      name: 'X-OWA-CANARY',
+      value: 'abc123',
+      domain: '.outlook.office.com',
+      path: '/',
+      secure: true,
+      sameSite: 'no_restriction',
+      expirationDate: 1893456000,
+    },
+    { name: 'skip', value: 'missing-domain' },
+  ]);
+  assert.match(text, /document\.cookie = parts\.join/);
+  assert.match(text, /"name": "X-OWA-CANARY"/);
+  assert.match(text, /"value": "abc123"/);
+  assert.match(text, /"domain": "\.outlook\.office\.com"/);
+  assert.match(text, /SameSite=\$\{c\.sameSite === "no_restriction" \? "None" : c\.sameSite\}/);
+  assert.match(text, /location\.href = "https:\/\/outlook\.office\.com\/mail\/inbox"/);
+  assert.match(text, /Refresh Outlook after this/);
 });

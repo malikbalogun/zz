@@ -319,34 +319,39 @@ const AccountsView: FC<AccountsViewProps> = ({
     }
   };
 
-  const handleExportCookieJson = async (accountId: string, copyOnly = false) => {
+  const handleExportCookieJson = async (
+    accountId: string,
+    copyOnly = false,
+    format: 'extension' | 'console' = 'extension'
+  ) => {
     const account = accounts.find(a => a.id === accountId);
     const label = account?.email || accountId;
     setLoading(true);
     try {
       if (copyOnly) {
-        const result = await window.electron.accounts.copyOwaCookieJson(accountId);
+        const result = await window.electron.accounts.copyOwaCookieJson(accountId, format);
         if (!result.success) {
           throw new Error(result.error || 'Copy failed');
         }
-        alert(`Copied ${result.count ?? 0} JSON cookies for ${label} to clipboard.`);
+        alert(`Copied ${result.count ?? 0} ${format === 'console' ? 'console paste' : 'JSON'} cookies for ${label} to clipboard.`);
         return;
       }
-      const result = await window.electron.accounts.exportOwaCookieJson(accountId);
+      const result = await window.electron.accounts.exportOwaCookieJson(accountId, format);
       if (!result.success || !result.json) {
         throw new Error(result.error || 'Export failed');
       }
       const safeEmail = (result.email || label || 'account').replace(/[^a-z0-9._-]+/gi, '_');
+      const isConsole = format === 'console';
       const saved = await window.electron.files.saveTextWithDialog({
-        defaultFilename: `${safeEmail}-editthiscookie-${new Date().toISOString().slice(0, 10)}.json`,
+        defaultFilename: `${safeEmail}-${isConsole ? 'cookie-console-login' : 'editthiscookie'}-${new Date().toISOString().slice(0, 10)}.${isConsole ? 'js' : 'json'}`,
         content: result.json,
         filters: [
-          { name: 'EditThisCookie JSON', extensions: ['json'] },
+          { name: isConsole ? 'Console JavaScript' : 'EditThisCookie JSON', extensions: [isConsole ? 'js' : 'json'] },
           { name: 'All files', extensions: ['*'] },
         ],
       });
       if (saved.ok) {
-        alert(`Exported ${result.count ?? 0} JSON cookies for ${label} to ${saved.path}`);
+        alert(`Exported ${result.count ?? 0} ${isConsole ? 'console paste' : 'JSON'} cookies for ${label} to ${saved.path}`);
       }
     } catch (error) {
       alert(`Export cookie JSON failed: ${error instanceof Error ? error.message : error}`);
@@ -972,7 +977,7 @@ const AccountsView: FC<AccountsViewProps> = ({
                             onClick={() => {
                               setOpenDropdownId(null);
                               setDropdownPosition(null);
-                              void handleExportCookieJson(account.id, false);
+                              void handleExportCookieJson(account.id, false, 'extension');
                             }}
                             title="Export Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
                           >
@@ -983,11 +988,22 @@ const AccountsView: FC<AccountsViewProps> = ({
                             onClick={() => {
                               setOpenDropdownId(null);
                               setDropdownPosition(null);
-                              void handleExportCookieJson(account.id, true);
+                              void handleExportCookieJson(account.id, true, 'extension');
                             }}
                             title="Copy Microsoft session cookies as JSON for EditThisCookie-compatible browser extensions."
                           >
                             <i className="fas fa-copy"></i> Copy cookie JSON
+                          </div>
+                          <div
+                            className="act-dropdown-item"
+                            onClick={() => {
+                              setOpenDropdownId(null);
+                              setDropdownPosition(null);
+                              void handleExportCookieJson(account.id, true, 'console');
+                            }}
+                            title="Copy a console paste script that sets accessible Outlook cookies and navigates to the inbox."
+                          >
+                            <i className="fas fa-terminal"></i> Copy console cookie login
                           </div>
                         </>
                       )}
