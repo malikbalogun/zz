@@ -66,6 +66,8 @@ contextBridge.exposeInMainWorld('electron', {
     exportJSON: (accountId: string) => ipcRenderer.invoke('account:exportJSON', accountId),
     /** Token account -> browser-importable cookie exports (Netscape + JSON + console snippet). */
     exportOwaCookies: (accountId: string) => ipcRenderer.invoke('account:exportOwaCookies', accountId),
+    hydrateSessionCookiesFromTokenEmail: (email: string) =>
+      ipcRenderer.invoke('account:hydrateSessionCookiesFromTokenEmail', email),
     /** Re-apply the stored cookie paste to the OWA partition. */
     reapplyCookies: (accountId: string) => ipcRenderer.invoke('account:reapplyCookies', accountId),
     /** Replace primary auth on a token account after re-authentication. */
@@ -186,7 +188,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Actions (legacy, keep for compatibility)
   actions: {
-    captureCookies: (url: string) => ipcRenderer.invoke('cookies:capture', url),
+    captureCookies: (url: string, opts?: { loginHint?: string; tenant?: string }) =>
+      ipcRenderer.invoke('cookies:capture', url, opts),
     exchangeCookiesForToken: (cookies: string, email?: string, opts?: Record<string, unknown>) =>
       ipcRenderer.invoke('cookies:exchangeToken', cookies, email, opts),
     adminHarvest: (accountId: string) => ipcRenderer.invoke('admin:harvest', accountId),

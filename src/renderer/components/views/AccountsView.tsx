@@ -310,7 +310,19 @@ const AccountsView: FC<AccountsViewProps> = ({
   const handleBrowserSignIn = async (accountId: string) => {
     setLoading(true);
     try {
-      await openOwaExternalBrowserSession(accountId);
+      const r = await openOwaExternalBrowserSession(accountId);
+      const strong = r.strongCount ?? 0;
+      alert(
+        strong > 0
+          ? 'Cookie-editor JSON is on your clipboard.\n\n' +
+              '1. In the browser tab that opened, open your cookie extension → Import.\n' +
+              '2. Paste (Ctrl+V) and confirm.\n' +
+              '3. Refresh — you should land in the mailbox.\n\n' +
+              'If the tab shows an error, Microsoft may require interactive sign-in; use Export cookies JSON from the menu for a fresh payload.'
+          : 'A DevTools console installer was copied to your clipboard (HttpOnly cookies need this path).\n\n' +
+              '1. Open DevTools on the Outlook tab that opened, paste into Console, press Enter, wait for reload.\n' +
+              '2. Or use Export cookies JSON from the ⋮ menu after opening Outlook in-app once.'
+      );
     } catch (error) {
       alert(`Browser sign-in failed: ${error instanceof Error ? error.message : error}`);
     } finally {

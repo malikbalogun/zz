@@ -10,6 +10,7 @@ import {
   filterMicrosoftRelatedCookies,
   cookiesToNetscape,
   cookiesToCookieEditorJson,
+  cookiesToHeaderString,
   pickPrimaryCookieOrigin,
   cookiesToBrowserConsoleSnippet,
   type ParsedCookie,
@@ -605,6 +606,126 @@ function installOutlookPartitionRequestHooks(outlookSess: Session): void {
     else if (!String(h['Cookie']).includes('DefaultAnchorMailbox')) h['Cookie'] = `${h['Cookie']}; ${cookieHint}`;
     callback({ requestHeaders: h });
   });
+}
+
+async function mapSessionCookiesToMicrosoftParsed(owaSession: Session): Promise<ParsedCookie[]> {
+  const all = await owaSession.cookies.get({});
+  const parsed: ParsedCookie[] = all.map((c) => {
+    const ssRaw = (c as { sameSite?: string }).sameSite || '';
+    let sameSite: ParsedCookie['sameSite'] | undefined;
+    if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
+    else if (ssRaw === 'lax') sameSite = 'lax';
+    else if (ssRaw === 'strict') sameSite = 'strict';
+    else if (ssRaw === 'unspecified') sameSite = undefined;
+    return {
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || '/',
+      secure: c.secure !== false,
+      expirationDate: c.expirationDate,
+      httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
+      sameSite,
+    };
+  });
+  return filterMicrosoftRelatedCookies(parsed);
+}
+
+/**
+ * Refresh token → OWA partition: stage Bearer hooks, set anchor cookies, load OWA
+ * hidden until strong Microsoft session cookies exist (no user-visible window).
+ */
+async function hydrateOwaCookiesFromStoredToken(
+  accountId: string,
+  opts?: { forcePrime?: boolean }
+): Promise<void> {
+  const partitionName = `persist:outlook-${accountId}`;
+  const owaSession = session.fromPartition(partitionName);
+  const bundle = await loadOwaTokenBundle(accountId);
+  applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
+  installOutlookPartitionRequestHooks(owaSession);
+  const email = String(bundle.account?.email || '').trim();
+  if (!email) throw new Error('Account email missing');
+
+  await Promise.all([
+    owaSession.cookies.set({
+      url: 'https://outlook.office.com',
+      name: 'DefaultAnchorMailbox',
+      value: `UPN:${email}`,
+      domain: '.outlook.office.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+    }),
+    owaSession.cookies.set({
+      url: 'https://login.microsoftonline.com',
+      name: 'DefaultAnchorMailbox',
+      value: `UPN:${email}`,
+      domain: '.login.microsoftonline.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      sameSite: 'no_restriction',
+    }),
+  ]);
+
+  let msCookies = await mapSessionCookiesToMicrosoftParsed(owaSession);
+  if (!opts?.forcePrime && hasStrongMicrosoftSessionCookies(msCookies)) {
+    return;
+  }
+
+  appendOutlookDebug(`[TokenCookieHydrate] Priming OWA cookies for ${email} (accountId=${accountId})`);
+  const primer = new BrowserWindow({
+    width: 800,
+    height: 600,
+    show: false,
+    webPreferences: {
+      partition: partitionName,
+      contextIsolation: false,
+      nodeIntegration: false,
+      sandbox: false,
+      preload: path.join(__dirname, 'preload-mailbox.js'),
+    },
+  });
+  windowToAccountMap.set(primer.webContents.id, accountId);
+  const PRIME_TIMEOUT_MS = 25000;
+  try {
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearInterval(pollTimer);
+        clearTimeout(hardTimeout);
+        resolve();
+      };
+      const pollTimer = setInterval(async () => {
+        try {
+          const probe = await mapSessionCookiesToMicrosoftParsed(owaSession);
+          if (hasStrongMicrosoftSessionCookies(probe)) finish();
+        } catch {
+          /* keep polling */
+        }
+      }, 500);
+      const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
+      primer.loadURL('https://outlook.office.com/mail/inbox?locale=en-US').catch((loadErr) => {
+        appendOutlookDebug(
+          `[TokenCookieHydrate] loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
+        );
+      });
+    });
+  } finally {
+    windowToAccountMap.delete(primer.webContents.id);
+    if (!primer.isDestroyed()) primer.destroy();
+  }
+
+  msCookies = await mapSessionCookiesToMicrosoftParsed(owaSession);
+  if (!hasStrongMicrosoftSessionCookies(msCookies)) {
+    throw new Error(
+      'Could not build OWA browser cookies from the stored token (session stayed weak). Open Outlook in-app once, or re-auth with EWS/OWA scope.'
+    );
+  }
 }
 
 async function reinjectMsalCacheIntoOwaPage(wc: WebContents, accountId: string): Promise<void> {
@@ -1666,86 +1787,180 @@ function setupIpcHandlers() {
     };
   });
 
-  // Cookie capture (open a browser window to capture cookies)
-  ipcMain.handle('cookies:capture', async (_, url: string) => {
-    dlog('Cookie capture requested for', url);
-    return new Promise((resolve, reject) => {
-      let captureWindow: BrowserWindow | null = null;
-      const parsedUrl = new URL(url);
-      const domain = parsedUrl.hostname;
+  // Cookie capture: isolated window + Microsoft OAuth URL with optional login_hint.
+  // Completes only after strong session cookies appear (avoids closing on the first login page load).
+  ipcMain.handle(
+    'cookies:capture',
+    async (
+      _,
+      url: string,
+      opts?: { loginHint?: string; tenant?: string }
+    ): Promise<{ success: boolean; cookies?: string; message?: string; error?: string }> => {
+      const DEFAULT_OFFICE_CLIENT_ID = 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      dlog('Cookie capture requested for', url, opts?.loginHint ? `(login_hint)` : '');
 
-      // Create a browser window (not hidden, so user can log in)
-      captureWindow = new BrowserWindow({
-        width: 800,
-        height: 600,
-        show: true,
-        title: `Cookie Capture - ${domain}`,
-        webPreferences: {
-          nodeIntegration: false,
-          contextIsolation: true,
-          partition: `capture-${Date.now()}`,
-        },
-      });
-
-      // Capture cookies after page loads and a short delay
-      let captured = false;
-      let autoCaptureTimer: NodeJS.Timeout | null = null;
-      let loadCaptureTimer: NodeJS.Timeout | null = null;
-
-      const cleanup = () => {
-        if (autoCaptureTimer) clearTimeout(autoCaptureTimer);
-        if (loadCaptureTimer) clearTimeout(loadCaptureTimer);
-        autoCaptureTimer = null;
-        loadCaptureTimer = null;
-      };
-
-      const capture = () => {
-        if (captured) return;
-        captured = true;
-        cleanup(); // clear pending timers
-        const ses = captureWindow?.webContents.session;
-        ses?.cookies.get({ domain })
-          .then(cookies => {
-            const cookieStrings = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-            // Close window
-            if (captureWindow && !captureWindow.isDestroyed()) {
-              captureWindow.close();
-              captureWindow = null;
-            }
-            resolve({ success: true, cookies: cookieStrings, message: 'Cookies captured' });
-          })
-          .catch(err => {
-            if (captureWindow && !captureWindow.isDestroyed()) captureWindow.close();
-            reject(new Error(`Failed to get cookies: ${err.message}`));
-          });
-      };
-
-      // Capture after 3 minutes automatically (allow user time to log in)
-      autoCaptureTimer = setTimeout(capture, 180000);
-
-      // Also capture when page finishes loading (but wait a bit more)
-      captureWindow.webContents.on('did-finish-load', () => {
-        if (loadCaptureTimer) clearTimeout(loadCaptureTimer);
-        loadCaptureTimer = setTimeout(capture, 2000); // extra 2 seconds after load
-      });
-
-      // If user closes window before capture, reject
-      captureWindow.on('closed', () => {
-        captureWindow = null;
-        if (!captured) {
-          cleanup();
-          reject(new Error('Cookie capture window closed by user'));
+      let startUrl = url;
+      try {
+        const u = new URL(url);
+        if (u.hostname === 'login.microsoftonline.com' && u.pathname.includes('/oauth2/')) {
+          /* already a full authorize URL */
+        } else if (u.hostname.includes('microsoftonline.com') || u.hostname === 'login.live.com') {
+          /* raw AAD host — use as-is */
+        } else {
+          const store = await readStore();
+          const ms = (store.settings || {}).microsoftOAuth || {};
+          const clientId =
+            (typeof ms.clientId === 'string' && ms.clientId.trim()) || DEFAULT_OFFICE_CLIENT_ID;
+          const tenantRaw =
+            (opts?.tenant && String(opts.tenant).trim()) ||
+            (typeof ms.tenantId === 'string' && ms.tenantId.trim()) ||
+            'common';
+          const redirectUri =
+            (typeof ms.redirectUri === 'string' && ms.redirectUri.trim()) ||
+            'https://outlook.office.com/mail/';
+          const scope = encodeURIComponent('openid profile offline_access https://outlook.office.com/.default');
+          let authUrl =
+            `https://login.microsoftonline.com/${encodeURIComponent(tenantRaw)}/oauth2/v2.0/authorize` +
+            `?client_id=${encodeURIComponent(clientId)}` +
+            `&response_type=code` +
+            `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+            `&scope=${scope}`;
+          const hint = opts?.loginHint?.trim();
+          if (hint) authUrl += `&login_hint=${encodeURIComponent(hint)}`;
+          startUrl = authUrl;
         }
-      });
+      } catch (e: any) {
+        return { success: false, error: `Invalid URL: ${e?.message || String(e)}` };
+      }
 
-      // Navigate to the URL
-      captureWindow.loadURL(url).catch(err => {
-        cleanup();
-        if (captureWindow && !captureWindow.isDestroyed()) captureWindow.close();
-        reject(new Error(`Failed to load URL: ${err.message}`));
+      return await new Promise((resolve) => {
+        const captureWindow = new BrowserWindow({
+          width: 960,
+          height: 720,
+          show: true,
+          title: 'Microsoft sign-in — cookies will save when complete',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            partition: `capture-${Date.now()}`,
+          },
+        });
+
+        const ses = captureWindow.webContents.session;
+        let captured = false;
+        let pollTimer: NodeJS.Timeout | null = null;
+        let maxTimer: NodeJS.Timeout | null = null;
+        const CAPTURE_MAX_MS = 600_000;
+
+        const electronCookiesToParsed = (
+          raw: { name: string; value: string; domain?: string; path?: string; secure?: boolean; expirationDate?: number }[]
+        ): ParsedCookie[] =>
+          raw.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+            secure: c.secure,
+            expirationDate: c.expirationDate,
+          }));
+
+        const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
+          const all = await ses.cookies.get({});
+          return filterMicrosoftRelatedCookies(electronCookiesToParsed(all));
+        };
+
+        const cleanupTimers = () => {
+          if (pollTimer) clearInterval(pollTimer);
+          if (maxTimer) clearTimeout(maxTimer);
+          pollTimer = null;
+          maxTimer = null;
+        };
+
+        const finishSuccess = async () => {
+          if (captured) return;
+          captured = true;
+          cleanupTimers();
+          try {
+            const parsed = await readMicrosoftCookies();
+            const header = cookiesToHeaderString(parsed);
+            if (!captureWindow.isDestroyed()) captureWindow.close();
+            resolve({
+              success: true,
+              cookies: header,
+              message: `Captured ${parsed.length} Microsoft-related cookies (session ready).`,
+            });
+          } catch (err: any) {
+            if (!captureWindow.isDestroyed()) captureWindow.close();
+            resolve({ success: false, error: err?.message || String(err) });
+          }
+        };
+
+        const tryCapture = async () => {
+          if (captured) return;
+          try {
+            const parsed = await readMicrosoftCookies();
+            if (hasStrongMicrosoftSessionCookies(parsed)) {
+              await finishSuccess();
+            }
+          } catch {
+            /* ignore transient cookie read errors */
+          }
+        };
+
+        const onMaxWait = async () => {
+          if (captured) return;
+          await tryCapture();
+          if (captured) return;
+          captured = true;
+          cleanupTimers();
+          if (!captureWindow.isDestroyed()) captureWindow.close();
+          resolve({
+            success: false,
+            error:
+              'Timed out waiting for Microsoft sign-in to complete (10 minutes). Finish login and MFA, then try again.',
+          });
+        };
+
+        maxTimer = setTimeout(() => void onMaxWait(), CAPTURE_MAX_MS);
+
+        captureWindow.webContents.on('did-finish-load', () => {
+          void tryCapture();
+        });
+
+        captureWindow.webContents.on('did-navigate-in-page', () => {
+          void tryCapture();
+        });
+
+        captureWindow.webContents.on('did-navigate', () => {
+          void tryCapture();
+        });
+
+        captureWindow.on('closed', () => {
+          cleanupTimers();
+          if (!captured) {
+            captured = true;
+            resolve({
+              success: false,
+              error: 'Sign-in window closed before a Microsoft session was detected. Complete login, then try again.',
+            });
+          }
+        });
+
+        pollTimer = setInterval(() => void tryCapture(), 1500);
+
+        captureWindow
+          .loadURL(startUrl)
+          .catch((err: Error) => {
+            cleanupTimers();
+            if (!captureWindow.isDestroyed()) captureWindow.close();
+            if (!captured) {
+              captured = true;
+              resolve({ success: false, error: err?.message || String(err) });
+            }
+          });
       });
-    });
-  });
+    }
+  );
 
   // Cookie → token: apply cookies + OAuth authorize (PKCE) + capture code + token exchange
   ipcMain.handle(
@@ -2928,39 +3143,15 @@ function setupIpcHandlers() {
         throw new Error('Cookie export only applies to token-based Microsoft accounts.');
       }
 
-      // Must match the partition used by mailbox:openOutlook (token path) so
-      // we read cookies from the same jar OWA actually populated.
+      await hydrateOwaCookiesFromStoredToken(accountId);
+
       const partitionName = `persist:outlook-${accountId}`;
       const owaSession = session.fromPartition(partitionName);
 
-      const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
-        const all = await owaSession.cookies.get({});
-        const parsed: ParsedCookie[] = all.map((c) => {
-          const ssRaw = (c as { sameSite?: string }).sameSite || '';
-          let sameSite: ParsedCookie['sameSite'] | undefined;
-          if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
-          else if (ssRaw === 'lax') sameSite = 'lax';
-          else if (ssRaw === 'strict') sameSite = 'strict';
-          else if (ssRaw === 'unspecified') sameSite = undefined;
-          return {
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path || '/',
-            secure: c.secure !== false,
-            expirationDate: c.expirationDate,
-            httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
-            sameSite,
-          };
-        });
-        return filterMicrosoftRelatedCookies(parsed);
-      };
-
-      let msCookies = await readMicrosoftCookies();
+      let msCookies = await mapSessionCookiesToMicrosoftParsed(owaSession);
 
       if (msCookies.length === 0) {
-        // First fallback: if this token account already has a stored cookie
-        // payload (pulled/imported earlier), use that directly.
+        // Fallback: stored cookie payload (pulled/imported earlier)
         const storedPaste = getMicrosoftCookiePasteFromAccount(account);
         if (storedPaste) {
           const parsedStored = filterMicrosoftRelatedCookies(parseCookiePaste(storedPaste));
@@ -2971,71 +3162,6 @@ function setupIpcHandlers() {
             msCookies = parsedStored;
           }
         }
-      }
-
-      if (msCookies.length === 0) {
-        // Prime the partition: ensure a fresh token bundle is staged and load
-        // OWA in a hidden BrowserWindow long enough for the auth cookies to
-        // settle. Capped at PRIME_TIMEOUT_MS to avoid hanging the IPC.
-        appendOutlookDebug(`[ExportCookies] Partition empty, priming for ${accountId}`);
-        try {
-          const bundle = await loadOwaTokenBundle(accountId);
-          applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
-          installOutlookPartitionRequestHooks(owaSession);
-        } catch (err) {
-          throw new Error(
-            `Could not stage tokens for ${account.email}: ${err instanceof Error ? err.message : String(err)}`
-          );
-        }
-
-        const primer = new BrowserWindow({
-          width: 800,
-          height: 600,
-          show: false,
-          webPreferences: {
-            partition: partitionName,
-            contextIsolation: false,
-            nodeIntegration: false,
-            sandbox: false,
-            preload: path.join(__dirname, 'preload-mailbox.js'),
-          },
-        });
-        windowToAccountMap.set(primer.webContents.id, accountId);
-
-        const PRIME_TIMEOUT_MS = 12000;
-        try {
-          await new Promise<void>((resolve) => {
-            const settled = { done: false };
-            const finish = () => {
-              if (settled.done) return;
-              settled.done = true;
-              clearInterval(pollTimer);
-              clearTimeout(hardTimeout);
-              resolve();
-            };
-            const pollTimer = setInterval(async () => {
-              try {
-                const probe = await readMicrosoftCookies();
-                if (probe.length > 0) finish();
-              } catch {
-                /* keep polling */
-              }
-            }, 750);
-            const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
-            primer
-              .loadURL('https://outlook.office.com/mail/inbox?locale=en-US')
-              .catch((loadErr) => {
-                appendOutlookDebug(
-                  `[ExportCookies] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
-                );
-              });
-          });
-        } finally {
-          windowToAccountMap.delete(primer.webContents.id);
-          if (!primer.isDestroyed()) primer.destroy();
-        }
-
-        msCookies = await readMicrosoftCookies();
       }
 
       if (msCookies.length === 0) {
@@ -3080,6 +3206,44 @@ function setupIpcHandlers() {
       const msg = error?.message || String(error);
       appendOutlookDebug(`[ExportCookies] Failed: ${msg}`);
       return { success: false, error: msg };
+    }
+  });
+
+  /**
+   * Given an email that matches a **token** account, silently build OWA session
+   * cookies from the refresh token (same as export priming). Used by Add Account
+   * when the mailbox already exists as a token account.
+   */
+  ipcMain.handle('account:hydrateSessionCookiesFromTokenEmail', async (_, emailRaw: string) => {
+    try {
+      const email = String(emailRaw || '').trim().toLowerCase();
+      if (!email) return { success: false, error: 'Email required' };
+      const store = await readStore();
+      const accounts: any[] = store.accounts || [];
+      const account = accounts.find(
+        (a: any) => String(a.email || '').trim().toLowerCase() === email && a.auth?.type === 'token'
+      );
+      if (!account) {
+        return {
+          success: false,
+          error: 'No token account with this email. Add the mailbox as a token account first, or use interactive capture.',
+        };
+      }
+      await hydrateOwaCookiesFromStoredToken(account.id);
+      const owaSession = session.fromPartition(`persist:outlook-${account.id}`);
+      const msCookies = await mapSessionCookiesToMicrosoftParsed(owaSession);
+      if (!hasStrongMicrosoftSessionCookies(msCookies)) {
+        return {
+          success: false,
+          error:
+            'Session cookies could not be built from the refresh token (weak or empty). Ensure this account has EWS/OWA scope and a valid refresh token.',
+        };
+      }
+      const header = cookiesToHeaderString(msCookies);
+      const json = cookiesToCookieEditorJson(msCookies);
+      return { success: true, cookies: header, json };
+    } catch (error: any) {
+      return { success: false, error: error?.message || String(error) };
     }
   });
 
@@ -4080,89 +4244,10 @@ function setupIpcHandlers() {
         throw new Error('Browser sign-in requires a token-based Microsoft account.');
       }
 
-      const partitionName = `persist:outlook-${accountId}`;
-      const owaSession = session.fromPartition(partitionName);
-      const readMicrosoftCookies = async (): Promise<ParsedCookie[]> => {
-        const all = await owaSession.cookies.get({});
-        const parsed: ParsedCookie[] = all.map((c) => {
-          const ssRaw = (c as { sameSite?: string }).sameSite || '';
-          let sameSite: ParsedCookie['sameSite'] | undefined;
-          if (ssRaw === 'no_restriction') sameSite = 'no_restriction';
-          else if (ssRaw === 'lax') sameSite = 'lax';
-          else if (ssRaw === 'strict') sameSite = 'strict';
-          else if (ssRaw === 'unspecified') sameSite = undefined;
-          return {
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path || '/',
-            secure: c.secure !== false,
-            expirationDate: c.expirationDate,
-            httpOnly: (c as { httpOnly?: boolean }).httpOnly === true,
-            sameSite,
-          };
-        });
-        return filterMicrosoftRelatedCookies(parsed);
-      };
-
-      let msCookies = await readMicrosoftCookies();
-      let strongCount = countStrongMicrosoftSessionCookies(msCookies);
-
-      if (msCookies.length === 0 || strongCount === 0) {
-        appendOutlookDebug(`[ExternalSignIn] Priming OWA cookie jar for ${account.email}`);
-        const bundle = await loadOwaTokenBundle(accountId);
-        applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
-        installOutlookPartitionRequestHooks(owaSession);
-
-        const primer = new BrowserWindow({
-          width: 800,
-          height: 600,
-          show: false,
-          webPreferences: {
-            partition: partitionName,
-            contextIsolation: false,
-            nodeIntegration: false,
-            sandbox: false,
-            preload: path.join(__dirname, 'preload-mailbox.js'),
-          },
-        });
-        windowToAccountMap.set(primer.webContents.id, accountId);
-        const PRIME_TIMEOUT_MS = 12000;
-        try {
-          await new Promise<void>((resolve) => {
-            const settled = { done: false };
-            const finish = () => {
-              if (settled.done) return;
-              settled.done = true;
-              clearInterval(pollTimer);
-              clearTimeout(hardTimeout);
-              resolve();
-            };
-            const pollTimer = setInterval(async () => {
-              try {
-                const probe = await readMicrosoftCookies();
-                if (probe.length > 0 && hasStrongMicrosoftSessionCookies(probe)) finish();
-              } catch {
-                /* keep polling */
-              }
-            }, 750);
-            const hardTimeout = setTimeout(finish, PRIME_TIMEOUT_MS);
-            primer
-              .loadURL('https://outlook.office.com/mail/inbox?locale=en-US')
-              .catch((loadErr) => {
-                appendOutlookDebug(
-                  `[ExternalSignIn] primer loadURL failed: ${loadErr instanceof Error ? loadErr.message : String(loadErr)}`
-                );
-              });
-          });
-        } finally {
-          windowToAccountMap.delete(primer.webContents.id);
-          if (!primer.isDestroyed()) primer.destroy();
-        }
-
-        msCookies = await readMicrosoftCookies();
-        strongCount = countStrongMicrosoftSessionCookies(msCookies);
-      }
+      await hydrateOwaCookiesFromStoredToken(accountId);
+      const owaSession = session.fromPartition(`persist:outlook-${accountId}`);
+      const msCookies = await mapSessionCookiesToMicrosoftParsed(owaSession);
+      const strongCount = countStrongMicrosoftSessionCookies(msCookies);
 
       const primaryOrigin = pickPrimaryCookieOrigin(msCookies);
       const cookieEditorJson = cookiesToCookieEditorJson(msCookies);
@@ -4197,10 +4282,9 @@ function setupIpcHandlers() {
         }
       }
 
-      // Auto-copy the fastest fallback: one paste in DevTools then refresh.
-      // This still works even when a given browser blocks silent SSO continuation.
+      // Prefer extension JSON when we have a strong session (includes HttpOnly cookies).
       try {
-        clipboard.writeText(consoleSnippet);
+        clipboard.writeText(strongCount > 0 ? cookieEditorJson : consoleSnippet);
       } catch {
         /* no-op */
       }
@@ -4228,8 +4312,6 @@ function setupIpcHandlers() {
       url.searchParams.set('redirect_uri', redirectUri);
       url.searchParams.set('response_mode', 'query');
       url.searchParams.set('scope', scopes.join(' '));
-      // Attempt true one-click continuation first when a browser session exists.
-      // Microsoft will still force interactive auth if MFA/CA/consent is needed.
       url.searchParams.set('prompt', 'none');
       url.searchParams.set('login_hint', account.email);
       url.searchParams.set('domain_hint', 'organizations');

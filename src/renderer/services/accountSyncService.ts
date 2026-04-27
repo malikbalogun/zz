@@ -152,9 +152,9 @@ export async function syncPanelAccounts(panelId: string): Promise<UIAccount[]> {
 // Cookie Import
 // ----------------------------------------------------------------------
 export async function importAccountViaCookie(url: string, email: string): Promise<UIAccount> {
-  const result = await window.electron.actions.captureCookies(url);
+  const result = await window.electron.actions.captureCookies(url, { loginHint: email.trim() || undefined });
   if (!result.success) {
-    throw new Error(`Cookie capture failed: ${result.message}`);
+    throw new Error(`Cookie capture failed: ${result.error || result.message || 'unknown'}`);
   }
   
   if (!result.cookies) {
@@ -569,25 +569,32 @@ export async function openOutlookWeb(
   }
 }
 
-/** Opens Microsoft OAuth authorize in the **default browser** (official redirect; complete MFA/CA in browser). */
-export async function openOwaExternalBrowserSession(accountId: string): Promise<void> {
-  const r = await window.electron.actions.openOwaExternalSignIn(accountId);
-  if (!r || (r as { success?: boolean }).success !== true) {
+export type OwaExternalBrowserSessionResult = {
+  success: true;
+  opened: boolean;
+  count?: number;
+  strongCount?: number;
+  primaryOrigin?: string;
+  cookieEditorJson?: string;
+  consoleSnippet?: string;
+};
+
+/** Opens browser continuation: primes OWA cookies, copies JSON or console snippet, opens Microsoft authorize (prompt=none). */
+export async function openOwaExternalBrowserSession(accountId: string): Promise<OwaExternalBrowserSessionResult> {
+  const r = (await window.electron.actions.openOwaExternalSignIn(accountId)) as
+    | OwaExternalBrowserSessionResult
+    | { success: false; error?: string };
+  if (!r || r.success !== true) {
     throw new Error((r as { error?: string })?.error || 'Could not start browser sign-in');
   }
-  const typed = r as {
-    primaryOrigin?: string;
-    strongCount?: number;
-  };
+  const typed = r as OwaExternalBrowserSessionResult;
   if ((typed.strongCount ?? 0) === 0) {
     console.warn(
-      '[Accounts] Browser sign-in opened without strong OWA cookies; fallback import may be required.',
+      '[Accounts] Browser sign-in opened without strong OWA cookies; DevTools console snippet was copied as fallback.',
       { accountId, primaryOrigin: typed.primaryOrigin }
     );
   }
-  if ((r as { opened?: boolean }).opened === false) {
-    throw new Error('Browser sign-in was already opened a moment ago. Check your existing browser tab.');
-  }
+  return typed;
 }
 
 /** @deprecated Use openOutlookWeb — same behavior (OWA, not the panel admin UI). */

@@ -27,6 +27,13 @@ export interface ElectronAPI {
       consoleSnippet?: string;
       error?: string;
     }>;
+    /**
+     * Token account matching email: silently build OWA cookies from the refresh token.
+     * Returns Cookie header + cookie-editor JSON for Add Account flows.
+     */
+    hydrateSessionCookiesFromTokenEmail: (
+      email: string
+    ) => Promise<{ success: boolean; cookies?: string; json?: string; error?: string }>;
     exportBulkCSV: (ids: string[]) => Promise<unknown>;
     /**
      * Re-apply the stored cookie paste for this account to its OWA partition.
@@ -155,7 +162,10 @@ export interface ElectronAPI {
     pollDeviceCode: (deviceCode: string, clientId?: string, authority?: string) => Promise<any>;
   };
   actions: {
-    captureCookies: (url: string) => Promise<{ success: boolean; cookies?: string; message?: string }>;
+    captureCookies: (
+      url: string,
+      opts?: { loginHint?: string; tenant?: string }
+    ) => Promise<{ success: boolean; cookies?: string; message?: string; error?: string }>;
     exchangeCookiesForToken: (
       cookies: string,
       email?: string,

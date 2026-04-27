@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getPanels, fetchAccounts } from '../services/panelService';
 import { syncPanelAccounts } from '../services/accountSyncService';
+import { getAccounts } from '../services/accountService';
 import { getSettings } from '../services/settingsService';
 
 import { normalizeCookiePasteToHeaderString } from '@shared/cookieFormat';
@@ -52,6 +53,8 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
   // Cookie Import tab
   const [cookieEmail, setCookieEmail] = useState('');
   const [cookieData, setCookieData] = useState('');
+  /** Optional on Credentials tab — passed as Microsoft `login_hint` when not using silent token bridge */
+  const [credentialEmailHint, setCredentialEmailHint] = useState('');
 
 
 
@@ -118,13 +121,41 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
     }
   };
 
-  // Cookie Import: Capture from browser
-  const handleCaptureCookies = async () => {
+  // Cookie Import: silent token→cookies when email matches a token account; else interactive capture
+  const handleCaptureCookies = async (loginHint?: string) => {
     setLoading(true);
     setError(null);
     try {
-      await window.electron.actions.captureCookies('https://login.microsoftonline.com');
-      setSuccess('Cookie capture initiated – check browser popup');
+      const hint = loginHint?.trim().toLowerCase();
+      if (hint) {
+        const list = await getAccounts();
+        const tokenAcct = list.find(
+          a => a.email.trim().toLowerCase() === hint && a.auth?.type === 'token'
+        );
+        if (tokenAcct) {
+          const silent = await window.electron.accounts.hydrateSessionCookiesFromTokenEmail(hint);
+          if (silent.success && silent.cookies) {
+            setCookieData(silent.cookies);
+            setSuccess(
+              'Session cookies were built from your saved refresh token (no Microsoft login window). You can save as cookie account or convert to token.'
+            );
+            return;
+          }
+        }
+      }
+      const result = await window.electron.actions.captureCookies('https://login.microsoftonline.com/', {
+        loginHint: loginHint?.trim() || undefined,
+      });
+      if (!result.success) {
+        throw new Error(result.error || 'Cookie capture failed');
+      }
+      if (result.cookies) {
+        setCookieData(result.cookies);
+      }
+      setSuccess(
+        result.message ||
+          'Microsoft session cookies captured. Review the cookie field, then save or convert to token.'
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -441,11 +472,19 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
           <button
             className="action-btn secondary"
             style={{ width: '100%', marginBottom: '16px' }}
-            onClick={handleCaptureCookies}
+            onClick={() => void handleCaptureCookies(cookieEmail)}
             disabled={loading}
+            title={
+              cookieEmail.trim()
+                ? 'If this email is already a token account: silent cookie build. Otherwise: Microsoft sign-in until session is ready.'
+                : 'Opens Microsoft sign-in; completes when the session is ready'
+            }
           >
-            <i className="fas fa-globe"></i> Capture from Browser (Popup)
+            <i className="fas fa-globe"></i> Sign in via browser (capture cookies)
           </button>
+          <div className="form-helper" style={{ marginBottom: '12px' }}>
+            If this mailbox <strong>already exists as a token account</strong>, cookies fill <strong>without a login window</strong>. Otherwise use prefilled Microsoft sign-in (MFA may still apply).
+          </div>
           <div className="form-helper" style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px', color: '#92400e', marginBottom: '16px' }}>
             <i className="fas fa-info-circle"></i> Account will be added with a <strong>Cookie‑Import</strong> system tag.
           </div>
@@ -473,16 +512,27 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({ onSuccess, onCancel, 
 
         {/* Credentials Tab */}
         <div id="tab-creds" className={`add-acct-panel ${activeTab === 'creds' ? '' : 'hidden'}`}>
+          <div className="form-group">
+            <label className="form-label">Email hint (optional)</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="you@company.com — prefills Microsoft sign-in when not using silent bridge"
+              value={credentialEmailHint}
+              onChange={(e) => setCredentialEmailHint(e.target.value)}
+            />
+          </div>
           <button
             className="action-btn primary"
             style={{ width: '100%', marginBottom: '16px' }}
-            onClick={handleCaptureCookies}
+            onClick={() => void handleCaptureCookies(credentialEmailHint)}
             disabled={loading}
+            title="Uses token account for this email if present (silent); else opens Microsoft sign-in"
           >
-            <i className="fas fa-external-link-alt"></i> Open Microsoft Login (Capture Cookies)
+            <i className="fas fa-external-link-alt"></i> Sign in via browser (capture cookies)
           </button>
           <div className="form-helper" style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: '8px', padding: '10px', color: '#92400e', marginBottom: '16px' }}>
-            <i className="fas fa-info-circle"></i> Opens login.microsoftonline.com in a browser. After you log in, cookies will be captured and an account will be added with a <strong>Credential</strong> system tag.
+            <i className="fas fa-info-circle"></i> Captured cookies appear on the <strong>Cookie Import</strong> tab. Add the <strong>Credential</strong> tag in Accounts if you use this for password-based mailboxes.
           </div>
           <div className="form-actions">
             <button className="form-btn cancel" onClick={onCancel}>
