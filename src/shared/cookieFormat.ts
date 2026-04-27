@@ -216,6 +216,47 @@ export function cookiesToEditThisCookieJson(cookies: ParsedCookie[]): string {
   return JSON.stringify(out, null, 2);
 }
 
+/**
+ * Serialise cookies to a console-paste helper. Browser console APIs cannot set
+ * HttpOnly cookies or cookies for unrelated domains, so extension JSON remains
+ * the most complete import path. This script sets every cookie allowed on the
+ * current host and reports skipped domains.
+ */
+export function cookiesToConsoleScript(cookies: ParsedCookie[], redirectUrl = 'https://outlook.office.com/mail/inbox'): string {
+  const rows = cookies
+    .filter(c => c.name && (c.domain || '').trim())
+    .map(c => ({
+      name: c.name,
+      value: c.value,
+      domain: (c.domain || '').trim(),
+      path: c.path && c.path.startsWith('/') ? c.path : '/',
+      secure: c.secure !== false,
+      sameSite: normalizeEditThisCookieSameSite(c.sameSite),
+      expirationDate: c.expirationDate && c.expirationDate > 0 ? Math.floor(c.expirationDate) : undefined,
+    }));
+  return [
+    '(() => {',
+    `  const cookies = ${JSON.stringify(rows, null, 2)};`,
+    '  const host = location.hostname;',
+    '  let set = 0;',
+    '  let skipped = 0;',
+    '  for (const c of cookies) {',
+    '    const domain = String(c.domain || "").replace(/^\\./, "").toLowerCase();',
+    '    if (host !== domain && !host.endsWith("." + domain)) { skipped++; continue; }',
+    '    const parts = [`${c.name}=${c.value}`, `path=${c.path || "/"}`];',
+    '    if (c.domain) parts.push(`domain=${c.domain}`);',
+    '    if (c.expirationDate) parts.push(`expires=${new Date(c.expirationDate * 1000).toUTCString()}`);',
+    '    if (c.secure !== false) parts.push("secure");',
+    '    if (c.sameSite && c.sameSite !== "unspecified") parts.push(`SameSite=${c.sameSite === "no_restriction" ? "None" : c.sameSite}`);',
+    '    document.cookie = parts.join("; ");',
+    '    set++;',
+    '  }',
+    '  console.log(`Cookie import attempted: ${set} set on ${host}, ${skipped} skipped for other domains. Refresh Outlook after this.`);',
+    `  location.href = ${JSON.stringify(redirectUrl)};`,
+    '})();',
+  ].join('\n');
+}
+
 /** Base URL for Electron session.cookies.set */
 export function cookieToSetUrl(c: ParsedCookie): string {
   let host = (c.domain || '').replace(/^\./, '').trim();

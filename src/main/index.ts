@@ -9,6 +9,7 @@ import {
   parseCookiePaste,
   filterMicrosoftRelatedCookies,
   cookiesToEditThisCookieJson,
+  cookiesToConsoleScript,
   type ParsedCookie,
 } from '../shared/cookieFormat';
 import { diagnoseMicrosoftAuthError } from '../shared/microsoftAuthDiagnostics';
@@ -256,6 +257,93 @@ function applyOwaTokenBundleToRunningSession(accountId: string, bundle: OwaToken
   }
   msalCacheMap.set(accountId, msalCache);
   outlookSessionAuth.set(outlookSession, { accessToken, email: account.email });
+}
+
+async function readMicrosoftCookiesFromSession(outlookSession: Session): Promise<ParsedCookie[]> {
+  const all = await outlookSession.cookies.get({});
+  const parsed: ParsedCookie[] = all.map((c) => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path || '/',
+    secure: c.secure !== false,
+    httpOnly: c.httpOnly,
+    sameSite: c.sameSite,
+    hostOnly: !String(c.domain || '').startsWith('.'),
+    session: !c.expirationDate,
+    storeId: null,
+    expirationDate: c.expirationDate,
+  }));
+  return filterMicrosoftRelatedCookies(parsed);
+}
+
+async function primeTokenAccountCookies(
+  accountId: string,
+  options: { showWindow?: boolean } = {}
+): Promise<{ account: any; cookies: ParsedCookie[]; partitionName: string }> {
+  const bundle = await loadOwaTokenBundle(accountId);
+  const account = bundle.account;
+  const partitionName = `persist:outlook-${accountId}`;
+  const outlookSession = session.fromPartition(partitionName);
+  applyOwaTokenBundleToRunningSession(accountId, bundle, outlookSession);
+  installOutlookPartitionRequestHooks(outlookSession);
+  owaLastSuccessfulRefresh.set(accountId, Date.now());
+
+  let cookies = await readMicrosoftCookiesFromSession(outlookSession);
+  if (cookies.length > 0) {
+    return { account, cookies, partitionName };
+  }
+
+  const primer = new BrowserWindow({
+    width: 1000,
+    height: 760,
+    show: options.showWindow === true,
+    title: `Preparing Outlook cookies - ${account.email}`,
+    webPreferences: {
+      partition: partitionName,
+      contextIsolation: false,
+      nodeIntegration: false,
+      sandbox: false,
+      preload: path.join(__dirname, 'preload-mailbox.js'),
+    },
+  });
+  windowToAccountMap.set(primer.webContents.id, accountId);
+  try {
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearInterval(pollTimer);
+        clearTimeout(hardTimeout);
+        resolve();
+      };
+      const pollTimer = setInterval(async () => {
+        try {
+          const probe = await readMicrosoftCookiesFromSession(outlookSession);
+          if (probe.length > 0) finish();
+        } catch {
+          // keep polling until timeout
+        }
+      }, 500);
+      const hardTimeout = setTimeout(finish, 15000);
+      primer.loadURL('https://outlook.office.com/mail/inbox?locale=en-US').catch((error) => {
+        appendOutlookDebug(`[TokenToCookies] primer load failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    });
+  } finally {
+    windowToAccountMap.delete(primer.webContents.id);
+    if (!primer.isDestroyed()) primer.destroy();
+  }
+
+  cookies = await readMicrosoftCookiesFromSession(outlookSession);
+  if (!cookies.length) {
+    throw new Error(
+      `Could not mint Microsoft browser cookies for ${account.email}. The refresh token may be expired, missing Outlook scope, or blocked by Microsoft sign-in policy.`
+    );
+  }
+  appendOutlookDebug(`[TokenToCookies] Minted ${cookies.length} Microsoft cookies for ${account.email}`);
+  return { account, cookies, partitionName };
 }
 
 async function tryRefreshOwaWindowSession(
@@ -2915,17 +3003,14 @@ function setupIpcHandlers() {
     const account = accounts.find((a: any) => a.id === accountId);
     if (!account?.email) throw new Error('Account not found');
 
-    const partitionName =
-      account.auth?.type === 'cookie'
-        ? `persist:outlook-cookie-${accountId}`
-        : `persist:outlook-${accountId}`;
-    const owaSession = session.fromPartition(partitionName);
-
     if (account.auth?.type === 'token') {
-      const bundle = await loadOwaTokenBundle(accountId);
-      applyOwaTokenBundleToRunningSession(accountId, bundle, owaSession);
-      installOutlookPartitionRequestHooks(owaSession);
-    } else if (account.auth?.type === 'cookie') {
+      const result = await primeTokenAccountCookies(accountId, { showWindow: false });
+      return { account: result.account, cookies: result.cookies };
+    }
+
+    if (account.auth?.type === 'cookie') {
+      const partitionName = `persist:outlook-cookie-${accountId}`;
+      const owaSession = session.fromPartition(partitionName);
       const paste = getMicrosoftCookiePasteFromAccount(account);
       if (paste) {
         const parsedAll = parseCookiePaste(paste);
@@ -2935,31 +3020,16 @@ function setupIpcHandlers() {
           await applyParsedCookiesToSession(owaSession, toApply);
         }
       }
-    } else {
-      throw new Error('Cookie export supports token or cookie accounts only.');
+      const cookies = await readMicrosoftCookiesFromSession(owaSession);
+      if (!cookies.length) {
+        throw new Error(
+          `No Microsoft cookies are available for ${account.email}. Add fresh cookies to this account, then export again.`
+        );
+      }
+      return { account, cookies };
     }
 
-    const all = await owaSession.cookies.get({});
-    const parsed: ParsedCookie[] = all.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path || '/',
-      secure: c.secure !== false,
-      httpOnly: c.httpOnly,
-      sameSite: c.sameSite,
-      hostOnly: !String(c.domain || '').startsWith('.'),
-      session: !c.expirationDate,
-      storeId: null,
-      expirationDate: c.expirationDate,
-    }));
-    const cookies = filterMicrosoftRelatedCookies(parsed);
-    if (!cookies.length) {
-      throw new Error(
-        `No Microsoft cookies are available for ${account.email}. Use "Sign in via browser" once, then export again.`
-      );
-    }
-    return { account, cookies };
+    throw new Error('Cookie export supports token or cookie accounts only.');
   };
 
   ipcMain.handle('account:exportOwaCookieJson', async (_, accountId: string) => {
@@ -2977,11 +3047,11 @@ function setupIpcHandlers() {
     }
   });
 
-  ipcMain.handle('account:copyOwaCookieJson', async (_, accountId: string) => {
+  ipcMain.handle('account:copyOwaCookieConsoleScript', async (_, accountId: string) => {
     try {
       const { account, cookies } = await readMicrosoftOwaCookiesForAccount(accountId);
-      const json = cookiesToEditThisCookieJson(cookies);
-      clipboard.writeText(json);
+      const script = cookiesToConsoleScript(cookies);
+      clipboard.writeText(script);
       return {
         success: true as const,
         email: account.email,
