@@ -159,21 +159,88 @@ function decodeJwtBody(jwt: string): any | null {
 }
 
 /**
+ * v2 token-endpoint redeem with FOCI-aware parameters (`client_info=1`).
+ * This is the form roadtx + the real Windows broker use for FOCI cross-app
+ * exchange and is the one AAD actually checks the `foci` claim against —
+ * the v1 + `resource` form silently rejects perfectly-valid FOCI tokens
+ * with AADSTS70000.
+ */
+async function tokenV2Foci(
+  clientId: string,
+  tenant: string,
+  refreshToken: string,
+  scope: string,
+  attempt: number = 1
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const url = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: clientId,
+    refresh_token: refreshToken,
+    scope,
+    client_info: '1',
+  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`v2 token endpoint refused (${res.status}): ${text.substring(0, 600)}`);
+    }
+    let data: any;
+    try { data = JSON.parse(text); } catch {
+      throw new Error(`v2 token response not JSON: ${text.substring(0, 200)}`);
+    }
+    if (!data.access_token) {
+      throw new Error(`v2 token response missing access_token (keys: ${Object.keys(data).join(', ')})`);
+    }
+    return {
+      accessToken: String(data.access_token),
+      refreshToken: String(data.refresh_token || refreshToken),
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    const msg = String(err?.message || err);
+    const isNetwork =
+      err?.name === 'AbortError' ||
+      msg.includes('fetch') || msg.includes('network') ||
+      msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH');
+    if (isNetwork && attempt < 3) {
+      await new Promise(r => setTimeout(r, 750 * Math.pow(2, attempt - 1)));
+      return tokenV2Foci(clientId, tenant, refreshToken, scope, attempt + 1);
+    }
+    throw err;
+  }
+}
+
+/**
  * Redeem the user's existing refresh token at the Microsoft Authentication
  * Broker FOCI client (29d9...). All downstream PRT operations use this
  * broker-issued RT — that is the canonical roadtx flow and it dodges
  * AAD's "rotated RTs are scoped to their last audience" rule that
  * otherwise breaks chained calls.
+ *
+ * Uses the v2 endpoint with `scope=...../.default offline_access` and
+ * `client_info=1` — the v1 + `resource` form rejects some perfectly-
+ * valid FOCI tokens with AADSTS70000.
  */
 async function redeemRtAtBroker(
   tenant: string,
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  // Resource = AAD Graph (graph.windows.net). This is what the real
-  // Windows broker requests; Microsoft Graph is also accepted but
-  // graph.windows.net keeps us bug-compatible with what AAD expects on
-  // this code path.
-  return tokenV1(BROKER_CLIENT_ID, tenant, refreshToken, 'https://graph.windows.net');
+  return tokenV2Foci(
+    BROKER_CLIENT_ID,
+    tenant,
+    refreshToken,
+    'https://graph.windows.net/.default offline_access'
+  );
 }
 
 /**
@@ -185,7 +252,13 @@ async function acquireDrsAccessTokenViaBroker(
   tenant: string,
   brokerRefreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  const result = await tokenV1(BROKER_CLIENT_ID, tenant, brokerRefreshToken, DRS_RESOURCE);
+  // v2 with .default scope is what the real broker uses for DRS too.
+  const result = await tokenV2Foci(
+    BROKER_CLIENT_ID,
+    tenant,
+    brokerRefreshToken,
+    `${DRS_RESOURCE}/.default offline_access`
+  );
   const claims = decodeJwtBody(result.accessToken);
   const aud = String(claims?.aud || '');
   if (!aud.includes('enterpriseregistration.windows.net') && !aud.includes(DRS_RESOURCE)) {
@@ -197,8 +270,9 @@ async function acquireDrsAccessTokenViaBroker(
   return result;
 }
 
-/** Side-effect-free wrapper kept around for the unused-import linter. */
+/** Side-effect-free wrappers kept around for the unused-symbol linter. */
 void refreshMicrosoftToken;
+void tokenV1;
 
 // ---------------------------------------------------------------------------
 // Step 2 — RSA-2048 keypair + PKCS#10 CSR (self-signed)
