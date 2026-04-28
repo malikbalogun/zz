@@ -159,43 +159,42 @@ function decodeJwtBody(jwt: string): any | null {
 }
 
 /**
- * Get a DRS-audience access token. Strategy:
- *
- *   1. Try the v1 token endpoint with the user's existing client_id and
- *      `resource=urn:ms-drs:enterpriseregistration.windows.net`. If the
- *      app supports FOCI (every Office / Outlook / Authenticator client
- *      does), AAD honours the resource and returns a DRS token directly.
- *   2. If step 1 returns the wrong audience (some non-FOCI clients
- *      ignore `resource` and return an audience-stamped token from the
- *      original scope), redeem the rotated refresh token at the
- *      Microsoft Authentication Broker client (29d9...) which is FOCI
- *      and always accepts DRS as a resource.
- *   3. Validate the resulting token's `aud` claim before handing it back
- *      so we fail loudly if AAD silently downgraded again.
+ * Redeem the user's existing refresh token at the Microsoft Authentication
+ * Broker FOCI client (29d9...). All downstream PRT operations use this
+ * broker-issued RT — that is the canonical roadtx flow and it dodges
+ * AAD's "rotated RTs are scoped to their last audience" rule that
+ * otherwise breaks chained calls.
  */
-async function acquireDrsAccessToken(
-  clientId: string,
-  authorityEndpoint: string,
+async function redeemRtAtBroker(
+  tenant: string,
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  const tenant = (authorityEndpoint || 'common').trim() || 'common';
-  let attempt = await tokenV1(clientId, tenant, refreshToken, DRS_RESOURCE);
-  let claims = decodeJwtBody(attempt.accessToken);
-  let aud: string = String(claims?.aud || '');
-  if (!aud.includes('enterpriseregistration.windows.net') && !aud.includes(DRS_RESOURCE)) {
-    // Original client returned the wrong audience — redeem at the broker.
-    attempt = await tokenV1(BROKER_CLIENT_ID, tenant, attempt.refreshToken, DRS_RESOURCE);
-    claims = decodeJwtBody(attempt.accessToken);
-    aud = String(claims?.aud || '');
-  }
+  // Resource = AAD Graph (graph.windows.net). This is what the real
+  // Windows broker requests; Microsoft Graph is also accepted but
+  // graph.windows.net keeps us bug-compatible with what AAD expects on
+  // this code path.
+  return tokenV1(BROKER_CLIENT_ID, tenant, refreshToken, 'https://graph.windows.net');
+}
+
+/**
+ * Acquire a DRS-audience access token *using the broker-rotated RT*.
+ * Verifies the returned token's `aud` claim before handing it back so we
+ * fail loudly if AAD silently downgraded.
+ */
+async function acquireDrsAccessTokenViaBroker(
+  tenant: string,
+  brokerRefreshToken: string
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const result = await tokenV1(BROKER_CLIENT_ID, tenant, brokerRefreshToken, DRS_RESOURCE);
+  const claims = decodeJwtBody(result.accessToken);
+  const aud = String(claims?.aud || '');
   if (!aud.includes('enterpriseregistration.windows.net') && !aud.includes(DRS_RESOURCE)) {
     throw new Error(
-      `Could not acquire DRS-audience access token (got aud="${aud}"). ` +
-      `This usually means the account's refresh token is not from a FOCI client; ` +
-      `re-add the account via Device Code (Microsoft Office 365 client) and try again.`
+      `DRS access token has wrong audience: ${aud || '(none)'}. ` +
+      `This usually means the account's refresh token cannot be exchanged for a DRS token via FOCI.`
     );
   }
-  return attempt;
+  return result;
 }
 
 /** Side-effect-free wrapper kept around for the unused-import linter. */
@@ -614,15 +613,27 @@ export async function registerDeviceForPrt(
 ): Promise<PrtRegistration> {
   const displayName =
     params.deviceDisplayName || `Watcher-${params.email.replace(/[^a-z0-9.-]+/gi, '_')}`;
+  const tenant = (params.authority || 'common').trim() || 'common';
 
-  // Step 1: DRS-audience access token (validated). Note this also returns
-  // a possibly-rotated refresh token we'll reuse in step 6 (srv_challenge)
-  // since AAD often ties the broker FOCI redemption to that rotated RT.
-  const drsTok = await acquireDrsAccessToken(
-    params.clientId,
-    params.authority,
-    params.refreshToken
-  );
+  // Step 0: redeem the user's RT at the Microsoft Authentication Broker
+  // FOCI client (29d9...). EVERY downstream call uses this broker-issued
+  // RT. AAD scopes rotated RTs to their last audience, so chaining
+  // (DRS RT → broker RT) breaks with AADSTS70000 invalid_grant. The
+  // canonical roadtx flow is broker-first, then everything else.
+  let brokerTok: { accessToken: string; refreshToken: string };
+  try {
+    brokerTok = await redeemRtAtBroker(tenant, params.refreshToken);
+  } catch (err) {
+    throw new Error(
+      `Could not redeem the refresh token at the Microsoft Authentication Broker FOCI client. ` +
+      `This usually means the account's original refresh token is not from a FOCI app — ` +
+      `re-add the account via Device Code (which uses the Microsoft Office FOCI client) and try again. ` +
+      `Underlying error: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  // Step 1: DRS-audience access token, redeemed at the broker.
+  const drsTok = await acquireDrsAccessTokenViaBroker(tenant, brokerTok.refreshToken);
 
   // The DRS token's `tid` claim is the canonical tenant GUID for this
   // user's home tenant. DRS rejects the request if TargetDomain doesn't
@@ -645,37 +656,14 @@ export async function registerDeviceForPrt(
     targetDomain
   );
 
-  // For the srv_challenge call we MUST have a refresh token issued by
-  // the broker FOCI client (29d9...). srv_challenge with any other
-  // client_id returns AADSTS700019 ("Application ID ... cannot be
-  // used or is not authorized"). Fail loudly if FOCI redemption
-  // doesn't work — falling back to the original token here just
-  // pushes the same error one level up.
-  let brokerRefreshToken: string;
-  try {
-    const broker = await tokenV1(
-      BROKER_CLIENT_ID,
-      params.authority,
-      drsTok.refreshToken,
-      'https://graph.windows.net'
-    );
-    brokerRefreshToken = broker.refreshToken;
-  } catch (err) {
-    throw new Error(
-      `Could not redeem the refresh token at the Microsoft Authentication Broker FOCI client. ` +
-      `This usually means the account's original refresh token is not from a FOCI app — ` +
-      `re-add the account via Device Code (which uses the Microsoft Office FOCI client) and try again. ` +
-      `Underlying error: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
-
-  // Step 4 + 5: srv_challenge → session key. assertion JWT is signed
-  // by the device cert + claims client_id=BROKER_CLIENT_ID so AAD
-  // evaluates the request against the broker app (which is allowed to
-  // mint PRTs).
+  // Step 4 + 5: srv_challenge → session key. We use the *latest*
+  // broker-rotated RT (drsTok.refreshToken) and sign with the device
+  // cert. Assertion JWT explicitly claims client_id=BROKER_CLIENT_ID
+  // so AAD evaluates the request against the broker app (which is
+  // allowed to mint PRTs — Office and other apps get AADSTS700019).
   const challenge = await srvChallenge(
-    params.authority,
-    brokerRefreshToken,
+    tenant,
+    drsTok.refreshToken,
     csr.privateKeyPem,
     reg.deviceCertPem,
     BROKER_CLIENT_ID
