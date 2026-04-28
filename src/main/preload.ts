@@ -83,6 +83,16 @@ contextBridge.exposeInMainWorld('electron', {
     refreshRealBrowserCookies: (accountId: string) =>
       ipcRenderer.invoke('account:refreshRealBrowserCookies', accountId),
     /**
+     * Mint a Primary Refresh Token (PRT) cookie for this account.
+     * First call performs the device-registration + srv_challenge
+     * dance and persists the device cert + session key on the account.
+     * Subsequent calls re-use the stored material — fast.
+     */
+    mintPrtCookie: (accountId: string) => ipcRenderer.invoke('account:mintPrtCookie', accountId),
+    /** Drop the stored PRT registration so the next mint starts fresh. */
+    clearPrtRegistration: (accountId: string) =>
+      ipcRenderer.invoke('account:clearPrtRegistration', accountId),
+    /**
      * One-click browser sign-in: capture cookies, copy Cookie-Editor JSON to
      * clipboard, and open outlook.office.com in the default browser.
      */

@@ -83,6 +83,28 @@ export interface ElectronAPI {
       | { success: false; error?: string; requiresInteractive?: boolean }
     >;
     /**
+     * Mint a Primary Refresh Token cookie for this account. The returned
+     * `cookie` is a `x-ms-RefreshTokenCredential` JWT — pasting it on
+     * `login.microsoftonline.com` lets AAD silently issue ESTSAUTH
+     * cookies and redirect to OWA, signed in.
+     */
+    mintPrtCookie: (
+      accountId: string
+    ) => Promise<
+      | {
+          success: true;
+          email: string;
+          cookie: string;
+          mintedAt: string;
+          expiresAt: string;
+          deviceId: string;
+          tenantId: string;
+        }
+      | { success: false; error?: string }
+    >;
+    /** Drop the stored PRT registration so the next mint starts fresh. */
+    clearPrtRegistration: (accountId: string) => Promise<{ success: boolean; error?: string }>;
+    /**
      * One-click "Sign in via browser": exchange the refresh token for OWA
      * cookies and open `outlook.office.com/mail/inbox` in a Chromium window
      * with those cookies already injected. The user lands directly on the

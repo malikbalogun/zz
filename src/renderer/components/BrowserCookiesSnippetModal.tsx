@@ -6,90 +6,39 @@ interface BrowserCookiesSnippetModalProps {
   onCancel: () => void;
 }
 
-type SnapshotData = {
+type PrtSnapshot = {
   email: string;
-  count: number;
-  strongCount: number;
-  source: 'realBrowser' | 'tokenPartition';
-  capturedAt?: string;
-  // Raw cookies-as-JSON. We render it as a one-line `document.cookie=…`
-  // snippet client-side so the user can re-copy without another IPC
-  // round-trip.
-  extensionJson: string;
+  cookie: string;
+  mintedAt: string;
+  expiresAt: string;
+  deviceId: string;
+  tenantId: string;
 };
 
-/** Build a single-line `document.cookie="…"` console snippet, mirroring the
- *  PRT-cookie style the user wants but using captured ESTSAUTH cookies (the
- *  closest thing AAD will let us deliver without a registered device).
- *
- *  document.cookie can only set ONE cookie per assignment, so we emit a
- *  semicolon-separated list of statements. Browsers silently drop HttpOnly
- *  cookies set this way, but the bridge cookies that survive are usually
- *  enough to flip AAD's /authorize?prompt=none into a successful redirect
- *  for the freshest captures.
- *
- *  After all cookies are written we also navigate to /authorize so the
- *  user lands directly on the inbox — same UX as the user's reference
- *  screenshot. */
-function buildOneLinerSnippet(extensionJson: string, email: string): string {
-  let cookies: Array<Record<string, unknown>> = [];
-  try {
-    const parsed = JSON.parse(extensionJson);
-    if (Array.isArray(parsed)) cookies = parsed as Array<Record<string, unknown>>;
-  } catch {
-    /* leave empty */
-  }
-  // Prefer cookies that AAD will actually accept on login.microsoftonline.com
-  // - any with a domain that ends in microsoftonline.com / live.com /
-  // microsoft.com. The console snippet is run on login.microsoftonline.com
-  // so others would be rejected as cross-domain anyway.
-  const isAadHost = (d: unknown) => {
-    const s = String(d || '').replace(/^\./, '').toLowerCase();
-    return (
-      s === 'login.microsoftonline.com' ||
-      s.endsWith('.microsoftonline.com') ||
-      s.endsWith('.microsoft.com') ||
-      s === 'login.live.com' ||
-      s.endsWith('.live.com')
-    );
-  };
-  const writable = cookies.filter(c => !c.httpOnly && isAadHost(c.domain));
-  // Build the exact `document.cookie=...; document.cookie=...;` chain the
-  // screenshot uses, then append a redirect at the end.
-  const parts: string[] = [];
-  for (const c of writable) {
-    const name = String(c.name || '');
-    const value = String(c.value ?? '');
-    if (!name) continue;
-    const domain = String(c.domain || '').replace(/^\./, '');
-    const path = (c.path as string) || '/';
-    const secure = c.secure !== false ? '; secure' : '';
-    const sameSite = (c.sameSite as string) || 'no_restriction';
-    const sameSiteAttr =
-      sameSite === 'lax' ? '; SameSite=Lax' : sameSite === 'strict' ? '; SameSite=Strict' : '; SameSite=None';
-    const expires =
-      typeof c.expirationDate === 'number' && c.expirationDate > 0
-        ? `; expires=${new Date(c.expirationDate * 1000).toUTCString()}`
-        : '; max-age=31536000';
-    parts.push(
-      `document.cookie="${name}=${value}; domain=${domain}; path=${path}${secure}${sameSiteAttr}${expires}"`
-    );
-  }
-  // Final redirect to /oauth2/v2.0/authorize?prompt=none — if the bridge
-  // cookies were enough, AAD silently lands the user on the inbox; if not
-  // it shows the password page (which is the same outcome they'd get
-  // without the snippet).
+/** Build the exact `document.cookie="x-ms-RefreshTokenCredential=…"` snippet
+ *  that matches the user's reference screenshot. Sets the PRT cookie on
+ *  `.login.microsoftonline.com` then navigates to /authorize?prompt=none —
+ *  AAD recognizes the PRT, mints fresh ESTSAUTH cookies for the browser
+ *  session, and redirects to the inbox. */
+function buildPrtSnippet(cookie: string, email: string): string {
+  // 30 days is the conservative server-honoured upper bound; AAD will
+  // ignore the cookie sooner if the underlying session key is rotated.
+  const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toUTCString();
   const finalUrl =
-    `https://login.microsoftonline.com/common/oauth2/v2.0/authorize` +
-    `?client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c` +
-    `&response_type=code` +
+    'https://login.microsoftonline.com/common/oauth2/v2.0/authorize' +
+    '?client_id=d3590ed6-52b3-4102-aeff-aad2292ab01c' +
+    '&response_type=code' +
     `&redirect_uri=${encodeURIComponent('https://outlook.office.com/mail/')}` +
-    `&response_mode=query` +
+    '&response_mode=query' +
     `&scope=${encodeURIComponent('openid profile offline_access https://outlook.office.com/.default')}` +
     `&login_hint=${encodeURIComponent(email)}` +
-    `&prompt=none`;
-  parts.push(`location.href=${JSON.stringify(finalUrl)}`);
-  return parts.join('; ');
+    '&prompt=none';
+  return (
+    `document.cookie="x-ms-RefreshTokenCredential=${cookie}; ` +
+    `domain=.login.microsoftonline.com; path=/; secure; SameSite=None; ` +
+    `expires=${expires}"; ` +
+    `location.href=${JSON.stringify(finalUrl)}`
+  );
 }
 
 const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
@@ -99,26 +48,26 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<SnapshotData | null>(null);
+  const [snapshot, setSnapshot] = useState<PrtSnapshot | null>(null);
   const [snippet, setSnippet] = useState<string>('');
   const [copied, setCopied] = useState(false);
-  const [capturing, setCapturing] = useState(false);
 
-  const load = async () => {
+  const mint = async () => {
     setLoading(true);
     setError(null);
     try {
-      const r = await window.electron.accounts.exportOwaCookies(accountId);
-      if (!r.success) throw new Error(r.error || 'Export failed');
-      setSnapshot({
+      const r = await window.electron.accounts.mintPrtCookie(accountId);
+      if (!r.success) throw new Error(r.error || 'PRT mint failed');
+      const snap: PrtSnapshot = {
         email: r.email,
-        count: r.count,
-        strongCount: r.strongCount,
-        source: r.source,
-        capturedAt: r.capturedAt,
-        extensionJson: r.extensionJson,
-      });
-      setSnippet(buildOneLinerSnippet(r.extensionJson, r.email));
+        cookie: r.cookie,
+        mintedAt: r.mintedAt,
+        expiresAt: r.expiresAt,
+        deviceId: r.deviceId,
+        tenantId: r.tenantId,
+      };
+      setSnapshot(snap);
+      setSnippet(buildPrtSnippet(snap.cookie, snap.email));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -127,23 +76,17 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
   };
 
   useEffect(() => {
-    void load();
+    void mint();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-  const handleCapture = async () => {
-    if (capturing) return;
-    setCapturing(true);
-    setError(null);
+  const handleClearAndRetry = async () => {
     try {
-      const cap = await window.electron.accounts.captureRealBrowserCookies(accountId);
-      if (!cap.success) throw new Error(cap.error || 'Capture failed');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCapturing(false);
+      await window.electron.accounts.clearPrtRegistration(accountId);
+    } catch {
+      /* ignore */
     }
+    await mint();
   };
 
   const handleCopy = async () => {
@@ -185,8 +128,6 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
       alert('Copy failed. Click inside the snippet box, press Ctrl/Cmd+A, then Ctrl/Cmd+C.');
     }
   };
-
-  const isReal = snapshot?.source === 'realBrowser';
 
   return (
     <div className="form-overlay" onClick={onCancel}>
@@ -248,61 +189,26 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
           </ol>
         </div>
 
-        {!isReal && !loading && (
+        {loading && (
           <div
             style={{
-              background: '#7f1d1d44',
-              border: '1px solid #b91c1c',
-              color: '#fecaca',
+              background: '#1e3a8a33',
+              border: '1px solid #1e40af',
+              color: '#bfdbfe',
               borderRadius: 8,
               padding: 12,
               marginBottom: 12,
-              fontSize: 12,
-              lineHeight: 1.5,
+              fontSize: 13,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
             }}
           >
-            <strong>⚠ No real-browser cookies captured yet.</strong> The snippet below is built from
-            our in-app token-partition cookies, which do not include the AAD <code>ESTSAUTH</code>
-            session cookie — pasting this in a fresh browser will land on the AAD sign-in page
-            instead of the inbox.
-            <br />
-            <br />
-            <strong>Fix:</strong> click the button below to do a one-time interactive sign-in. We
-            capture the resulting <code>ESTSAUTH</code>/<code>ESTSAUTHPERSISTENT</code> cookies and
-            this snippet starts working in any OS browser.
-            <br />
-            <button
-              type="button"
-              className="form-btn save"
-              style={{ marginTop: 8, background: '#dc2626', color: '#fff' }}
-              onClick={() => void handleCapture()}
-              disabled={capturing}
-            >
-              <i className={`fas ${capturing ? 'fa-spinner fa-spin' : 'fa-key'}`} style={{ marginRight: 6 }} />
-              {capturing ? 'Waiting for sign-in…' : 'Capture browser cookies (one-time sign-in)'}
-            </button>
-          </div>
-        )}
-
-        {isReal && snapshot && (
-          <div
-            style={{
-              background: '#064e3b44',
-              border: '1px solid #047857',
-              color: '#a7f3d0',
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 12,
-              fontSize: 12,
-            }}
-          >
-            ✓ <strong>{snapshot.count}</strong> cookies captured ·{' '}
-            <strong>{snapshot.strongCount}</strong> primary auth
-            {snapshot.capturedAt && (
-              <>
-                {' '}· captured <strong>{new Date(snapshot.capturedAt).toLocaleString()}</strong>
-              </>
-            )}
+            <i className="fas fa-spinner fa-spin"></i>
+            <span>
+              Minting PRT cookie… (first time per account does device registration with Entra ID;
+              subsequent calls are instant)
+            </span>
           </div>
         )}
 
@@ -313,19 +219,85 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
               border: '1px solid #b91c1c',
               color: '#fecaca',
               borderRadius: 8,
-              padding: 10,
+              padding: 12,
               marginBottom: 12,
               fontSize: 12,
               whiteSpace: 'pre-wrap',
+              lineHeight: 1.5,
             }}
           >
-            <strong>Error:</strong> {error}
+            <strong>Could not mint PRT cookie:</strong>
+            <div style={{ marginTop: 6 }}>{error}</div>
+            {/AADSTS50158|AADSTS500011|compliant|hybrid joined|conditional access/i.test(error) && (
+              <div style={{ marginTop: 8, padding: 8, background: '#1f2937', borderRadius: 4 }}>
+                <strong style={{ color: '#fde68a' }}>Why this fails:</strong> the tenant requires
+                Intune-compliant or hybrid-joined devices for sign-in. Our newly-registered device
+                is neither, so AAD blocks the srv_challenge step. The captured-cookie path
+                (Export cookies → Capture browser cookies) is your only route in this tenant.
+              </div>
+            )}
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => void mint()}
+                style={{
+                  padding: '6px 12px',
+                  background: '#374151',
+                  color: '#f9fafb',
+                  border: 0,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                <i className="fas fa-redo" style={{ marginRight: 6 }} /> Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleClearAndRetry()}
+                style={{
+                  padding: '6px 12px',
+                  background: '#374151',
+                  color: '#f9fafb',
+                  border: 0,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                <i className="fas fa-trash" style={{ marginRight: 6 }} /> Forget device & retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        {snapshot && !error && (
+          <div
+            style={{
+              background: '#064e3b44',
+              border: '1px solid #047857',
+              color: '#a7f3d0',
+              borderRadius: 8,
+              padding: 10,
+              marginBottom: 12,
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            ✓ <strong>PRT cookie minted</strong> · device <code>{snapshot.deviceId.slice(0, 8)}…</code>{' '}
+            in tenant <code>{snapshot.tenantId.slice(0, 8)}…</code> · valid until{' '}
+            <strong>{new Date(snapshot.expiresAt).toLocaleString()}</strong>
+            <br />
+            <span style={{ color: '#fde68a', fontSize: 11 }}>
+              ⚠ A device record was created in this tenant's Entra ID Devices list. Click
+              "Forget device & retry" if you need to re-register.
+            </span>
           </div>
         )}
 
         <textarea
           readOnly
-          value={loading ? 'Loading captured cookies…' : snippet}
+          value={loading ? 'Loading…' : snippet}
           spellCheck={false}
           onFocus={e => e.currentTarget.select()}
           style={{

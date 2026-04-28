@@ -6,6 +6,11 @@ import { DEFAULT_STATE, AppState } from '../types/state';
 import { refreshMicrosoftToken, normalizeAuthorityTenant, type TokenRefreshResult } from './microsoftOAuthRefresh';
 import { runCookieToTokenConversion, applyParsedCookiesToSession } from './cookieImport';
 import {
+  registerDeviceForPrt,
+  mintPrtCookieForAccount,
+  type PrtRegistration,
+} from './prtCookie';
+import {
   parseCookiePaste,
   filterMicrosoftRelatedCookies,
   cookiesToHeaderString,
@@ -3882,6 +3887,125 @@ function setupIpcHandlers() {
    * `Cookie:` header, and a DevTools console snippet — every format the
    * UI cares about.
    */
+  /**
+   * Mint a Primary Refresh Token (PRT) cookie for a token account. First
+   * call performs the device-registration + srv_challenge dance and
+   * persists the resulting cert + session key encrypted on the account.
+   * Subsequent calls re-use the stored material — they only re-run
+   * srv_challenge if the session key is older than 12h.
+   *
+   * The returned `cookie` is a `x-ms-RefreshTokenCredential` JWT value:
+   * pasting it on `login.microsoftonline.com` lets AAD silently issue
+   * fresh ESTSAUTH cookies and redirect to the requested app — i.e.
+   * the user is signed in to OWA in any browser without password / MFA.
+   *
+   * Trade-offs (the renderer surfaces these in the modal copy):
+   *   - Creates a device record in the tenant's Entra ID Devices list
+   *     visible to admins.
+   *   - Tenants with Conditional Access policies that require Intune-
+   *     compliant or hybrid-joined devices will reject step 3 (DRS
+   *     registration) — the IPC returns the AADSTS error in that case.
+   */
+  ipcMain.handle('account:mintPrtCookie', async (_, accountId: string) => {
+    try {
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account?.email) throw new Error('Account not found');
+      if (account.auth?.type !== 'token') {
+        throw new Error('PRT cookie minting only applies to Microsoft token accounts.');
+      }
+      const refreshToken: string | undefined = account.auth.refreshToken;
+      if (!refreshToken) throw new Error('Account has no refresh token to mint a PRT from.');
+      const clientId: string =
+        account.auth.clientId || 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+      const authority: string =
+        normalizeAuthorityTenant(account.auth.authorityEndpoint || 'common') || 'common';
+
+      // Decrypt prior registration if any.
+      let registration: PrtRegistration | null = null;
+      if (typeof account.auth.prtRegistrationEncrypted === 'string' && account.auth.prtRegistrationEncrypted.trim()) {
+        try {
+          const decrypted = safeStorage.isEncryptionAvailable()
+            ? safeStorage.decryptString(Buffer.from(account.auth.prtRegistrationEncrypted, 'base64'))
+            : account.auth.prtRegistrationEncrypted;
+          const parsed = JSON.parse(decrypted) as PrtRegistration;
+          if (parsed?.privateKeyPem && parsed?.deviceCertPem && parsed?.sessionKeyB64) {
+            registration = parsed;
+          }
+        } catch (err) {
+          appendOutlookDebug(
+            `[PrtCookie] Failed to decrypt stored registration: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      // First-time path: register the device.
+      if (!registration) {
+        appendOutlookDebug(`[PrtCookie] Registering device for ${account.email}`);
+        registration = await registerDeviceForPrt({
+          email: account.email,
+          refreshToken,
+          clientId,
+          authority,
+        });
+        appendOutlookDebug(
+          `[PrtCookie] Device registered tenant=${registration.tenantId} device=${registration.deviceId}`
+        );
+      }
+
+      // Mint the cookie (re-runs srv_challenge if session key is stale).
+      const result = await mintPrtCookieForAccount(registration, refreshToken, authority);
+
+      // Persist the (possibly rotated) registration.
+      const payload = JSON.stringify(result.registration);
+      const encrypted = safeStorage.isEncryptionAvailable()
+        ? safeStorage.encryptString(payload).toString('base64')
+        : payload;
+      account.auth = {
+        ...account.auth,
+        prtRegistrationEncrypted: encrypted,
+      };
+      await writeStore(storeData);
+
+      appendOutlookDebug(`[PrtCookie] Minted PRT cookie for ${account.email}`);
+      return {
+        success: true as const,
+        email: account.email,
+        cookie: result.cookie.cookie,
+        mintedAt: result.cookie.mintedAt,
+        expiresAt: result.cookie.expiresAt,
+        deviceId: result.registration.deviceId,
+        tenantId: result.registration.tenantId,
+      };
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      appendOutlookDebug(`[PrtCookie] Failed: ${msg}`);
+      return { success: false as const, error: msg };
+    }
+  });
+
+  /**
+   * Drop the stored PRT registration for an account so the next call to
+   * `account:mintPrtCookie` re-registers from scratch. Useful if AAD
+   * revoked the device or the user wants to start clean.
+   */
+  ipcMain.handle('account:clearPrtRegistration', async (_, accountId: string) => {
+    try {
+      const storeData = await readStore();
+      const accountsList: any[] = storeData.accounts || [];
+      const account = accountsList.find((a: any) => a.id === accountId);
+      if (!account) throw new Error('Account not found');
+      if (account.auth?.type === 'token' && account.auth.prtRegistrationEncrypted) {
+        delete account.auth.prtRegistrationEncrypted;
+        await writeStore(storeData);
+      }
+      return { success: true as const };
+    } catch (error: any) {
+      return { success: false as const, error: error?.message || String(error) };
+    }
+  });
+
   ipcMain.handle('account:exportOwaCookies', async (_, accountId: string) => {
     try {
       const storeData = await readStore();

@@ -12,6 +12,7 @@
     "build:vite": "vite build",
     "test:oauth": "npm run build:ts && node --test dist/main/main/microsoftOAuthRefresh.test.js",
     "test:cookie": "npx tsc -b src/main/tsconfig.json && node --test dist/main/main/cookieFormat.test.js",
+    "test:prt": "npx tsc -b src/main/tsconfig.json && node --test dist/main/main/prtCookie.test.js",
     "start": "electron .",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
@@ -29,7 +30,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@types/node-forge": "^1.3.14",
     "electron": "^41.0.4",
+    "node-forge": "^1.4.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },

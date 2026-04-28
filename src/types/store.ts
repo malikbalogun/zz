@@ -35,6 +35,19 @@ export interface UIAccount {
      */
     realBrowserCookiesEncrypted?: string;
     realBrowserCookiesCapturedAt?: string;
+    /**
+     * Encrypted JSON snapshot of the device-registration + session-key
+     * material needed to mint Primary Refresh Token (PRT) cookies for
+     * this account on demand. Populated by `account:mintPrtCookie` on
+     * the first call; re-used (with periodic srv_challenge refreshes)
+     * on every subsequent call.
+     *
+     * NOTE: setting this implies a real device record exists in the
+     * tenant's Entra ID Devices list (visible to admins). The tenant's
+     * Conditional Access policies may block this for compliance-required
+     * environments.
+     */
+    prtRegistrationEncrypted?: string;
   } | {
     type: 'cookie';
     /** Encrypted cookie paste (renderer) or main-process `cookiesEncrypted` — both supported when loading OWA. */
