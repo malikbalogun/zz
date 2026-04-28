@@ -305,6 +305,8 @@ function extractIdsFromCertSubject(cert: forge.pki.Certificate): { deviceId: str
   return { deviceId, tenantId };
 }
 
+/** Pulled out so the caller can pass `targetDomain` as the canonical
+ *  tenant fallback when AAD's cert subject only carries the device ID. */
 async function registerDeviceWithDrs(
   drsAccessToken: string,
   csrB64: string,
@@ -371,13 +373,18 @@ async function registerDeviceWithDrs(
   }
   const deviceCertPem = forge.pki.certificateToPem(cert);
 
-  // The issued cert encodes tenant/device GUIDs in its Subject; this is
-  // the canonical source AAD uses (the JSON envelope is informational).
+  // Modern AAD only puts the device GUID in the cert's CN; the tenant
+  // GUID isn't encoded in the Subject anymore (older AAD did, in OU).
+  // Fall back to the JSON envelope, then to the targetDomain we asked
+  // for (which is the DRS-token's tid claim — guaranteed to be the
+  // home tenant). Device ID has the same fallback chain in case a
+  // future AAD version moves it too.
   const fromSubject = extractIdsFromCertSubject(cert);
   const tenantId =
     fromSubject.tenantId ||
     data?.User?.DirectoryTenantId ||
     data?.TenantId ||
+    targetDomain ||
     '';
   const deviceId =
     fromSubject.deviceId ||
@@ -386,7 +393,7 @@ async function registerDeviceWithDrs(
     '';
   if (!tenantId || !deviceId) {
     throw new Error(
-      `DRS response did not yield tenant/device IDs (cert subject CN=${fromSubject.deviceId || '?'}, OU=${fromSubject.tenantId || '?'})`
+      `DRS response did not yield tenant/device IDs (cert subject CN=${fromSubject.deviceId || '?'}, OU=${fromSubject.tenantId || '?'}, targetDomain=${targetDomain || '?'})`
     );
   }
   return { deviceCertPem, tenantId, deviceId };
