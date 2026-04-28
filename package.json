@@ -54,19 +54,43 @@
     "appId": "com.panelmanager.app",
     "productName": "Panel Manager",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
-      "dist/**/*"
+      "dist/**/*",
+      "package.json",
+      "node_modules/node-forge/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/node-forge/**/*"
     ],
     "mac": {
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ]
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Panel Manager"
     },
     "linux": {
-      "target": "AppImage"
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] }
+      ]
     }
   }
 }
