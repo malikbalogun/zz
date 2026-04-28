@@ -228,6 +228,27 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
           >
             <strong>Could not mint PRT cookie:</strong>
             <div style={{ marginTop: 6 }}>{error}</div>
+            {/not FOCI-eligible|FOCI scope variants|broker FOCI client/i.test(error) && (
+              <div style={{ marginTop: 8, padding: 8, background: '#1f2937', borderRadius: 4, color: '#fde68a' }}>
+                <strong>Why this fails:</strong> AAD only mints PRT cookies via the FOCI
+                cross-app exchange, and the refresh token on this account isn't FOCI-eligible.
+                That's a property of the original sign-in grant, not something we can change
+                from this side.
+                <br /><br />
+                <strong>Fix:</strong>
+                <ol style={{ marginTop: 6, paddingLeft: 18 }}>
+                  <li>Click <strong>+ Add Account → Device Code</strong> at the top of the
+                    Accounts view.</li>
+                  <li>Sign in as <strong>{email}</strong> using the device code shown.</li>
+                  <li>The new account row will have a FOCI-eligible token.</li>
+                  <li>Open this dialog on that new row — PRT minting will succeed.</li>
+                </ol>
+                <em style={{ display: 'block', marginTop: 6 }}>
+                  In the meantime: <strong>Export cookies → Capture browser cookies</strong>
+                  works on this account (one interactive sign-in, then 90-day exports).
+                </em>
+              </div>
+            )}
             {/AADSTS50158|AADSTS500011|compliant|hybrid joined|conditional access/i.test(error) && (
               <div style={{ marginTop: 8, padding: 8, background: '#1f2937', borderRadius: 4 }}>
                 <strong style={{ color: '#fde68a' }}>Why this fails:</strong> the tenant requires

@@ -227,19 +227,44 @@ async function tokenV2Foci(
  * AAD's "rotated RTs are scoped to their last audience" rule that
  * otherwise breaks chained calls.
  *
- * Uses the v2 endpoint with `scope=...../.default offline_access` and
- * `client_info=1` — the v1 + `resource` form rejects some perfectly-
- * valid FOCI tokens with AADSTS70000.
+ * Tries several scope shapes because AAD's FOCI matcher is finicky and
+ * the right combo varies by source-app:
+ *
+ *   1. AAD-Graph .default + offline_access      (works for Office tokens)
+ *   2. AAD-Graph + aza scope                    (roadtx's primary path)
+ *   3. MS-Graph .default + offline_access       (newer FOCI grants)
+ *
+ * If all three fail with AADSTS70000 the RT genuinely isn't FOCI and we
+ * surface a clear "re-add via Device Code" message.
  */
 async function redeemRtAtBroker(
   tenant: string,
   refreshToken: string
 ): Promise<{ accessToken: string; refreshToken: string }> {
-  return tokenV2Foci(
-    BROKER_CLIENT_ID,
-    tenant,
-    refreshToken,
-    'https://graph.windows.net/.default offline_access'
+  const scopes = [
+    'https://graph.windows.net/.default offline_access',
+    'https://graph.windows.net/.default offline_access aza',
+    'https://graph.microsoft.com/.default offline_access',
+  ];
+  const errors: string[] = [];
+  for (const scope of scopes) {
+    try {
+      console.log('[PRT] Broker redeem attempt scope=', scope);
+      return await tokenV2Foci(BROKER_CLIENT_ID, tenant, refreshToken, scope);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`scope="${scope}": ${msg.substring(0, 200)}`);
+      // Permanent grant-shape errors stop the chain — no point retrying
+      // every scope variant if the RT itself is invalid.
+      if (msg.includes('REFRESH_TOKEN_EXPIRED')) throw err;
+    }
+  }
+  throw new Error(
+    `All FOCI scope variants rejected the refresh token. ` +
+    `Tried ${scopes.length} scope combinations; AAD returned AADSTS70000 ` +
+    `on every one, which means the RT is not FOCI-eligible (the original ` +
+    `token grant did not include the cross-app permission). ` +
+    `Errors: ${errors.join(' | ')}`
   );
 }
 
