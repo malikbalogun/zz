@@ -36,10 +36,13 @@ async function postTokenEndpoint(
   url: string,
   body: URLSearchParams,
   label: string,
-  fallbackRefreshToken: string
+  fallbackRefreshToken: string,
+  attempt: number = 1
 ): Promise<TokenRefreshResult> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  // 60s timeout per attempt — AAD's token endpoint is occasionally slow
+  // and 30s was tripping spurious AbortError → NETWORK_ERROR cascades.
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -79,13 +82,26 @@ async function postTokenEndpoint(
     };
   } catch (error: any) {
     clearTimeout(timeoutId);
-    if (error.code) throw error;
-    if (error.name === 'AbortError') {
-      const err = new Error('NETWORK_ERROR');
-      (err as any).code = 'NETWORK_ERROR';
-      throw err;
-    }
-    if (error.message?.includes('fetch') || error.message?.includes('network')) {
+    if (error.code === 'REFRESH_TOKEN_EXPIRED' || error.code === 'INVALID_CLIENT') throw error;
+    const isNetwork =
+      error.name === 'AbortError' ||
+      error.code === 'NETWORK_ERROR' ||
+      error.message?.includes('fetch') ||
+      error.message?.includes('network') ||
+      error.message?.includes('ECONNRESET') ||
+      error.message?.includes('ETIMEDOUT') ||
+      error.message?.includes('ENETUNREACH');
+    if (isNetwork) {
+      // Retry transient network failures up to 3 attempts with exponential
+      // backoff — AAD's token endpoint occasionally drops connections
+      // (especially when many refreshes fire at once on app startup) and
+      // a single retry recovers most of the time.
+      if (attempt < 3) {
+        const delay = 750 * Math.pow(2, attempt - 1); // 750ms, 1500ms
+        console.warn(`[Microsoft] ${label}: network error attempt ${attempt}; retrying in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+        return postTokenEndpoint(url, body, label, fallbackRefreshToken, attempt + 1);
+      }
       const err = new Error('NETWORK_ERROR');
       (err as any).code = 'NETWORK_ERROR';
       throw err;

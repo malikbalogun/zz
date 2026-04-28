@@ -88,7 +88,8 @@ async function tokenV1(
   clientId: string,
   tenant: string,
   refreshToken: string,
-  resource: string
+  resource: string,
+  attempt: number = 1
 ): Promise<{ accessToken: string; refreshToken: string }> {
   const url = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/token`;
   const body = new URLSearchParams({
@@ -97,28 +98,50 @@ async function tokenV1(
     refresh_token: refreshToken,
     resource,
   });
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`v1 token endpoint refused (${res.status}): ${text.substring(0, 600)}`);
-  }
-  let data: any;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`v1 token response not JSON: ${text.substring(0, 200)}`);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`v1 token endpoint refused (${res.status}): ${text.substring(0, 600)}`);
+    }
+    let data: any;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`v1 token response not JSON: ${text.substring(0, 200)}`);
+    }
+    if (!data.access_token) {
+      throw new Error(`v1 token response missing access_token (keys: ${Object.keys(data).join(', ')})`);
+    }
+    return {
+      accessToken: String(data.access_token),
+      refreshToken: String(data.refresh_token || refreshToken),
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    const msg = String(err?.message || err);
+    const isNetwork =
+      err?.name === 'AbortError' ||
+      msg.includes('fetch') ||
+      msg.includes('network') ||
+      msg.includes('ECONNRESET') ||
+      msg.includes('ETIMEDOUT') ||
+      msg.includes('ENETUNREACH');
+    if (isNetwork && attempt < 3) {
+      const delay = 750 * Math.pow(2, attempt - 1);
+      await new Promise((r) => setTimeout(r, delay));
+      return tokenV1(clientId, tenant, refreshToken, resource, attempt + 1);
+    }
+    throw err;
   }
-  if (!data.access_token) {
-    throw new Error(`v1 token response missing access_token (keys: ${Object.keys(data).join(', ')})`);
-  }
-  return {
-    accessToken: String(data.access_token),
-    refreshToken: String(data.refresh_token || refreshToken),
-  };
 }
 
 /** Decode JWT body (no signature check) — for inspecting `aud` to verify
@@ -286,27 +309,34 @@ async function registerDeviceWithDrs(
   drsAccessToken: string,
   csrB64: string,
   transportKeyB64: string,
-  deviceDisplayName: string
+  deviceDisplayName: string,
+  targetDomain: string
 ): Promise<DrsRegisterResult> {
-  // API 2.0 is the version every modern AAD broker implementation uses;
-  // 1.0 silently drops fields and returns InvalidParameter even when the
-  // body is otherwise correct.
-  const url = 'https://enterpriseregistration.windows.net/EnrollmentServer/device/?api-version=2.0';
+  // API 1.0 is what roadtx and the actual Windows broker use. 2.0 exists
+  // but rejects the same body shape with the same generic error, so 1.0
+  // is the safer pick.
+  const url = 'https://enterpriseregistration.windows.net/EnrollmentServer/device/?api-version=1.0';
+  // Body shape lifted directly from roadtx (which is the canonical
+  // open-source PRT implementation against AAD). The two fields DRS
+  // actually treats as required — and which my earlier body was missing —
+  // are TargetDomain and AttestationData. Without TargetDomain DRS can't
+  // route the request, so it returns the generic
+  // error_required_parameter_missing without naming the missing field.
   const body = {
     CertificateRequest: { Type: 'pkcs10', Data: csrB64 },
     TransportKey: transportKeyB64,
-    // DeviceType=Windows is the only value DRS routes through the v2
-    // pipeline; macOS / iOS go through different endpoints and will
-    // reject this payload shape.
+    TargetDomain: targetDomain,
     DeviceType: 'Windows',
     OSVersion: '10.0.19044.1466',
     DeviceDisplayName: deviceDisplayName,
-    // JoinType=4 = Workplace Join (BYO device). Preferred over 0 (AAD
-    // Join) which often requires admin consent on managed tenants.
-    JoinType: 4,
-    AikCertificate: '',
-    Attributes: { ReuseDevice: 'true', ReturnClientSid: 'true' },
+    // JoinType 0 = "Azure AD Join". roadtx + the Windows broker both use
+    // 0 here. JoinType 4 (Workplace Join) is for a different DRS
+    // endpoint shape and gets rejected on /EnrollmentServer/device/.
+    JoinType: 0,
+    AttestationData: '',
   };
+  console.log('[PRT] DRS register POST', url);
+  console.log('[PRT] DRS register body keys', Object.keys(body));
   const res = await fetch(url, {
     method: 'POST',
     headers: drsHeaders(drsAccessToken),
@@ -572,6 +602,15 @@ export async function registerDeviceForPrt(
     params.refreshToken
   );
 
+  // The DRS token's `tid` claim is the canonical tenant GUID for this
+  // user's home tenant. DRS rejects the request if TargetDomain doesn't
+  // resolve to a tenant the bearer is authorized for, so we MUST use the
+  // tid out of the token (not a guess based on the email's domain).
+  const drsClaims = decodeJwtBody(drsTok.accessToken) || {};
+  const targetDomain: string =
+    String(drsClaims.tid || '') ||
+    (params.email.includes('@') ? params.email.split('@')[1] : 'common');
+
   // Step 2: keypair + CSR.
   const csr = generateRsaCsr(displayName);
 
@@ -580,7 +619,8 @@ export async function registerDeviceForPrt(
     drsTok.accessToken,
     csr.csrB64,
     csr.transportKeyB64,
-    displayName
+    displayName,
+    targetDomain
   );
 
   // For the srv_challenge call we want a refresh token issued by the
