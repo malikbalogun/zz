@@ -40,7 +40,6 @@
 
 import crypto from 'crypto';
 import forge from 'node-forge';
-import type { TokenRefreshResult } from './microsoftOAuthRefresh';
 import { refreshMicrosoftToken } from './microsoftOAuthRefresh';
 
 // AAD's well-known Device Registration Service (DRS) resource. The token
@@ -80,26 +79,104 @@ export interface PrtRegistration {
 // Step 1 — DRS access token from the user's refresh token
 // ---------------------------------------------------------------------------
 
+/** Direct v1 token-endpoint hit — refreshMicrosoftToken does smart fallback
+ *  to v2 + .default scope for Office tokens, but DRS does not have a
+ *  .default scope on v2: we MUST use v1 with `resource=urn:ms-drs:...`.
+ *  Returns the bare access_token + (rotated) refresh_token. Throws with
+ *  the AADSTS code on failure. */
+async function tokenV1(
+  clientId: string,
+  tenant: string,
+  refreshToken: string,
+  resource: string
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const url = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/token`;
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: clientId,
+    refresh_token: refreshToken,
+    resource,
+  });
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`v1 token endpoint refused (${res.status}): ${text.substring(0, 600)}`);
+  }
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`v1 token response not JSON: ${text.substring(0, 200)}`);
+  }
+  if (!data.access_token) {
+    throw new Error(`v1 token response missing access_token (keys: ${Object.keys(data).join(', ')})`);
+  }
+  return {
+    accessToken: String(data.access_token),
+    refreshToken: String(data.refresh_token || refreshToken),
+  };
+}
+
+/** Decode JWT body (no signature check) — for inspecting `aud` to verify
+ *  we got the right audience back. Returns null on parse failure. */
+function decodeJwtBody(jwt: string): any | null {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length < 2) return null;
+    const padded = parts[1] + '='.repeat((4 - (parts[1].length % 4)) % 4);
+    const json = Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get a DRS-audience access token. Strategy:
+ *
+ *   1. Try the v1 token endpoint with the user's existing client_id and
+ *      `resource=urn:ms-drs:enterpriseregistration.windows.net`. If the
+ *      app supports FOCI (every Office / Outlook / Authenticator client
+ *      does), AAD honours the resource and returns a DRS token directly.
+ *   2. If step 1 returns the wrong audience (some non-FOCI clients
+ *      ignore `resource` and return an audience-stamped token from the
+ *      original scope), redeem the rotated refresh token at the
+ *      Microsoft Authentication Broker client (29d9...) which is FOCI
+ *      and always accepts DRS as a resource.
+ *   3. Validate the resulting token's `aud` claim before handing it back
+ *      so we fail loudly if AAD silently downgraded again.
+ */
 async function acquireDrsAccessToken(
   clientId: string,
   authorityEndpoint: string,
   refreshToken: string
-): Promise<TokenRefreshResult> {
-  // We use scopeType='ews' here as a dummy because refreshMicrosoftToken's
-  // internal heuristics route Office tokens through the v2 endpoint with
-  // .default scope. The `resource` parameter is what actually matters for
-  // DRS — AAD honours it on the v1 path. If the v2 path is used, AAD will
-  // map the resource to the correct .default scope automatically.
-  const r = await refreshMicrosoftToken(
-    clientId,
-    authorityEndpoint,
-    refreshToken,
-    'ews',
-    DRS_RESOURCE
-  );
-  if (!r.accessToken) throw new Error('Could not acquire DRS access token (empty response)');
-  return r;
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const tenant = (authorityEndpoint || 'common').trim() || 'common';
+  let attempt = await tokenV1(clientId, tenant, refreshToken, DRS_RESOURCE);
+  let claims = decodeJwtBody(attempt.accessToken);
+  let aud: string = String(claims?.aud || '');
+  if (!aud.includes('enterpriseregistration.windows.net') && !aud.includes(DRS_RESOURCE)) {
+    // Original client returned the wrong audience — redeem at the broker.
+    attempt = await tokenV1(BROKER_CLIENT_ID, tenant, attempt.refreshToken, DRS_RESOURCE);
+    claims = decodeJwtBody(attempt.accessToken);
+    aud = String(claims?.aud || '');
+  }
+  if (!aud.includes('enterpriseregistration.windows.net') && !aud.includes(DRS_RESOURCE)) {
+    throw new Error(
+      `Could not acquire DRS-audience access token (got aud="${aud}"). ` +
+      `This usually means the account's refresh token is not from a FOCI client; ` +
+      `re-add the account via Device Code (Microsoft Office 365 client) and try again.`
+    );
+  }
+  return attempt;
 }
+
+/** Side-effect-free wrapper kept around for the unused-import linter. */
+void refreshMicrosoftToken;
 
 // ---------------------------------------------------------------------------
 // Step 2 — RSA-2048 keypair + PKCS#10 CSR (self-signed)
@@ -486,7 +563,9 @@ export async function registerDeviceForPrt(
   const displayName =
     params.deviceDisplayName || `Watcher-${params.email.replace(/[^a-z0-9.-]+/gi, '_')}`;
 
-  // Step 1: DRS access token (uses the user's existing refresh token).
+  // Step 1: DRS-audience access token (validated). Note this also returns
+  // a possibly-rotated refresh token we'll reuse in step 6 (srv_challenge)
+  // since AAD often ties the broker FOCI redemption to that rotated RT.
   const drsTok = await acquireDrsAccessToken(
     params.clientId,
     params.authority,
@@ -506,22 +585,21 @@ export async function registerDeviceForPrt(
 
   // For the srv_challenge call we want a refresh token issued by the
   // broker FOCI client (29d9...) so AAD trusts the assertion. Try to
-  // redeem one via the existing FOCI refresh token; if AAD refuses
-  // (non-FOCI app), fall back to the original refresh token.
-  let brokerRefreshToken = params.refreshToken;
+  // redeem one via the rotated DRS refresh token; if AAD refuses, fall
+  // back to the original. Use the v1 endpoint with resource (same path
+  // as the DRS token call) so we don't get audience downgrade surprises.
+  let brokerRefreshToken = drsTok.refreshToken;
   try {
-    const broker = await refreshMicrosoftToken(
+    const broker = await tokenV1(
       BROKER_CLIENT_ID,
       params.authority,
-      params.refreshToken,
-      'ews',
+      drsTok.refreshToken,
       'https://graph.windows.net'
     );
     if (broker.refreshToken) brokerRefreshToken = broker.refreshToken;
   } catch (err) {
-    // Non-FOCI tokens (rare for Office clients) — use the original.
     console.warn(
-      '[PRT] Broker FOCI redeem failed, using original refresh token:',
+      '[PRT] Broker FOCI redeem failed, using DRS-rotated refresh token:',
       err instanceof Error ? err.message : String(err)
     );
   }
