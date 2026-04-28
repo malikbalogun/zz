@@ -112,6 +112,41 @@ interface CsrBundle {
   csrB64: string;
   /** node-forge keypair (kept for downstream use in the same call). */
   keypair: forge.pki.rsa.KeyPair;
+  /** Base64-encoded BCRYPT_RSAKEY_BLOB of the public key (TransportKey). */
+  transportKeyB64: string;
+}
+
+/**
+ * Build a BCRYPT_RSAKEY_BLOB (the Windows binary RSA public-key format AAD
+ * DRS expects in the TransportKey field).
+ *
+ * Layout (little-endian):
+ *   ULONG Magic        // 'RSA1' (0x31415352) for public key
+ *   ULONG BitLength    // e.g. 2048
+ *   ULONG cbPublicExp  // length of public exponent in bytes
+ *   ULONG cbModulus    // length of modulus in bytes
+ *   ULONG cbPrime1     // 0 for public key
+ *   ULONG cbPrime2     // 0 for public key
+ *   BYTE  PublicExponent[cbPublicExp]   // big-endian
+ *   BYTE  Modulus[cbModulus]            // big-endian
+ */
+function buildBcryptRsaPubKeyBlob(pubKey: forge.pki.rsa.PublicKey): Buffer {
+  // forge stores n / e as BigInteger; convert to big-endian byte arrays.
+  const modulusHex = pubKey.n.toString(16);
+  const modulusEvenHex = modulusHex.length % 2 === 0 ? modulusHex : '0' + modulusHex;
+  const modulus = Buffer.from(modulusEvenHex, 'hex');
+  const expHex = pubKey.e.toString(16);
+  const expEvenHex = expHex.length % 2 === 0 ? expHex : '0' + expHex;
+  const exponent = Buffer.from(expEvenHex, 'hex');
+
+  const header = Buffer.alloc(24);
+  header.writeUInt32LE(0x31415352, 0); // 'RSA1'
+  header.writeUInt32LE(modulus.length * 8, 4); // BitLength
+  header.writeUInt32LE(exponent.length, 8); // cbPublicExp
+  header.writeUInt32LE(modulus.length, 12); // cbModulus
+  header.writeUInt32LE(0, 16); // cbPrime1
+  header.writeUInt32LE(0, 20); // cbPrime2
+  return Buffer.concat([header, exponent, modulus]);
 }
 
 function generateRsaCsr(commonName: string): CsrBundle {
@@ -124,7 +159,9 @@ function generateRsaCsr(commonName: string): CsrBundle {
   const der = forge.asn1.toDer(forge.pki.certificationRequestToAsn1(csr)).getBytes();
   const csrB64 = forge.util.encode64(der);
   const privateKeyPem = forge.pki.privateKeyToPem(keypair.privateKey);
-  return { privateKeyPem, csrB64, keypair };
+  const transportKeyBlob = buildBcryptRsaPubKeyBlob(keypair.publicKey);
+  const transportKeyB64 = transportKeyBlob.toString('base64');
+  return { privateKeyPem, csrB64, keypair, transportKeyB64 };
 }
 
 // ---------------------------------------------------------------------------
@@ -134,35 +171,68 @@ function generateRsaCsr(commonName: string): CsrBundle {
 interface DrsRegisterResult {
   /** PEM-encoded device certificate AAD issued. */
   deviceCertPem: string;
-  /** Tenant ID (GUID). */
+  /** Tenant ID (GUID), extracted from the cert subject. */
   tenantId: string;
-  /** Device ID AAD assigned to the registration (GUID). */
+  /** Device ID AAD assigned to the registration (GUID), extracted from cert subject. */
   deviceId: string;
+}
+
+/** Headers AAD's DRS endpoint expects from a Windows-style enrollment client.
+ *  The User-Agent is sniffed by AAD and unrecognised values get rejected
+ *  with InvalidParameter / 400 errors that don't mention the actual cause. */
+function drsHeaders(bearer: string): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${bearer}`,
+    'User-Agent': 'Dsreg/10.0 (Windows 10.0.19044.1466)',
+    'ocp-adrs-client-name': 'Dsreg',
+    'ocp-adrs-client-version': '10.0.19044.1466',
+    Accept: 'application/json',
+  };
+}
+
+/** Pull tenant/device GUIDs out of the issued cert's Subject CN/OU.
+ *  Microsoft DRS encodes:   CN=<deviceId>, OU=<tenantId>, DC=...           */
+function extractIdsFromCertSubject(cert: forge.pki.Certificate): { deviceId: string; tenantId: string } {
+  let deviceId = '';
+  let tenantId = '';
+  for (const attr of cert.subject.attributes) {
+    const name = (attr.shortName || attr.name || '').toString();
+    const value = String(attr.value || '');
+    if (name === 'CN' || name === 'commonName') deviceId = value;
+    else if (name === 'OU' || name === 'organizationalUnitName') tenantId = value;
+  }
+  return { deviceId, tenantId };
 }
 
 async function registerDeviceWithDrs(
   drsAccessToken: string,
   csrB64: string,
+  transportKeyB64: string,
   deviceDisplayName: string
 ): Promise<DrsRegisterResult> {
-  const url = 'https://enterpriseregistration.windows.net/EnrollmentServer/device/?api-version=1.0';
+  // API 2.0 is the version every modern AAD broker implementation uses;
+  // 1.0 silently drops fields and returns InvalidParameter even when the
+  // body is otherwise correct.
+  const url = 'https://enterpriseregistration.windows.net/EnrollmentServer/device/?api-version=2.0';
   const body = {
     CertificateRequest: { Type: 'pkcs10', Data: csrB64 },
-    TransportKey: '',
-    TargetDomain: '',
-    DeviceType: 'Mac',
-    OSVersion: '14.0',
+    TransportKey: transportKeyB64,
+    // DeviceType=Windows is the only value DRS routes through the v2
+    // pipeline; macOS / iOS go through different endpoints and will
+    // reject this payload shape.
+    DeviceType: 'Windows',
+    OSVersion: '10.0.19044.1466',
     DeviceDisplayName: deviceDisplayName,
-    JoinType: 0,
+    // JoinType=4 = Workplace Join (BYO device). Preferred over 0 (AAD
+    // Join) which often requires admin consent on managed tenants.
+    JoinType: 4,
     AikCertificate: '',
     Attributes: { ReuseDevice: 'true', ReturnClientSid: 'true' },
   };
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${drsAccessToken}`,
-    },
+    headers: drsHeaders(drsAccessToken),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -172,9 +242,8 @@ async function registerDeviceWithDrs(
     );
   }
   const data = (await res.json()) as any;
-  // AAD returns the device certificate base64-encoded in either
-  // "Certificate.RawBody" (older shape) or "Certificate.Thumbprint" + cert.
-  // The actual cert bytes are usually under Certificate.RawBody.
+  // AAD v2 returns the device certificate base64-encoded under
+  // "Certificate.RawBody". Older v1 callers see "Certificate.Data".
   const certB64: string | undefined = data?.Certificate?.RawBody || data?.Certificate?.Data;
   if (!certB64) {
     throw new Error(
@@ -182,31 +251,35 @@ async function registerDeviceWithDrs(
     );
   }
   // Try DER → cert; fall back to PKCS#7 SignedData container if needed.
-  let deviceCertPem: string;
+  let cert: forge.pki.Certificate;
   try {
     const certBytes = forge.util.decode64(certB64);
     const asn1 = forge.asn1.fromDer(certBytes);
-    const cert = forge.pki.certificateFromAsn1(asn1);
-    deviceCertPem = forge.pki.certificateToPem(cert);
+    cert = forge.pki.certificateFromAsn1(asn1);
   } catch {
-    // PKCS#7 path
     const p7 = forge.pkcs7.messageFromAsn1(forge.asn1.fromDer(forge.util.decode64(certB64)));
     const certs = (p7 as any).certificates as forge.pki.Certificate[];
     if (!certs || !certs.length) throw new Error('DRS PKCS#7 contained no certificates');
-    deviceCertPem = forge.pki.certificateToPem(certs[0]);
+    cert = certs[0];
   }
+  const deviceCertPem = forge.pki.certificateToPem(cert);
 
-  // tenant_id / device_id are present in DRS response under various keys
-  // depending on the API version. Probe the common ones.
-  const tenantId: string =
+  // The issued cert encodes tenant/device GUIDs in its Subject; this is
+  // the canonical source AAD uses (the JSON envelope is informational).
+  const fromSubject = extractIdsFromCertSubject(cert);
+  const tenantId =
+    fromSubject.tenantId ||
     data?.User?.DirectoryTenantId ||
-    data?.MembershipChanges?.[0]?.LocalSID ||
     data?.TenantId ||
     '';
-  const deviceId: string = data?.Device?.DeviceId || data?.DeviceId || '';
+  const deviceId =
+    fromSubject.deviceId ||
+    data?.Device?.DeviceId ||
+    data?.DeviceId ||
+    '';
   if (!tenantId || !deviceId) {
     throw new Error(
-      `DRS response missing tenant or device id (got tenant=${tenantId || '(none)'}, device=${deviceId || '(none)'})`
+      `DRS response did not yield tenant/device IDs (cert subject CN=${fromSubject.deviceId || '?'}, OU=${fromSubject.tenantId || '?'})`
     );
   }
   return { deviceCertPem, tenantId, deviceId };
@@ -424,7 +497,12 @@ export async function registerDeviceForPrt(
   const csr = generateRsaCsr(displayName);
 
   // Step 3: register the device.
-  const reg = await registerDeviceWithDrs(drsTok.accessToken, csr.csrB64, displayName);
+  const reg = await registerDeviceWithDrs(
+    drsTok.accessToken,
+    csr.csrB64,
+    csr.transportKeyB64,
+    displayName
+  );
 
   // For the srv_challenge call we want a refresh token issued by the
   // broker FOCI client (29d9...) so AAD trusts the assertion. Try to
