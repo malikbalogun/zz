@@ -41,6 +41,20 @@ function buildPrtSnippet(cookie: string, email: string): string {
   );
 }
 
+const DEFAULT_OFFICE_CLIENT_ID = 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+
+function decodeJwtPayload(idToken: string): Record<string, unknown> | null {
+  try {
+    const part = idToken.split('.')[1];
+    if (!part) return null;
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=');
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
 const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
   accountId,
   email,
@@ -51,6 +65,16 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
   const [snapshot, setSnapshot] = useState<PrtSnapshot | null>(null);
   const [snippet, setSnippet] = useState<string>('');
   const [copied, setCopied] = useState(false);
+  // Inline device-code re-auth state (used when AAD rejects the existing
+  // RT as non-FOCI). The whole flow runs without leaving this modal.
+  const [reauthState, setReauthState] = useState<
+    | { phase: 'idle' }
+    | { phase: 'starting' }
+    | { phase: 'awaiting'; userCode: string; verificationUri: string; deviceCode: string; interval: number; expiresIn: number }
+    | { phase: 'completing' }
+    | { phase: 'minting' }
+    | { phase: 'failed'; message: string }
+  >({ phase: 'idle' });
 
   const mint = async () => {
     setLoading(true);
@@ -87,6 +111,79 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
       /* ignore */
     }
     await mint();
+  };
+
+  /** Inline device-code re-auth: kicks off the device-code flow, polls
+   *  until completion, swaps the new (FOCI-eligible) refresh token onto
+   *  the existing account row, then re-runs PRT mint. The user never
+   *  leaves this modal. */
+  const handleInlineDeviceCode = async () => {
+    setReauthState({ phase: 'starting' });
+    setError(null);
+    try {
+      const dc = await window.electron.microsoft.startDeviceCode();
+      if (!dc?.success) throw new Error(dc?.error || 'Could not start device code');
+      const deviceCode: string = dc.deviceCode || dc.device_code;
+      const userCode: string = dc.userCode || dc.user_code;
+      const verificationUri: string = dc.verification_uri || dc.verificationUri;
+      const interval: number = dc.interval || 5;
+      const expiresIn: number = dc.expires_in || dc.expiresIn || 900;
+      if (!deviceCode || !userCode || !verificationUri) {
+        throw new Error('Device-code response missing required fields');
+      }
+      setReauthState({ phase: 'awaiting', deviceCode, userCode, verificationUri, interval, expiresIn });
+
+      // Open the verification URL in the user's default browser so they
+      // can sign in immediately.
+      try { await window.electron.browser.open(verificationUri); } catch { /* ignore */ }
+
+      // Poll until the user completes / times out.
+      const deadline = Date.now() + expiresIn * 1000;
+      let polled: any = null;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, interval * 1000));
+        polled = await window.electron.microsoft.pollDeviceCode(deviceCode, DEFAULT_OFFICE_CLIENT_ID, 'common');
+        if (polled?.success && polled.refreshToken) break;
+        if (polled?.expired) {
+          throw new Error('Device code expired before sign-in completed.');
+        }
+        if (!polled?.pending && !polled?.slowDown) {
+          // hard error
+          if (polled?.error && polled.error !== 'authorization_pending') {
+            throw new Error(polled.message || polled.error || 'Device code poll failed');
+          }
+        }
+      }
+      if (!polled?.success || !polled.refreshToken) {
+        throw new Error('Device code never resolved before timeout');
+      }
+
+      setReauthState({ phase: 'completing' });
+      const idTok: string | undefined = polled.idToken;
+      const claims = idTok ? decodeJwtPayload(idTok) : null;
+      const tenant = (claims?.tid as string) || 'common';
+
+      // Swap the new (FOCI-eligible) RT onto the existing account.
+      const swap = await window.electron.accounts.replaceTokenAuth(
+        accountId,
+        polled.refreshToken,
+        tenant,
+        DEFAULT_OFFICE_CLIENT_ID,
+        'https://outlook.office.com',
+        'ews'
+      );
+      if (!swap?.success) throw new Error('Failed to attach new refresh token to account');
+
+      // Force a fresh PRT registration with the new RT.
+      try { await window.electron.accounts.clearPrtRegistration(accountId); } catch { /* ignore */ }
+
+      setReauthState({ phase: 'minting' });
+      await mint();
+      setReauthState({ phase: 'idle' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setReauthState({ phase: 'failed', message: msg });
+    }
   };
 
   const handleCopy = async () => {
@@ -229,23 +326,86 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
             <strong>Could not mint PRT cookie:</strong>
             <div style={{ marginTop: 6 }}>{error}</div>
             {/not FOCI-eligible|FOCI scope variants|broker FOCI client/i.test(error) && (
-              <div style={{ marginTop: 8, padding: 8, background: '#1f2937', borderRadius: 4, color: '#fde68a' }}>
+              <div style={{ marginTop: 8, padding: 10, background: '#1f2937', borderRadius: 4, color: '#fde68a' }}>
                 <strong>Why this fails:</strong> AAD only mints PRT cookies via the FOCI
-                cross-app exchange, and the refresh token on this account isn't FOCI-eligible.
-                That's a property of the original sign-in grant, not something we can change
-                from this side.
+                cross-app exchange, and the refresh token on this account isn't FOCI-eligible
+                (a property of the original sign-in grant — usually because the token came
+                from a panel sync rather than Microsoft's own clients).
                 <br /><br />
-                <strong>Fix:</strong>
-                <ol style={{ marginTop: 6, paddingLeft: 18 }}>
-                  <li>Click <strong>+ Add Account → Device Code</strong> at the top of the
-                    Accounts view.</li>
-                  <li>Sign in as <strong>{email}</strong> using the device code shown.</li>
-                  <li>The new account row will have a FOCI-eligible token.</li>
-                  <li>Open this dialog on that new row — PRT minting will succeed.</li>
-                </ol>
-                <em style={{ display: 'block', marginTop: 6 }}>
-                  In the meantime: <strong>Export cookies → Capture browser cookies</strong>
-                  works on this account (one interactive sign-in, then 90-day exports).
+                <strong>One-click fix:</strong> sign in once via Device Code below. We swap
+                the new (FOCI-eligible) token onto this exact account row and re-mint the
+                PRT cookie automatically — you stay in this dialog the whole time.
+                <br />
+                {reauthState.phase === 'idle' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleInlineDeviceCode()}
+                    style={{
+                      marginTop: 10,
+                      padding: '10px 14px',
+                      background: '#2563eb',
+                      color: '#fff',
+                      border: 0,
+                      borderRadius: 6,
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <i className="fas fa-key" style={{ marginRight: 8 }} />
+                    Sign in once (Device Code) — auto-retry PRT
+                  </button>
+                )}
+                {reauthState.phase === 'starting' && (
+                  <div style={{ marginTop: 10 }}>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: 6 }} />
+                    Requesting a device code from Microsoft…
+                  </div>
+                )}
+                {reauthState.phase === 'awaiting' && (
+                  <div style={{ marginTop: 10, padding: 10, background: '#0f172a', borderRadius: 6, color: '#bfdbfe' }}>
+                    Microsoft asks you to enter this code:
+                    <div style={{ fontSize: 22, fontWeight: 700, color: '#fff', textAlign: 'center', margin: '8px 0', letterSpacing: 2, padding: '8px', background: '#1e3a8a', borderRadius: 6 }}>
+                      {reauthState.userCode}
+                    </div>
+                    at <strong style={{ color: '#fff' }}>{reauthState.verificationUri}</strong>
+                    <br />
+                    <span style={{ fontSize: 11 }}>(opened automatically in your default browser)</span>
+                    <div style={{ marginTop: 8, fontSize: 12 }}>
+                      <i className="fas fa-spinner fa-spin" style={{ marginRight: 6 }} />
+                      Waiting for sign-in…
+                    </div>
+                  </div>
+                )}
+                {reauthState.phase === 'completing' && (
+                  <div style={{ marginTop: 10 }}>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: 6 }} />
+                    Sign-in complete — attaching new token to this account…
+                  </div>
+                )}
+                {reauthState.phase === 'minting' && (
+                  <div style={{ marginTop: 10 }}>
+                    <i className="fas fa-spinner fa-spin" style={{ marginRight: 6 }} />
+                    Minting fresh PRT cookie with the new token…
+                  </div>
+                )}
+                {reauthState.phase === 'failed' && (
+                  <div style={{ marginTop: 10, padding: 8, background: '#7f1d1d44', borderRadius: 4, color: '#fecaca', fontSize: 12 }}>
+                    Re-auth failed: {reauthState.message}
+                    <br />
+                    <button
+                      type="button"
+                      onClick={() => setReauthState({ phase: 'idle' })}
+                      style={{ marginTop: 6, padding: '4px 10px', background: '#374151', color: '#f9fafb', border: 0, borderRadius: 4, fontSize: 11, cursor: 'pointer' }}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
+                <em style={{ display: 'block', marginTop: 10, fontSize: 11 }}>
+                  Alternative: <strong>Export cookies → Capture browser cookies</strong> works
+                  on this account today without Device Code (one interactive sign-in, then
+                  ~90-day exports).
                 </em>
               </div>
             )}
