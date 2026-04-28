@@ -424,7 +424,8 @@ function buildClientAssertionJwt(
   refreshToken: string,
   nonce: string,
   privateKeyPem: string,
-  deviceCertPem: string
+  deviceCertPem: string,
+  clientIdForAssertion: string
 ): string {
   // x5c header lets AAD verify our signature against the device cert it
   // just issued (so the chain is: AAD trusts itself → trusts the device
@@ -438,7 +439,14 @@ function buildClientAssertionJwt(
     typ: 'JWT',
     x5c: [x5c],
   };
+  // CRITICAL: client_id MUST be the Microsoft Authentication Broker
+  // (29d9ed98-...). Only this FOCI client is authorized to mint PRTs
+  // via srv_challenge — Office (d3590...) and other apps get
+  // AADSTS700019 ("Application ID ... cannot be used or is not
+  // authorized"). The refresh_token in the body should therefore also
+  // be a broker-issued one (we redeem via FOCI before getting here).
   const body = {
+    client_id: clientIdForAssertion,
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
     request_nonce: nonce,
@@ -464,10 +472,17 @@ async function srvChallenge(
   authority: string,
   refreshToken: string,
   privateKeyPem: string,
-  deviceCertPem: string
+  deviceCertPem: string,
+  clientIdForAssertion: string = BROKER_CLIENT_ID
 ): Promise<SrvChallengeResult> {
   const nonce = await fetchAadNonce(authority);
-  const assertion = buildClientAssertionJwt(refreshToken, nonce, privateKeyPem, deviceCertPem);
+  const assertion = buildClientAssertionJwt(
+    refreshToken,
+    nonce,
+    privateKeyPem,
+    deviceCertPem,
+    clientIdForAssertion
+  );
   const url = `https://login.microsoftonline.com/${encodeURIComponent(authority)}/oauth2/token`;
   const body = new URLSearchParams({
     windows_api_version: '2.0',
@@ -630,12 +645,13 @@ export async function registerDeviceForPrt(
     targetDomain
   );
 
-  // For the srv_challenge call we want a refresh token issued by the
-  // broker FOCI client (29d9...) so AAD trusts the assertion. Try to
-  // redeem one via the rotated DRS refresh token; if AAD refuses, fall
-  // back to the original. Use the v1 endpoint with resource (same path
-  // as the DRS token call) so we don't get audience downgrade surprises.
-  let brokerRefreshToken = drsTok.refreshToken;
+  // For the srv_challenge call we MUST have a refresh token issued by
+  // the broker FOCI client (29d9...). srv_challenge with any other
+  // client_id returns AADSTS700019 ("Application ID ... cannot be
+  // used or is not authorized"). Fail loudly if FOCI redemption
+  // doesn't work — falling back to the original token here just
+  // pushes the same error one level up.
+  let brokerRefreshToken: string;
   try {
     const broker = await tokenV1(
       BROKER_CLIENT_ID,
@@ -643,20 +659,26 @@ export async function registerDeviceForPrt(
       drsTok.refreshToken,
       'https://graph.windows.net'
     );
-    if (broker.refreshToken) brokerRefreshToken = broker.refreshToken;
+    brokerRefreshToken = broker.refreshToken;
   } catch (err) {
-    console.warn(
-      '[PRT] Broker FOCI redeem failed, using DRS-rotated refresh token:',
-      err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `Could not redeem the refresh token at the Microsoft Authentication Broker FOCI client. ` +
+      `This usually means the account's original refresh token is not from a FOCI app — ` +
+      `re-add the account via Device Code (which uses the Microsoft Office FOCI client) and try again. ` +
+      `Underlying error: ${err instanceof Error ? err.message : String(err)}`
     );
   }
 
-  // Step 4 + 5: srv_challenge → session key.
+  // Step 4 + 5: srv_challenge → session key. assertion JWT is signed
+  // by the device cert + claims client_id=BROKER_CLIENT_ID so AAD
+  // evaluates the request against the broker app (which is allowed to
+  // mint PRTs).
   const challenge = await srvChallenge(
     params.authority,
     brokerRefreshToken,
     csr.privateKeyPem,
-    reg.deviceCertPem
+    reg.deviceCertPem,
+    BROKER_CLIENT_ID
   );
 
   return {
