@@ -10,6 +10,7 @@ import {
   mintPrtCookieForAccount,
   type PrtRegistration,
 } from './prtCookie';
+import { initAutoUpdater, scheduleStartupUpdateCheck } from './autoUpdater';
 import {
   parseCookiePaste,
   filterMicrosoftRelatedCookies,
@@ -5463,12 +5464,9 @@ function setupIpcHandlers() {
     return { success: true };
   });
 
-  ipcMain.handle('updater:check', async () => {
-    // Updater is not yet wired to a real release feed. Returning a stable
-    // "no update" response avoids hitting a guaranteed 404 (and burning
-    // GitHub anti-abuse budget) on every check.
-    return { hasUpdate: false, message: 'Updater not configured' };
-  });
+  // Real updater:check / updater:status / updater:install handlers are
+  // registered by initAutoUpdater() — see app.whenReady wiring below.
+  // Nothing to register here so the stub doesn't shadow them.
 
   // Microsoft Graph OAuth (main process, no CORS)
   ipcMain.handle(
@@ -5676,6 +5674,17 @@ app.whenReady().then(async () => {
     console.log('[Main] Creating window...');
     createWindow();
     console.log('[Main] Window created');
+
+    // Wire auto-update against the GitHub Releases feed (configured in
+    // package.json#build.publish). Only does real work in packaged
+    // builds — `app.isPackaged` is false in dev so this is a no-op
+    // there.
+    try {
+      initAutoUpdater(() => mainWindow);
+      scheduleStartupUpdateCheck();
+    } catch (err) {
+      console.warn('[Main] Auto-updater init failed:', err);
+    }
 
     // 1. Read saved state
     const state = await readState();

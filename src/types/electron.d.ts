@@ -322,6 +322,36 @@ export interface ElectronAPI {
     openPopup: (url: string) => Promise<void>;
     openLoginPage: (url: string) => Promise<void>;
   };
+  updater: {
+    /** Manually trigger an update check. */
+    check: () => Promise<{
+      hasUpdate: boolean;
+      currentVersion?: string;
+      availableVersion?: string;
+      message?: string;
+    }>;
+    /** Snapshot of the most recent autoUpdater state. */
+    status: () => Promise<{
+      status:
+        | 'idle'
+        | 'checking'
+        | 'available'
+        | 'not-available'
+        | 'downloading'
+        | 'downloaded'
+        | 'error';
+      currentVersion: string;
+      availableVersion?: string;
+      error?: string;
+      downloadProgressPercent?: number;
+      releaseNotes?: string;
+      checkedAt?: string;
+    }>;
+    /** Quit the app and install the downloaded update. Only succeeds after status==='downloaded'. */
+    install: () => Promise<{ success: boolean; error?: string }>;
+    /** Subscribe to live updater status pushes; returns an unsubscribe fn. */
+    onStatus: (cb: (status: any) => void) => () => void;
+  };
   files: {
     saveTextWithDialog: (opts: {
       defaultFilename: string;

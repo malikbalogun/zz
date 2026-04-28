@@ -30,6 +30,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "electron-log": "^5.4.3",
+    "electron-updater": "^6.8.3",
     "node-forge": "^1.4.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
@@ -59,21 +61,30 @@
     },
     "files": [
       "dist/**/*",
-      "package.json",
-      "node_modules/node-forge/**/*"
+      "package.json"
     ],
     "asar": true,
     "asarUnpack": [
       "node_modules/node-forge/**/*"
     ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "malikbalogun",
+        "repo": "zz",
+        "releaseType": "release"
+      }
+    ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] },
         { "target": "zip", "arch": ["x64", "arm64"] }
       ]
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         { "target": "nsis", "arch": ["x64"] }
       ],
@@ -88,6 +99,7 @@
       "shortcutName": "Panel Manager"
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         { "target": "AppImage", "arch": ["x64"] }
       ]

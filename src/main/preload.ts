@@ -205,6 +205,16 @@ contextBridge.exposeInMainWorld('electron', {
   // Updater
   updater: {
     check: () => ipcRenderer.invoke('updater:check'),
+    /** Snapshot of the most recent autoUpdater state (idle/checking/downloading/etc). */
+    status: () => ipcRenderer.invoke('updater:status'),
+    /** Quit the app and apply the staged update. Only succeeds after status === 'downloaded'. */
+    install: () => ipcRenderer.invoke('updater:install'),
+    /** Subscribe to live updater status changes pushed from main. */
+    onStatus: (cb: (status: any) => void) => {
+      const listener = (_event: unknown, payload: unknown) => cb(payload);
+      ipcRenderer.on('updater:status', listener);
+      return () => ipcRenderer.removeListener('updater:status', listener);
+    },
   },
 
   // Microsoft Graph OAuth (main process, no CORS)
