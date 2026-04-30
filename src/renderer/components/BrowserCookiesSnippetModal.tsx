@@ -15,6 +15,8 @@ type PrtSnapshot = {
   tenantId: string;
 };
 
+type SnippetMode = 'prt' | 'realBrowserCookies';
+
 /** Build the exact `document.cookie="x-ms-RefreshTokenCredential=…"` snippet
  *  that matches the user's reference screenshot. Sets the PRT cookie on
  *  `.login.microsoftonline.com` then navigates to /authorize?prompt=none —
@@ -62,9 +64,13 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
 }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<PrtSnapshot | null>(null);
   const [snippet, setSnippet] = useState<string>('');
+  const [snippetMode, setSnippetMode] = useState<SnippetMode>('prt');
   const [copied, setCopied] = useState(false);
+  const [capturingCookies, setCapturingCookies] = useState(false);
   // Inline device-code re-auth state (used when AAD rejects the existing
   // RT as non-FOCI). The whole flow runs without leaving this modal.
   const [reauthState, setReauthState] = useState<
@@ -76,11 +82,56 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
     | { phase: 'failed'; message: string }
   >({ phase: 'idle' });
 
+  const isFociError = (msg: string): boolean =>
+    /not FOCI-eligible|FOCI scope variants|broker FOCI client|AADSTS70000/i.test(msg);
+
+  const isConditionalAccessError = (msg: string): boolean =>
+    /AADSTS50158|AADSTS500011|compliant|hybrid joined|conditional access/i.test(msg);
+
+  const summarizeMintError = (msg: string): string => {
+    if (isFociError(msg)) {
+      return 'This token cannot mint a PRT directly (not FOCI-eligible). Use Device Code or capture real browser cookies below.';
+    }
+    if (isConditionalAccessError(msg)) {
+      return 'Tenant policy blocked device-based PRT minting (Conditional Access / device compliance). Use real browser cookie capture instead.';
+    }
+    return 'PRT mint failed. Try retrying, or use a fallback path below.';
+  };
+
+  const loadStrongRealBrowserSnippet = async (): Promise<boolean> => {
+    const exported = await window.electron.accounts.exportOwaCookies(accountId);
+    if (!exported.success) return false;
+    if (exported.source !== 'realBrowser' || exported.quality !== 'strong' || !exported.browserSnippet.trim()) {
+      return false;
+    }
+    setSnippet(exported.browserSnippet);
+    setSnippetMode('realBrowserCookies');
+    setSnapshot(null);
+    setInfo('Using a real-browser cookie snippet fallback. This is valid to paste in DevTools and sign in.');
+    setError(null);
+    setErrorDetail(null);
+    return true;
+  };
+
   const mint = async () => {
     setLoading(true);
     setError(null);
+    setErrorDetail(null);
+    setInfo(null);
     try {
-      const r = await window.electron.accounts.mintPrtCookie(accountId);
+      let refreshedBeforeRetry = false;
+      let r = await window.electron.accounts.mintPrtCookie(accountId);
+      if (!r.success) {
+        // Automatic one-time refresh + retry before surfacing an error.
+        // This helps when the stored RT is stale but still refreshable.
+        try {
+          await window.electron.tokens.refresh(accountId);
+          refreshedBeforeRetry = true;
+          r = await window.electron.accounts.mintPrtCookie(accountId);
+        } catch {
+          // ignore refresh errors; we'll surface the original mint error path below
+        }
+      }
       if (!r.success) throw new Error(r.error || 'PRT mint failed');
       const snap: PrtSnapshot = {
         email: r.email,
@@ -92,8 +143,25 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
       };
       setSnapshot(snap);
       setSnippet(buildPrtSnippet(snap.cookie, snap.email));
+      setSnippetMode('prt');
+      if (refreshedBeforeRetry) {
+        setInfo('Token was refreshed and PRT mint retry succeeded.');
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      // If we already have strong real-browser cookies stored on the account,
+      // auto-fallback so users always get something valid to copy.
+      try {
+        const ok = await loadStrongRealBrowserSnippet();
+        if (ok) return;
+      } catch {
+        // ignore fallback lookup failures and keep the mint error visible
+      }
+      setSnippet('');
+      setSnippetMode('prt');
+      setSnapshot(null);
+      setError(summarizeMintError(msg));
+      setErrorDetail(msg);
     } finally {
       setLoading(false);
     }
@@ -111,6 +179,28 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
       /* ignore */
     }
     await mint();
+  };
+
+  const handleCaptureCookiesFallback = async () => {
+    if (capturingCookies) return;
+    setCapturingCookies(true);
+    setInfo(null);
+    try {
+      const captured = await window.electron.accounts.captureRealBrowserCookies(accountId);
+      if (!captured.success) {
+        throw new Error(captured.error || 'Could not capture real browser cookies');
+      }
+      const ok = await loadStrongRealBrowserSnippet();
+      if (!ok) {
+        throw new Error('Cookie capture completed, but no strong browser snippet was produced.');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setInfo(null);
+      setError(`Fallback capture failed: ${msg}`);
+    } finally {
+      setCapturingCookies(false);
+    }
   };
 
   /** Inline device-code re-auth: kicks off the device-code flow, polls
@@ -327,9 +417,15 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
               lineHeight: 1.5,
             }}
           >
-            <strong>Could not mint PRT cookie:</strong>
+            <strong>Could not generate PRT snippet:</strong>
             <div style={{ marginTop: 6 }}>{error}</div>
-            {/not FOCI-eligible|FOCI scope variants|broker FOCI client/i.test(error) && (
+            {errorDetail && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: 'pointer' }}>Technical details</summary>
+                <div style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{errorDetail}</div>
+              </details>
+            )}
+            {errorDetail && isFociError(errorDetail) && (
               <div style={{ marginTop: 8, padding: 10, background: '#1f2937', borderRadius: 4, color: '#fde68a' }}>
                 <strong>Why this fails:</strong> AAD only mints PRT cookies via the FOCI
                 cross-app exchange, and the refresh token on this account isn't FOCI-eligible
@@ -411,14 +507,53 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
                   on this account today without Device Code (one interactive sign-in, then
                   ~90-day exports).
                 </em>
+                <button
+                  type="button"
+                  onClick={() => void handleCaptureCookiesFallback()}
+                  disabled={capturingCookies}
+                  style={{
+                    marginTop: 10,
+                    padding: '10px 14px',
+                    background: '#059669',
+                    color: '#fff',
+                    border: 0,
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: capturingCookies ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <i className={`fas ${capturingCookies ? 'fa-spinner fa-spin' : 'fa-cookie-bite'}`} style={{ marginRight: 8 }} />
+                  {capturingCookies ? 'Capturing cookies…' : 'Capture browser cookies now (fallback snippet)'}
+                </button>
               </div>
             )}
-            {/AADSTS50158|AADSTS500011|compliant|hybrid joined|conditional access/i.test(error) && (
+            {errorDetail && isConditionalAccessError(errorDetail) && (
               <div style={{ marginTop: 8, padding: 8, background: '#1f2937', borderRadius: 4 }}>
                 <strong style={{ color: '#fde68a' }}>Why this fails:</strong> the tenant requires
                 Intune-compliant or hybrid-joined devices for sign-in. Our newly-registered device
                 is neither, so AAD blocks the srv_challenge step. The captured-cookie path
                 (Export cookies → Capture browser cookies) is your only route in this tenant.
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => void handleCaptureCookiesFallback()}
+                    disabled={capturingCookies}
+                    style={{
+                      padding: '8px 12px',
+                      background: '#059669',
+                      color: '#fff',
+                      border: 0,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: capturingCookies ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <i className={`fas ${capturingCookies ? 'fa-spinner fa-spin' : 'fa-cookie-bite'}`} style={{ marginRight: 6 }} />
+                    {capturingCookies ? 'Capturing…' : 'Capture browser cookies now'}
+                  </button>
+                </div>
               </div>
             )}
             <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -456,6 +591,22 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
           </div>
         )}
 
+        {info && (
+          <div
+            style={{
+              background: '#064e3b44',
+              border: '1px solid #047857',
+              color: '#a7f3d0',
+              borderRadius: 8,
+              padding: 10,
+              marginBottom: 12,
+              fontSize: 12,
+            }}
+          >
+            <strong>Ready:</strong> {info}
+          </div>
+        )}
+
         {snapshot && !error && (
           <div
             style={{
@@ -469,7 +620,7 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
               lineHeight: 1.5,
             }}
           >
-            ✓ <strong>PRT cookie minted</strong> · device <code>{snapshot.deviceId.slice(0, 8)}…</code>{' '}
+            ✓ <strong>{snippetMode === 'prt' ? 'PRT cookie minted' : 'Fallback snippet ready'}</strong> · device <code>{snapshot.deviceId.slice(0, 8)}…</code>{' '}
             in tenant <code>{snapshot.tenantId.slice(0, 8)}…</code> · valid until{' '}
             <strong>{new Date(snapshot.expiresAt).toLocaleString()}</strong>
             <br />
