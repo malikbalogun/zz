@@ -98,6 +98,9 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
     return 'PRT mint failed. Try retrying, or use a fallback path below.';
   };
 
+  const shorten = (msg: string, max: number = 1600): string =>
+    msg.length > max ? `${msg.slice(0, max)}…` : msg;
+
   const loadStrongRealBrowserSnippet = async (): Promise<boolean> => {
     const exported = await window.electron.accounts.exportOwaCookies(accountId);
     if (!exported.success) return false;
@@ -157,11 +160,27 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
       } catch {
         // ignore fallback lookup failures and keep the mint error visible
       }
+      // If no prior strong cookies exist, proactively kick off a one-time
+      // interactive capture so the user can still get a valid snippet in the
+      // same flow without manually finding another action.
+      if (isFociError(msg) || isConditionalAccessError(msg)) {
+        try {
+          setInfo('PRT mint blocked. Opening interactive sign-in to capture real browser cookies…');
+          const captured = await window.electron.accounts.captureRealBrowserCookies(accountId);
+          if (captured.success) {
+            const ok = await loadStrongRealBrowserSnippet();
+            if (ok) return;
+          }
+        } catch {
+          // ignore; normal error UI below still includes manual fallback actions
+        }
+      }
       setSnippet('');
       setSnippetMode('prt');
       setSnapshot(null);
       setError(summarizeMintError(msg));
-      setErrorDetail(msg);
+      setErrorDetail(shorten(msg));
+      setInfo(null);
     } finally {
       setLoading(false);
     }
