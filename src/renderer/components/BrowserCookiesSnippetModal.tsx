@@ -244,7 +244,7 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 }}>
           <h2 style={{ margin: 0, fontSize: 20 }}>
             <span style={{ marginRight: 8 }}>🔑</span>
-            Browser Cookies — {email}
+            Generate document.cookie from token — {email}
           </h2>
           <button
             className="icon-btn"
@@ -268,6 +268,10 @@ const BrowserCookiesSnippetModal: React.FC<BrowserCookiesSnippetModalProps> = ({
           }}
         >
           <strong style={{ color: '#dbeafe' }}>Instructions:</strong>
+          <div style={{ marginTop: 6, fontSize: 12, color: '#dbeafe' }}>
+            We mint a PRT cookie from this account's refresh token and build a ready-to-run
+            <code style={{ marginLeft: 4 }}>document.cookie=...</code> snippet.
+          </div>
           <ol style={{ margin: '8px 0 0 0', paddingLeft: 18 }}>
             <li>
               Open a new tab → navigate to{' '}

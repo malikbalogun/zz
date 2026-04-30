@@ -339,11 +339,10 @@ const AccountsView: FC<AccountsViewProps> = ({
     setCookieExportTarget({ id: accountId, email: account?.email || accountId });
   };
 
-  // Standalone "Browser cookies" snippet modal — matches the simple
-  // PRT-style "paste in console" UX. Builds a one-liner from the captured
-  // ESTSAUTH cookies (closest possible to a real PRT cookie without
-  // device-registration shenanigans) that runs on
-  // login.microsoftonline.com and redirects to the inbox.
+  // Standalone "token -> document.cookie" modal. This mints an
+  // x-ms-RefreshTokenCredential (PRT) cookie from the account's stored
+  // refresh token, then gives the user a console snippet they can paste on
+  // login.microsoftonline.com to finish silent sign-in.
   const handleBrowserCookiesSnippet = (accountId: string) => {
     const account = accounts.find(a => a.id === accountId);
     setBrowserCookiesSnippetTarget({ id: accountId, email: account?.email || accountId });
@@ -967,9 +966,9 @@ const AccountsView: FC<AccountsViewProps> = ({
                             setDropdownPosition(null);
                             handleBrowserCookiesSnippet(account.id);
                           }}
-                          title="Get a one-line console snippet you can paste on login.microsoftonline.com to be auto-redirected and signed in as this account. Uses captured ESTSAUTH cookies."
+                          title="Generate a document.cookie snippet from this account's refresh token (PRT flow). Paste on login.microsoftonline.com to auto-redirect and sign in."
                         >
-                          <i className="fas fa-key"></i> Browser cookies (console snippet)
+                          <i className="fas fa-key"></i> Generate document.cookie (from token)
                         </div>
                       )}
                       {account.auth?.type === 'token' && (
